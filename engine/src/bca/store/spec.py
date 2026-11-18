@@ -6,10 +6,12 @@ import os
 import re
 import tempfile
 import time
-from contextlib import suppress
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path, PurePath, PureWindowsPath
 from typing import Literal, cast
+
+from .fsutil import retry_win_sharing
 
 Speaker = Literal["learner", "advisor", "any"]
 ConditionOp = Literal["eq", "ne", "in", "not_in", "lt", "le", "gt", "ge", "is_null", "not_null", "contains"]
@@ -561,13 +563,15 @@ def _sample_size(data: dict[str, object]) -> int:
 
 
 def save_spec(spec: JobSpec, job_dir: Path) -> Path:
+    # Validate caller-constructed specs before creating the lock or any temp file.
+    validated = JobSpec.from_dict(spec.to_dict())
     job_dir.mkdir(parents=True, exist_ok=True)
     # The lock is deliberately a file created exclusively so separate processes share it.
     lock_path = job_dir / ".spec.lock"
     while True:
         try:
-            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(lock_fd)
+            with retry_win_sharing(partial(lock_path.open, "x")):
+                pass
             break
         except FileExistsError:
             time.sleep(0.001)
@@ -580,29 +584,37 @@ def save_spec(spec: JobSpec, job_dir: Path) -> Path:
                 version = max(version, int(match.group(1)) + 1)
         while True:
             target = job_dir / f"spec.v{version}.json"
-            fd, name = tempfile.mkstemp(prefix=".spec.", suffix=".tmp", dir=job_dir)
+            candidate = JobSpec.from_dict(validated.to_dict() | {"spec_version": version})
+            fd, name = retry_win_sharing(
+                partial(tempfile.mkstemp, prefix=".spec.", suffix=".tmp", dir=job_dir)
+            )
+            temp_removed = False
             try:
-                candidate = JobSpec.from_dict(spec.to_dict() | {"spec_version": version})
                 with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
                     json.dump(candidate.to_dict(), handle, indent=2)
                     handle.write("\n")
                     handle.flush()
                     os.fsync(handle.fileno())
                 try:
-                    with target.open("x", encoding="utf-8", newline="\n") as handle:
-                        handle.write(Path(name).read_text(encoding="utf-8"))
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    os.unlink(name)
+
+                    def create_target(target_path: Path, temp_name: str) -> None:
+                        content = Path(temp_name).read_text(encoding="utf-8")
+                        with target_path.open("x", encoding="utf-8", newline="\n") as handle:
+                            handle.write(content)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+
+                    retry_win_sharing(partial(create_target, target, name))
+                    retry_win_sharing(partial(os.unlink, name))
+                    temp_removed = True
                     return target
                 except FileExistsError:
                     version += 1
             finally:
-                with suppress(OSError):
-                    os.unlink(name)
+                if not temp_removed:
+                    retry_win_sharing(partial(os.unlink, name))
     finally:
-        with suppress(OSError):
-            lock_path.unlink()
+        retry_win_sharing(lock_path.unlink)
 
 
 def load_latest_spec(job_dir: Path) -> tuple[JobSpec, int]:

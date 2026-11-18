@@ -355,6 +355,8 @@ def test_save_spec_validates_directly_built_spec_and_ignores_stray_copy(tmp_path
     with pytest.raises(SpecError):
         save_spec(invalid, tmp_path / "invalid")
     assert not (tmp_path / "invalid" / "spec.v1.json").exists()
+    assert not list((tmp_path / "invalid").glob("*.tmp"))
+    assert not list((tmp_path / "invalid").glob("*.lock"))
 
 
 def test_concurrent_save_spec_assigns_eight_distinct_versions(tmp_path: Path) -> None:
@@ -376,6 +378,28 @@ def test_concurrent_save_spec_assigns_eight_distinct_versions(tmp_path: Path) ->
         thread.join()
     assert errors == []
     assert {path.name for path in results} == {f"spec.v{i}.json" for i in range(1, 9)}
+
+
+def test_concurrent_save_spec_stress_assigns_48_distinct_versions(tmp_path: Path) -> None:
+    barrier = threading.Barrier(16)
+    results: list[Path] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            barrier.wait()
+            for _ in range(3):
+                results.append(save_spec(make_spec(), tmp_path))
+        except BaseException as exc:  # pragma: no cover - assertion below reports it
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert {path.name for path in results} == {f"spec.v{i}.json" for i in range(1, 49)}
 
 
 @pytest.mark.parametrize(
