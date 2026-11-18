@@ -31,15 +31,52 @@ def test_preflight_buckets_reconcile_and_errors_raise(tmp_path: Path) -> None:
         db.add_lead("j", lead)
     rows = [
         [
-            {"lead_id": "1", "found": True, "calls": 1, "usable_calls": 1, "transcription_failed": 0},
-            {"lead_id": "2", "found": False, "calls": 0, "usable_calls": 0, "transcription_failed": 0},
-            {"lead_id": "3", "found": True, "calls": 1, "usable_calls": 0, "transcription_failed": 1},
-            {"lead_id": "4", "found": True, "calls": 0, "usable_calls": 0, "transcription_failed": 0},
-            {"lead_id": "5", "found": True, "calls": 1, "usable_calls": 0, "transcription_failed": 0},
+            {
+                "lead_id": "1",
+                "found": True,
+                "calls": 1,
+                "transcript_calls": 1,
+                "usable_calls": 1,
+                "transcription_failed": 0,
+            },
+            {
+                "lead_id": "2",
+                "found": False,
+                "calls": 0,
+                "transcript_calls": 0,
+                "usable_calls": 0,
+                "transcription_failed": 0,
+            },
+            {
+                "lead_id": "3",
+                "found": True,
+                "calls": 1,
+                "transcript_calls": 1,
+                "usable_calls": 0,
+                "transcription_failed": 1,
+            },
+            {
+                "lead_id": "4",
+                "found": True,
+                "calls": 1,
+                "transcript_calls": 0,
+                "usable_calls": 0,
+                "transcription_failed": 0,
+            },
+            {
+                "lead_id": "5",
+                "found": True,
+                "calls": 1,
+                "transcript_calls": 1,
+                "usable_calls": 0,
+                "transcription_failed": 0,
+            },
         ]
     ]
     runner = FakeBqRunner(rows, dry=__import__("bca.bq.runner", fromlist=["DryRun"]).DryRun(7, [], []))
-    result = run_preflight(recipe(), UsableRule(), "all", None, ["1", "2", "3", "4", "5"], runner, db, "j")
+    result = run_preflight(
+        recipe(), UsableRule(), "all", None, ["1", "2", "3", "4", "5"], runner, db, "j", BigQueryConfig("p")
+    )
     assert result.buckets == {
         "usable": 1,
         "no_transcript": 1,
@@ -50,7 +87,7 @@ def test_preflight_buckets_reconcile_and_errors_raise(tmp_path: Path) -> None:
     assert db.rows("SELECT status FROM leads WHERE job_id='j' AND lead_id='2'")[0][0] == LeadStatus.not_found
     runner.error = RuntimeError("query failed")
     with pytest.raises(RuntimeError):
-        run_preflight(recipe(), UsableRule(), "all", None, ["1"], runner, db, "j")
+        run_preflight(recipe(), UsableRule(), "all", None, ["1"], runner, db, "j", BigQueryConfig("p"))
 
 
 def test_pull_streams_and_rejects_unapproved_scan(tmp_path: Path) -> None:
@@ -90,3 +127,39 @@ def test_bundle_cap_numbers_calls_and_records_drops(
     bundle = build_bundle("1", calls, CapRule(max_chars=5, policy=policy, drop_short_s=2))
     assert bundle.calls_sent + len(bundle.calls_dropped) == 2
     assert "CALL 1 of 1" in bundle.text
+
+
+def test_millisecond_durations_drive_cap_and_headers() -> None:
+    calls = [
+        {"call_id": "long_old", "call_start": "2026-01-01", "duration": 1_200_000, "transcript_text": "aaaa"},
+        {"call_id": "long_new", "call_start": "2026-01-02", "duration": 1_200_000, "transcript_text": "bbbb"},
+        {"call_id": "short", "call_start": "2026-01-03", "duration": 60_000, "transcript_text": "ccccc"},
+    ]
+    bundle = build_bundle("1", calls, CapRule(10, "drop_short_then_oldest", 180), "ms")
+    assert bundle.calls_dropped == ["short"]
+    assert "1200.0 s" in bundle.text
+
+
+def test_empty_lead_is_not_marked_pulled(tmp_path: Path) -> None:
+    db = store(tmp_path)
+    db.add_lead("j", "1")
+    db.add_lead("j", "2")
+    from bca.bq.runner import DryRun
+
+    runner = FakeBqRunner([[{"lead_id": "1", "call_id": "c", "transcript_text": "x"}]], DryRun(1, [], []))
+    pull_transcripts(BigQueryConfig("p"), recipe(), ["1", "2"], runner, db, "j", tmp_path / "out")
+    statuses = db.rows("SELECT lead_id, status, calls_pulled FROM leads ORDER BY lead_id")
+    assert [(row[0], row[1], row[2]) for row in statuses] == [("1", "pulled", 1), ("2", "no_transcript", 0)]
+
+
+def test_preflight_rejects_unapproved_scan_before_execution(tmp_path: Path) -> None:
+    db = store(tmp_path)
+    db.add_lead("j", "1")
+    from bca.bq.runner import DryRun
+
+    runner = FakeBqRunner([], DryRun(11, [], []))
+    with pytest.raises(PermissionError):
+        run_preflight(
+            recipe(), UsableRule(), "all", None, ["1"], runner, db, "j", BigQueryConfig("p", reject_bytes=10)
+        )
+    assert len(runner.calls) == 1

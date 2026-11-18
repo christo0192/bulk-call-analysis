@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import gzip
 import json
-from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -52,10 +51,6 @@ def _number(value: object, default: int = 0) -> int:
     return int(value) if isinstance(value, (int, float, str)) else default
 
 
-def _decimal(value: object, default: float = 0.0) -> float:
-    return float(value) if isinstance(value, (int, float, str)) else default
-
-
 def run_preflight(
     recipe: RecipeConfig,
     usable_rule: UsableRule,
@@ -65,10 +60,14 @@ def run_preflight(
     runner: BqRunner,
     store: Store,
     job_id: str,
+    cfg: BigQueryConfig,
+    approved_bytes: int | None = None,
 ) -> Preflight:
     sql, params, _ = preflight_sql(recipe, usable_rule, scope, window)
     params["lead_ids"] = lead_ids
     dry = runner.dry_run(sql, params)
+    if dry.bytes > cfg.reject_bytes and (approved_bytes is None or approved_bytes < dry.bytes):
+        raise PermissionError("scan exceeds reject_bytes without operator approval")
     rows = [row for page in runner.iter_pages(sql, params, 1000) for row in page]
     by_id = {str(row["lead_id"]): row for row in rows}
     if set(by_id) != set(lead_ids):
@@ -80,9 +79,10 @@ def run_preflight(
     for lead_id in lead_ids:
         row = by_id[lead_id]
         found = bool(row.get("found"))
-        calls = _number(row.get("calls", 0))
-        usable = _number(row.get("usable_calls", 0))
-        failed = _number(row.get("transcription_failed", 0))
+        _number(row["calls"])
+        transcript_calls = _number(row["transcript_calls"])
+        usable = _number(row["usable_calls"])
+        failed = _number(row["transcription_failed"])
         bucket = (
             "not_found"
             if not found
@@ -91,7 +91,7 @@ def run_preflight(
             else "transcription_failed"
             if failed
             else "no_transcript"
-            if calls == 0
+            if transcript_calls == 0
             else "too_short"
         )
         buckets[bucket] += 1
@@ -124,32 +124,56 @@ def pull_transcripts(
         raise PermissionError("scan exceeds reject_bytes without operator approval")
     raw_dir = out_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    files: dict[str, object] = {}
     counts: dict[str, int] = {lead_id: 0 for lead_id in lead_ids}
-    with ExitStack() as stack:
+    current_id: str | None = None
+    handle = None
+    requested = set(lead_ids)
+    try:
         for page in runner.iter_pages(sql, params, page_size):
             for call in page:
                 lead_id = str(call["lead_id"])
-                handle = files.get(lead_id)
-                if handle is None:
-                    handle = stack.enter_context(
-                        gzip.open(raw_dir / f"{lead_id}.jsonl.gz", "wt", encoding="utf-8")
+                if lead_id not in requested:
+                    raise RuntimeError(f"pull returned unrequested lead {lead_id!r}")
+                if current_id != lead_id:
+                    if handle is not None:
+                        handle.close()
+                    handle = gzip.open(  # noqa: SIM115
+                        raw_dir / f"{lead_id}.jsonl.gz", "wt", encoding="utf-8"
                     )
-                    files[lead_id] = handle
-                assert hasattr(handle, "write")
+                    current_id = lead_id
+                assert handle is not None
                 handle.write(json.dumps(call, default=str, ensure_ascii=False) + "\n")
-                counts[lead_id] = counts.get(lead_id, 0) + 1
-    for lead_id, count in counts.items():
-        store.set_lead_status(job_id, lead_id, LeadStatus.pulled)
-        with store.transaction() as cur:
+                counts[lead_id] += 1
+    finally:
+        if handle is not None:
+            handle.close()
+    with store.transaction() as cur:
+        for lead_id, count in counts.items():
+            status = LeadStatus.pulled if count else LeadStatus.no_transcript
             cur.execute(
-                "UPDATE leads SET calls_pulled=? WHERE job_id=? AND lead_id=?", (count, job_id, lead_id)
+                "UPDATE leads SET status=?, calls_pulled=? WHERE job_id=? AND lead_id=?",
+                (str(status), count, job_id, lead_id),
             )
     return PullStats(sum(counts.values()), sum(1 for count in counts.values() if count), dry.bytes)
 
 
-def build_bundle(lead_id: str, calls: Iterable[dict[str, object]], cap: CapRule) -> Bundle:
-    ordered = sorted(calls, key=lambda call: str(call.get("call_start", "")))
+def _start_key(value: object) -> tuple[int, object]:
+    if value is None or value == "":
+        return (1, "")
+    if isinstance(value, (datetime, date)):
+        return (0, value.isoformat())
+    if isinstance(value, (int, float)):
+        return (0, value)
+    try:
+        return (0, datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return (0, str(value))
+
+
+def build_bundle(
+    lead_id: str, calls: Iterable[dict[str, object]], cap: CapRule, duration_unit: str = "s"
+) -> Bundle:
+    ordered = sorted(calls, key=lambda call: _start_key(call.get("call_start")))
     dropped: list[str] = []
 
     def chars(items: list[dict[str, object]]) -> int:
@@ -162,7 +186,7 @@ def build_bundle(lead_id: str, calls: Iterable[dict[str, object]], cap: CapRule)
     else:
         while kept and chars(kept) > cap.max_chars:
             short = next(
-                (i for i, call in enumerate(kept) if _decimal(call.get("duration", 0)) < cap.drop_short_s),
+                (i for i, call in enumerate(kept) if _duration(call, duration_unit) < cap.drop_short_s),
                 None,
             )
             index = 0 if short is None else short
@@ -172,7 +196,7 @@ def build_bundle(lead_id: str, calls: Iterable[dict[str, object]], cap: CapRule)
         start = call.get("call_start", "")
         if isinstance(start, (datetime, date)):
             start = start.isoformat()
-        duration = call.get("duration", 0)
+        duration = _duration(call, duration_unit)
         blocks.append(
             f"=== CALL {number} of {len(kept)} | {start} | {duration} s ===\n"
             f"{call.get('transcript_text', '')}"

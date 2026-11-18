@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from openpyxl import load_workbook
 
+from bca.config import BigQueryConfig
 from bca.store import LeadStatus, Store
 from bca.store.spec import LeadSourceIds, LeadSourceSql
 
@@ -27,7 +28,7 @@ class IdIntake:
     malformed: list[str]
 
 
-_ID = re.compile(r"^\d+$")
+_ID = re.compile(r"^[0-9]+$", re.ASCII)
 
 
 def _intake(values: Iterable[object]) -> IdIntake:
@@ -37,6 +38,8 @@ def _intake(values: Iterable[object]) -> IdIntake:
     ids: list[str] = []
     seen: set[str] = set()
     for value in values:
+        if value is None:
+            continue
         text = str(value).strip()
         if not text:
             continue
@@ -51,23 +54,23 @@ def _intake(values: Iterable[object]) -> IdIntake:
     return IdIntake(raw, ids, duplicate, malformed)
 
 
-def _rows_csv(text: str) -> list[object]:
-    rows = list(csv.reader(io.StringIO(text)))
+def _rows_csv(text: str) -> list[str]:
+    rows = [row for row in csv.reader(io.StringIO(text)) if any(cell.strip() for cell in row)]
     if not rows:
         return []
     headers = [cell.strip().lower() for cell in rows[0]]
     preferred = next((i for i, name in enumerate(headers) if name in {"lead_id", "id", "hubspot_id"}), None)
     if preferred is not None:
         return [row[preferred] for row in rows[1:] if len(row) > preferred]
-    columns = list(zip(*rows, strict=False))
-    candidates = [
-        column for column in columns if any(_ID.fullmatch(cell.strip()) for cell in column if cell.strip())
-    ]
-    return list(candidates[0]) if candidates else []
+    for index in range(max(len(row) for row in rows)):
+        column = [row[index] if index < len(row) else "" for row in rows]
+        if any(_ID.fullmatch(cell.strip()) for cell in column if cell.strip()):
+            return column[1:] if not _ID.fullmatch(column[0].strip()) else column
+    return []
 
 
-def parse_id_list(path_or_text: str | Path) -> IdIntake:
-    path = Path(path_or_text)
+def parse_id_file(path: Path) -> IdIntake:
+    path = Path(path)
     if path.is_file():
         suffix = path.suffix.lower()
         if suffix == ".xlsx":
@@ -93,10 +96,24 @@ def parse_id_list(path_or_text: str | Path) -> IdIntake:
                     ),
                     0,
                 )
-            return _intake(row[preferred] for row in rows[1:] if len(row) > preferred)
-        text = path.read_text(encoding="utf-8")
+            first_is_id = (
+                _ID.fullmatch(str(rows[0][preferred]).strip()) if rows[0][preferred] is not None else None
+            )
+            source_rows = rows if first_is_id else rows[1:]
+            return _intake(row[preferred] for row in source_rows if len(row) > preferred)
+        text = path.read_text(encoding="utf-8-sig")
         return _intake(_rows_csv(text) if suffix == ".csv" else re.split(r"[\s,]+", text))
-    return _intake(re.split(r"[\s,]+", str(path_or_text)))
+    raise FileNotFoundError(path)
+
+
+def parse_id_text(text: str) -> IdIntake:
+    return _intake(re.split(r"[\s,]+", text.lstrip("\ufeff")))
+
+
+def parse_id_list(path_or_text: str | Path) -> IdIntake:
+    if isinstance(path_or_text, Path):
+        return parse_id_file(path_or_text)
+    return parse_id_text(path_or_text)
 
 
 class LeadSourceError(ValueError):
@@ -104,9 +121,8 @@ class LeadSourceError(ValueError):
 
 
 def check_single_id_column(runner: BqRunner, user_sql: str) -> None:
-    sql, params, _ = lead_source_sql(user_sql)
-    result = runner.dry_run(sql, params)
-    if result.schema != [("lead_id", "STRING")]:
+    result = runner.dry_run(user_sql.strip().removesuffix(";").rstrip(), {})
+    if len(result.schema) != 1 or result.schema[0][1] != "STRING":
         raise LeadSourceError("lead source must return exactly one STRING lead_id column")
 
 
@@ -115,7 +131,9 @@ def resolve_lead_source(
     runner: BqRunner,
     store: Store,
     job_dir: Path,
+    cfg: BigQueryConfig,
     job_id: str | None = None,
+    approved_bytes: int | None = None,
 ) -> IdIntake:
     effective_job = job_id or job_dir.name
     if isinstance(spec, LeadSourceIds):
@@ -123,6 +141,9 @@ def resolve_lead_source(
     else:
         check_single_id_column(runner, spec.sql)
         sql, params, _ = lead_source_sql(spec.sql)
+        dry = runner.dry_run(sql, params)
+        if dry.bytes > cfg.reject_bytes and (approved_bytes is None or approved_bytes < dry.bytes):
+            raise PermissionError("scan exceeds reject_bytes without operator approval")
         values: list[object] = []
         for page in runner.iter_pages(sql, params, 1000):
             values.extend(row.get("lead_id", "") for row in page)
@@ -133,6 +154,9 @@ def resolve_lead_source(
             "VALUES (?, ?, ?, ?, ?)",
             (effective_job, intake.raw_count, len(intake.ids), intake.duplicates, len(intake.malformed)),
         )
-    for lead_id in intake.ids:
-        store.add_lead(effective_job, lead_id, LeadStatus.pending)
+        for lead_id in intake.ids:
+            cur.execute(
+                "INSERT OR IGNORE INTO leads(job_id, lead_id, status) VALUES (?, ?, ?)",
+                (effective_job, lead_id, str(LeadStatus.pending)),
+            )
     return intake

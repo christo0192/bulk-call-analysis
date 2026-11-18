@@ -10,7 +10,7 @@ from google.oauth2 import service_account
 
 from bca.config import BigQueryConfig
 
-from .guard import assert_job_config_read_only, validate_select
+from .guard import ReadOnlyViolation, assert_job_config_read_only, validate_select
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,7 @@ class DryRun:
     bytes: int
     referenced_tables: list[str]
     schema: list[tuple[str, str]]
+    statement_type: str = "SELECT"
 
 
 class BqRunner(Protocol):
@@ -62,14 +63,19 @@ class GoogleBqRunner:
     def dry_run(self, sql: str, params: Mapping[str, object] | None = None) -> DryRun:
         validate_select(sql)
         job = self._client.query(sql, job_config=self._config(params, dry_run=True))
+        statement_type = str(getattr(job, "statement_type", ""))
+        if statement_type != "SELECT":
+            raise ReadOnlyViolation("BigQuery did not classify the query as SELECT")
         schema = [(field.name, field.field_type) for field in (job.schema or [])]
         tables = [str(item.table_id) for item in job.referenced_tables or []]
-        return DryRun(int(job.total_bytes_processed or 0), tables, schema)
+        return DryRun(int(job.total_bytes_processed or 0), tables, schema, statement_type)
 
     def iter_pages(
         self, sql: str, params: Mapping[str, object] | None = None, page_size: int = 1000
     ) -> Iterator[list[dict[str, object]]]:
-        validate_select(sql)
+        # Keep the check here: callers cannot execute a query without a fresh
+        # dry-run of the exact text that will be sent to BigQuery.
+        self.dry_run(sql, params)
         result = self._client.query(sql, job_config=self._config(params)).result(page_size=page_size)
         page: list[dict[str, object]] = []
         for row in result:

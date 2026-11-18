@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -123,6 +124,16 @@ def _optional_str(data: dict[str, Any], section: str, key: str) -> str | None:
     return value
 
 
+_TABLE = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){2}$")
+_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _identifier(value: str, key: str, pattern: re.Pattern[str]) -> str:
+    if "`" in value or pattern.fullmatch(value) is None:
+        raise _error(key, "contains an invalid identifier")
+    return value
+
+
 def load_config(path: Path) -> SiteConfig:
     try:
         raw = tomllib.loads(path.read_bytes().decode("utf-8-sig"))
@@ -207,6 +218,20 @@ def load_config(path: Path) -> SiteConfig:
     stop = _int(limits, "limits", "codex_stop_percent", 95)
     if not 50 <= stop <= 99:
         raise _error("limits.codex_stop_percent", "must be between 50 and 99")
+    for key in ("transcripts_table", "calls_table"):
+        _identifier(_str(recipe, "recipe", key), f"recipe.{key}", _TABLE)
+    for key in (
+        "lead_id_column",
+        "call_id_column",
+        "transcript_text_column",
+        "call_start_column",
+        "call_duration_column",
+    ):
+        _identifier(_str(recipe, "recipe", key), f"recipe.{key}", _COLUMN)
+    for key in ("advisor_column", "transcript_status_column"):
+        value = _optional_str(recipe, "recipe", key)
+        if value is not None:
+            _identifier(value, f"recipe.{key}", _COLUMN)
     return SiteConfig(
         BigQueryConfig(
             _str(bq, "bigquery", "project"),
