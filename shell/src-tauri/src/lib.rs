@@ -74,6 +74,7 @@ pub fn run() {
                 tray::show_main_window(app.handle())?;
             }
             engine.start();
+            sleepwatch::start(engine.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![engine_call, engine_status])

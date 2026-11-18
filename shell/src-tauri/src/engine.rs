@@ -246,6 +246,16 @@ impl Engine {
     pub async fn status(&self) -> String {
         self.inner.status.lock().await.clone()
     }
+    pub async fn notify(&self, method: &str, params: Value) -> Result<(), RpcError> {
+        let rpc = self
+            .inner
+            .rpc
+            .lock()
+            .await
+            .clone()
+            .ok_or(RpcError::Closed)?;
+        rpc.notify(method, params).await
+    }
     pub async fn shutdown(&self) {
         if self.inner.shutting_down.swap(true, Ordering::AcqRel) {
             return;
