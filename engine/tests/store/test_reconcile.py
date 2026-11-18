@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from bca.store import LeadStatus, open_store, reconcile
+from bca.store.reconcile import reconcile_rows
 
 
 def test_reconciliation_reports_all_imbalances() -> None:
@@ -9,9 +10,12 @@ def test_reconciliation_reports_all_imbalances() -> None:
     store.create_job("j", "p", 1)
     store.add_lead("j", "one", LeadStatus.queued, calls_pulled=2, calls_sent=1, calls_dropped_cap=0)
     store.add_lead("j", "two", LeadStatus.queued, calls_pulled=1, calls_sent=1, calls_dropped_cap=0)
-    store.connection.execute("INSERT INTO leads(job_id, lead_id, status) VALUES ('j', 'two', 'queued')")
     store.connection.execute("INSERT INTO id_intake VALUES ('j', 6, 4, 1, 0)")
-    result = reconcile(store, "j")
+    result = reconcile_rows(
+        [("one", "queued", 2, 1, 0), ("two", "queued", 1, 1, 0), ("two", "queued", 0, 0, 0)],
+        [("two", 2)],
+        (6, 4, 1, 0),
+    )
     assert not result.ok
     assert any("distinct ids" in problem for problem in result.problems)
     assert "call identity mismatch for one" in result.problems

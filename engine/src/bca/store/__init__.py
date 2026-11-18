@@ -11,7 +11,7 @@ from .lifecycle import (
     start_full_run,
     transition,
 )
-from .reconcile import Reconciliation, reconcile
+from .reconcile import Reconciliation, reconcile, reconcile_rows
 from .spec import (
     CapRule,
     Condition,
@@ -55,6 +55,7 @@ __all__ = [
     "open_store",
     "pause",
     "reconcile",
+    "reconcile_rows",
     "resume",
     "save_spec",
     "start_full_run",

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from bca.store import JobState, PauseReason, TransitionError, open_store
+from bca.store import JobState, PauseReason, Store, TransitionError, open_store
 from bca.store.lifecycle import (
     _TRANSITIONS,
     approve_plan,
@@ -16,7 +16,7 @@ from bca.store.lifecycle import (
 )
 
 
-def job(state: JobState) -> object:
+def job(state: JobState) -> Store:
     store = open_store(Path(":memory:"))
     store.create_project("p", "Project")
     store.create_job("j", "p", 1, state)

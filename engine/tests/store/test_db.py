@@ -1,10 +1,13 @@
+import sqlite3
 import threading
 from pathlib import Path
 
-from bca.store import LeadStatus, open_store
+import pytest
+
+from bca.store import LeadStatus, Store, open_store
 
 
-def prepared_store(path: Path | str = ":memory:"):
+def prepared_store(path: Path | str = ":memory:") -> Store:
     store = open_store(Path(path))
     store.create_project("p", "Project")
     store.create_job("j", "p", 1)
@@ -14,13 +17,20 @@ def prepared_store(path: Path | str = ":memory:"):
 def test_migrations_are_applied_and_reopen_is_idempotent(tmp_path: Path) -> None:
     path = tmp_path / "store.sqlite"
     store = prepared_store(path)
-    assert store.rows("PRAGMA user_version")[0][0] == 1
+    assert store.rows("PRAGMA user_version")[0][0] == 2
     assert store.rows("PRAGMA journal_mode")[0][0] == "wal"
     store.close()
     reopened = open_store(path)
     assert reopened.rows("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    assert reopened.rows("PRAGMA user_version")[0][0] == 1
+    assert reopened.rows("PRAGMA user_version")[0][0] == 2
     reopened.close()
+
+
+def test_duplicate_lead_is_rejected() -> None:
+    store = prepared_store()
+    store.add_lead("j", "lead")
+    with pytest.raises(sqlite3.IntegrityError):
+        store.add_lead("j", "lead")
 
 
 def test_attempt_lifecycle_and_queue_order() -> None:
