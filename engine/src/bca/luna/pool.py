@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -64,6 +64,8 @@ class _Lead:
     text: str = ""
     usage: dict[str, Any] | None = None
     done: bool = False
+    outcome_delivered: bool = False
+    pending_action: asyncio.Task[None] | None = None
 
 
 class LunaPool:
@@ -77,6 +79,8 @@ class LunaPool:
         interrupt_grace_s: float = 60,
         recycle_every: int = 500,
         max_consecutive_failures: int = 25,
+        crash_window_s: float = 600,
+        restart_backoff_s: float = 0,
     ) -> None:
         self.launch_factory = launch_factory
         self.callbacks = callbacks
@@ -86,6 +90,8 @@ class LunaPool:
         self.interrupt_grace_s = interrupt_grace_s
         self.recycle_every = max(1, recycle_every)
         self.max_consecutive_failures = max(1, max_consecutive_failures)
+        self.crash_window_s = max(0, crash_window_s)
+        self.restart_backoff_s = max(0, restart_backoff_s)
         self._server: AppServer | None = None
         self._leads: dict[str, _Lead] = {}
         self._by_turn: dict[str, _Lead] = {}
@@ -99,6 +105,7 @@ class LunaPool:
         self._crashes: list[float] = []
         self._models: set[str] = set()
         self._needs_recycle = False
+        self._pending_actions: set[asyncio.Task[None]] = set()
 
     def set_concurrency(self, n: int) -> None:
         self.concurrency = max(1, n)
@@ -144,6 +151,8 @@ class LunaPool:
                     for running_task in running:
                         running_task.cancel()
                     await asyncio.gather(*running, return_exceptions=True)
+            if self._pending_actions:
+                await asyncio.gather(*self._pending_actions, return_exceptions=True)
             if self._server is not None:
                 await self._server.stop()
                 self._server = None
@@ -282,6 +291,8 @@ class LunaPool:
         except Exception as exc:
             await self._fail(lead, "other", True, str(exc))
         finally:
+            if lead.pending_action is not None:
+                await asyncio.gather(lead.pending_action, return_exceptions=True)
             if lead.thread_id is not None:
                 with contextlib.suppress(ConnectionError, BrokenPipeError, RpcError, RpcTimeout):
                     await self._client.request("thread/unsubscribe", {"threadId": lead.thread_id})
@@ -292,6 +303,9 @@ class LunaPool:
     async def _complete_from_events(self, lead: _Lead) -> None:
         deadline = self.lead_timeout_s
         while not lead.done:
+            if self._server is not None and self._server.returncode is not None:
+                await self._crash_or_failure(lead, f"app-server exited with code {self._server.returncode}")
+                return
             await asyncio.sleep(min(0.01, deadline))
             deadline -= 0.01
             if deadline <= 0:
@@ -306,6 +320,7 @@ class LunaPool:
         validator_for(lead.task.output_schema).check_schema(lead.task.output_schema)
         validator = validator_for(lead.task.output_schema)(lead.task.output_schema)
         validator.validate(answer)
+        lead.outcome_delivered = True
         await self.callbacks.on_result(lead.task, answer, lead.model_used or lead.task.model, lead.usage)
         self._completed += 1
         self._consecutive_failures = 0
@@ -326,7 +341,7 @@ class LunaPool:
         if method == "account/rateLimits/updated":
             if self._snapshot is not None:
                 self._snapshot = merge_update(self._snapshot, params)
-                await self._check_quota()
+                self._schedule_action(self._check_quota())
             return
         if method == "model/rerouted" and lead is not None:
             from_model = str(params.get("fromModel", lead.model_used or lead.task.model))
@@ -341,8 +356,8 @@ class LunaPool:
             return
         item = params.get("item")
         if lead is not None and isinstance(item, dict) and self._forbidden_item(item):
-            await self._interrupt(lead)
             await self._fail(lead, "tool_call_forbidden", True, str(item.get("type", "tool call")))
+            lead.pending_action = asyncio.create_task(self._interrupt(lead))
         if lead is not None and method == "item/agentMessage/delta":
             lead.text += str(params.get("delta", ""))
         if (
@@ -402,9 +417,7 @@ class LunaPool:
             await self._fail(lead, code, False, detail)
         elif code == "usageLimitExceeded":
             await self._fail(lead, code, False, detail)
-            rate = await self._client.request("account/rateLimits/read")
-            self._snapshot = parse_rate_limits(rate, lead.task.model)
-            await self._pause("quota", None)
+            lead.pending_action = asyncio.create_task(self._refresh_quota_after_usage_limit(lead.task.model))
         elif code == "unauthorized":
             await self._pause("auth", None)
         elif code == "modelNotFound":
@@ -415,12 +428,15 @@ class LunaPool:
             await self._fail(lead, code, True, detail)
 
     async def _fail_timeout(self, lead: _Lead) -> None:
+        if self._server is not None and self._server.returncode is not None:
+            await self._crash_or_failure(lead, f"app-server exited with code {self._server.returncode}")
+            return
         await self._interrupt(lead)
         try:
             await asyncio.wait_for(self._wait_done(lead), self.interrupt_grace_s)
         except TimeoutError:
+            await self._fail(lead, "timeout", True, "lead timeout")
             await self._restart("appserver_restart")
-            await self._fail(lead, "appserver_restart", False, "interrupt grace expired")
         else:
             await self._fail(lead, "timeout", True, "lead timeout")
 
@@ -443,8 +459,9 @@ class LunaPool:
         await self._pause(reason, resume_at)
 
     async def _fail(self, lead: _Lead, code: str, counted: bool, detail: str) -> None:
-        if lead.done:
+        if lead.outcome_delivered:
             return
+        lead.outcome_delivered = True
         lead.done = True
         await self.callbacks.on_failure(lead.task, code, counted, detail)
         if counted:
@@ -457,6 +474,18 @@ class LunaPool:
             self._paused = True
             await self.callbacks.on_pause(reason, resume_at)
 
+    async def _refresh_quota_after_usage_limit(self, model: str) -> None:
+        rate = await self._client.request("account/rateLimits/read")
+        self._snapshot = parse_rate_limits(rate, model)
+        resume_at = self._snapshot.primary.resets_at if self._snapshot.primary else None
+        await self._pause("quota", resume_at)
+
+    def _schedule_action(self, action: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        task = asyncio.create_task(action)
+        self._pending_actions.add(task)
+        task.add_done_callback(self._pending_actions.discard)
+        return task
+
     async def _crash_or_failure(self, lead: _Lead, detail: str) -> None:
         await self._fail(lead, "appserver_crash", False, detail)
         await self._restart("appserver_crash", crash=True)
@@ -464,7 +493,7 @@ class LunaPool:
     async def _restart(self, reason: str, crash: bool = False) -> None:
         async with self._restart_lock:
             now = time.monotonic()
-            self._crashes = [stamp for stamp in self._crashes if now - stamp < 600]
+            self._crashes = [stamp for stamp in self._crashes if now - stamp < self.crash_window_s]
             if crash:
                 self._crashes.append(now)
             if len(self._crashes) > 3:
@@ -475,4 +504,6 @@ class LunaPool:
             self._server = None
             for lead in list(self._leads.values()):
                 await self._fail(lead, reason, False, "app-server restarted")
+            if self.restart_backoff_s:
+                await asyncio.sleep(self.restart_backoff_s)
             await self._launch_and_prepare()

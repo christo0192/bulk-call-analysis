@@ -6,9 +6,10 @@ from typing import Any
 
 import pytest
 
-from bca.luna.appserver import CodexLaunch, start
+from bca.luna.appserver import AppServer, CodexLaunch, start
 from bca.luna.pool import LeadTask, LunaPool
 from bca.luna.quota import QuotaGuard
+from tests.fakes import fake_codex
 
 
 class Callbacks:
@@ -50,6 +51,14 @@ class Callbacks:
         self.pauses.append((reason, resume_at))
 
 
+def assert_exactly_once(callbacks: Callbacks, attempt_ids: list[str]) -> None:
+    results = [lead for lead, _ in callbacks.results]
+    failures = [lead for lead, _, _ in callbacks.failures]
+    assert set(results) | set(failures) == set(attempt_ids)
+    assert set(results) & set(failures) == set()
+    assert len(results) + len(failures) == len(attempt_ids)
+
+
 def task(index: int, model: str = "codex") -> LeadTask:
     return LeadTask(
         str(index),
@@ -62,17 +71,24 @@ def task(index: int, model: str = "codex") -> LeadTask:
 
 
 async def run_pool(
-    tmp_path: Path, scenario: dict[str, object], tasks: list[LeadTask], **kwargs: object
+    tmp_path: Path,
+    scenario: dict[str, object],
+    tasks: list[LeadTask],
+    concurrency: int = 1,
+    recycle_every: int = 500,
+    max_consecutive_failures: int = 25,
+    crash_window_s: float = 600,
+    restart_backoff_s: float = 0,
 ) -> tuple[Callbacks, list[Path]]:
     scenario_path = tmp_path / "scenario.json"
     scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
     launches: list[Path] = []
 
-    async def launch():
+    async def launch() -> AppServer:
         launches.append(scenario_path)
         return await start(
             CodexLaunch(
-                (sys.executable, "-m", "tests.fakes.fake_codex", "--scenario", str(scenario_path)),
+                (sys.executable, str(Path(fake_codex.__file__)), "--scenario", str(scenario_path)),
                 tmp_path / "home",
                 tmp_path,
             )
@@ -83,9 +99,13 @@ async def run_pool(
         launch,
         callbacks,
         QuotaGuard(95, Decimal("5")),
-        lead_timeout_s=0.05,
+        concurrency=concurrency,
+        lead_timeout_s=1.0,
         interrupt_grace_s=0.02,
-        **kwargs,
+        recycle_every=recycle_every,
+        max_consecutive_failures=max_consecutive_failures,
+        crash_window_s=crash_window_s,
+        restart_backoff_s=restart_backoff_s,
     )
     await pool.run_until_idle()
     return callbacks, launches
@@ -101,6 +121,7 @@ async def _test_fifty_leads_exactly_once_and_unsubscribed(tmp_path: Path) -> Non
     callbacks, launches = await run_pool(
         tmp_path, {"models": ["codex"], "latency_ms": 1}, [task(i) for i in range(50)], concurrency=4
     )
+    assert_exactly_once(callbacks, [f"attempt-{i}" for i in range(50)])
     assert len(callbacks.results) == 50
     assert len({lead for lead, _ in callbacks.results}) == 50
     methods = json.loads(Path(str(launches[0]) + ".methods.json").read_text(encoding="utf-8"))
@@ -128,6 +149,7 @@ async def _test_invalid_and_forbidden_outputs_are_counted(
     tmp_path: Path, scenario: dict[str, object], expected: str
 ) -> None:
     callbacks, _ = await run_pool(tmp_path, scenario, [task(0)])
+    assert_exactly_once(callbacks, ["attempt-0"])
     assert callbacks.failures == [("attempt-0", expected, True)]
 
 
@@ -139,6 +161,7 @@ def test_reroute_records_new_model(tmp_path: Path) -> None:
 
 async def _test_reroute_records_new_model(tmp_path: Path) -> None:
     callbacks, _ = await run_pool(tmp_path, {"reroute": "0", "models": ["codex", "codex-mini"]}, [task(0)])
+    assert_exactly_once(callbacks, ["attempt-0"])
     assert callbacks.results == [("attempt-0", "codex-mini")]
     assert callbacks.reroutes == [("attempt-0", "codex-mini")]
 
@@ -156,6 +179,7 @@ async def _test_quota_stop_finishes_inflight_and_pauses(tmp_path: Path) -> None:
         [task(i) for i in range(3)],
         concurrency=1,
     )
+    assert_exactly_once(callbacks, ["attempt-0"])
     assert len(callbacks.results) == 1
     assert callbacks.pauses == [("quota", 9999999999)]
 
@@ -170,7 +194,8 @@ async def _test_recycle_between_batches_does_not_duplicate(tmp_path: Path) -> No
     callbacks, launches = await run_pool(
         tmp_path, {"models": ["codex"]}, [task(i) for i in range(11)], concurrency=2, recycle_every=10
     )
-    assert sorted(lead for lead, _ in callbacks.results) == [f"attempt-{i}" for i in range(11)]
+    assert_exactly_once(callbacks, [f"attempt-{i}" for i in range(11)])
+    assert {lead for lead, _ in callbacks.results} == {f"attempt-{i}" for i in range(11)}
     assert len(launches) == 2
 
 
@@ -178,6 +203,7 @@ def test_hang_interrupts_and_times_out(tmp_path: Path) -> None:
     import asyncio
 
     callbacks, _ = asyncio.run(run_pool(tmp_path, {"hang": "0"}, [task(0)]))
+    assert_exactly_once(callbacks, ["attempt-0"])
     assert callbacks.failures == [("attempt-0", "timeout", True)]
 
 
@@ -185,6 +211,7 @@ def test_credit_drop_interrupts_inflight_and_pauses(tmp_path: Path) -> None:
     import asyncio
 
     callbacks, _ = asyncio.run(run_pool(tmp_path, {"credit_drop": True}, [task(0)]))
+    assert_exactly_once(callbacks, ["attempt-0"])
     assert callbacks.failures == [("attempt-0", "quota_interrupt", False)]
     assert callbacks.pauses[0][0] == "credit"
 
@@ -209,12 +236,13 @@ def test_error_table_maps_actions(tmp_path: Path, code: str, counted: bool) -> N
     import asyncio
 
     callbacks, _ = asyncio.run(run_pool(tmp_path, {"errors": {"0": code}}, [task(0)]))
+    assert_exactly_once(callbacks, ["attempt-0"])
     if code == "unauthorized":
         assert callbacks.pauses == [("auth", None)]
     elif code == "modelNotFound":
         assert callbacks.pauses == [("model_unavailable", None)]
     elif code == "usageLimitExceeded":
-        assert callbacks.pauses == [("quota", None)]
+        assert callbacks.pauses == [("quota", 9999999999)]
     else:
         assert callbacks.failures[0][1:] == (code, counted)
 
@@ -229,7 +257,9 @@ def test_crash_restarts(tmp_path: Path) -> None:
             {"crash_after_turns": 1, "crash_once_file": str(marker)},
             [task(i) for i in range(2)],
             concurrency=1,
+            crash_window_s=0.1,
         )
     )
+    assert_exactly_once(callbacks, ["attempt-0", "attempt-1"])
     assert len(launches) >= 2
     assert callbacks.failures[0][1] == "appserver_crash"

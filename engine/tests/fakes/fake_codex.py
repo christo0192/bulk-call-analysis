@@ -15,7 +15,7 @@ def _scenario(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-async def run(path: Path) -> None:
+async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -> None:
     scenario = _scenario(path)
     env_report = scenario.get("env_report")
     if isinstance(env_report, str):
@@ -26,7 +26,9 @@ async def run(path: Path) -> None:
             encoding="utf-8",
         )
     log_path = Path(str(path) + ".methods.json")
-    methods: list[str] = []
+    methods: list[str | dict[str, list[str]]] = [
+        {"argv_overrides": argv_overrides, "argv_disabled": argv_disabled}
+    ]
     turns = 0
     quota = int(scenario.get("used_percent", 0))
     threads: dict[str, str] = {}
@@ -247,7 +249,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenario", type=Path, required=True)
     parser.add_argument("app_server", nargs="?")
-    asyncio.run(run(parser.parse_args().scenario))
+    parser.add_argument("-c", dest="argv_overrides", action="append", default=[])
+    parser.add_argument("--disable", dest="argv_disabled", action="append", default=[])
+    args, _ = parser.parse_known_args()
+    asyncio.run(run(args.scenario, args.argv_overrides, args.argv_disabled))
 
 
 if __name__ == "__main__":

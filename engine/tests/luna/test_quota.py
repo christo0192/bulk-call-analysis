@@ -1,15 +1,27 @@
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
-from bca.luna.quota import ALLOW, INTERRUPT_ALL, STOP_DISPATCH, QuotaGuard, merge_update, parse_rate_limits
+from bca.luna.quota import (
+    ALLOW,
+    INTERRUPT_ALL,
+    STOP_DISPATCH,
+    QuotaGuard,
+    QuotaSnapshot,
+    merge_update,
+    parse_rate_limits,
+)
 
 
-def snapshot(percent: int | None = 0, **kwargs: object):
+def snapshot(percent: int | None = 0, **kwargs: object) -> QuotaSnapshot:
     primary = None if percent is None else {"usedPercent": percent, "windowDurationMins": 60, "resetsAt": 10}
-    rate = {"limitId": "codex", "primary": primary, "credits": {"balance": "5"}}
+    rate: dict[str, Any] = {"limitId": "codex", "primary": primary, "credits": {"balance": "5"}}
     rate.update({key: value for key, value in kwargs.items() if key != "ordinaryUsageAllowed"})
-    result = {"rateLimits": rate, "ordinaryUsageAllowed": kwargs.get("ordinaryUsageAllowed", True)}
+    result: dict[str, Any] = {
+        "rateLimits": rate,
+        "ordinaryUsageAllowed": kwargs.get("ordinaryUsageAllowed", True),
+    }
     return parse_rate_limits(result, "codex")
 
 

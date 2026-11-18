@@ -82,7 +82,7 @@ class AppServer:
         if kill_tree and self.process.pid is not None:
             if os.name == "nt":
                 killer = await asyncio.create_subprocess_exec(
-                    "taskkill", "/PID", str(self.process.pid), "/T", "/F"
+                    "taskkill", "/PID", str(self.process.pid), "/T", "/F", stderr=asyncio.subprocess.DEVNULL
                 )
                 await killer.wait()
             else:
@@ -120,8 +120,20 @@ async def start(
     if process.stdout is None or process.stdin is None:
         raise RuntimeError("app-server pipes were not created")
     client = AppServerClient(process.stdout, process.stdin)
-    await client.request(
-        "initialize", {"clientInfo": {"name": client_name, "title": "Bulk Call Analysis", "version": version}}
-    )
+    try:
+        await client.request(
+            "initialize",
+            {"clientInfo": {"name": client_name, "title": "Bulk Call Analysis", "version": version}},
+        )
+    except ConnectionError as exc:
+        if process.returncode is None:
+            await process.wait()
+        await client.close()
+        try:
+            stderr_tail = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+        except OSError as read_error:
+            raise ConnectionError(f"{exc}; unable to read app-server stderr: {read_error}") from exc
+        detail = stderr_tail.strip() or "<no stderr>"
+        raise ConnectionError(f"{exc}; app-server stderr tail: {detail}") from exc
     client._write({"method": "initialized", "params": {}})
     return AppServer(client, process)
