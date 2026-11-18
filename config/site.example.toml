@@ -21,6 +21,7 @@ transcript_status_column = "transcript_status"
 duration_unit = "ms"
 max_chars_per_lead = 400000
 drop_calls_shorter_than_s = 180
+speaker_labels = { learner = ["Customer", "Lead", "Learner"], advisor = ["Agent", "Advisor", "PA"] }
 
 [models]
 claude_model = "claude-opus-5-5"
