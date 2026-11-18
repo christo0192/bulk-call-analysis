@@ -33,7 +33,7 @@ def test_binary_local_copy_and_digest_rejection(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr(manager, "_verify_signature", lambda path: None)
     assert manager.install_from_local().read_bytes() == b"official"
     assert hashlib.sha256(b"wrong").hexdigest() != hashlib.sha256(b"official").hexdigest()
-    target = manager.destination / "claude.exe"
+    target = manager.destination / manager._filename()
     target.write_bytes(b"wrong")
     try:
         manager._accept(target, hashlib.sha256(b"official").hexdigest())
@@ -89,10 +89,17 @@ def test_binary_signature_failure_deletes_target(tmp_path: Path, monkeypatch: py
     assert not target.exists()
 
 
+@pytest.mark.parametrize(
+    ("platform_name", "filename"),
+    [("win32-x64", "claude.exe"), ("darwin-arm64", "claude"), ("linux-x64", "claude")],
+)
 def test_download_install_uses_app_destination_and_mocked_http(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform_name: str,
+    filename: str,
 ) -> None:
-    manager = BinaryManager(tmp_path / "app", "1.0")
+    manager = BinaryManager(tmp_path / "app", "1.0", platform_name=platform_name)
     binary = b"downloaded"
     digest = hashlib.sha256(binary).hexdigest()
 
@@ -109,7 +116,7 @@ def test_download_install_uses_app_destination_and_mocked_http(
         def read(self) -> bytes:
             return self.value
 
-    binary_url = "https://download.claude.ai/1.0/win32-x64/claude.exe"
+    binary_url = f"https://download.claude.ai/1.0/{platform_name}/{filename}"
     manifest_url = "https://download.claude.ai/manifest"
     requested_urls: list[str] = []
 
@@ -117,9 +124,10 @@ def test_download_install_uses_app_destination_and_mocked_http(
         requested_urls.append(str(url))
         if str(url) == binary_url:
             return Response(binary)
-        assert str(url) == manifest_url
-        manifest = {"platforms": {"win32-x64": {"checksum": digest}}}
-        return Response(json.dumps(manifest).encode())
+        if str(url) == manifest_url:
+            manifest = {"platforms": {platform_name: {"checksum": digest}}}
+            return Response(json.dumps(manifest).encode())
+        raise AssertionError(f"unexpected URL: {url}")
 
     monkeypatch.setattr(manager, "_verify_signature", lambda path: None)
     monkeypatch.setattr("bca.claude.binary.urllib.request.urlopen", response_for)
@@ -127,8 +135,9 @@ def test_download_install_uses_app_destination_and_mocked_http(
     original = own_path.read_bytes() if own_path.is_file() else None
     monkeypatch.setattr("bca.claude.binary.OFFICIAL_HOST", "download.claude.ai")
     installed = manager.install_from_download(
-        "https://download.claude.ai/{version}/{platform}/claude.exe", manifest_url
+        f"https://download.claude.ai/{{version}}/{{platform}}/{filename}", manifest_url
     )
     assert installed.read_bytes() == binary
-    assert requested_urls == [binary_url, manifest_url]
+    assert sorted(requested_urls) == sorted([binary_url, manifest_url])
+    assert installed.name == filename
     assert not own_path.exists() or own_path.read_bytes() == original

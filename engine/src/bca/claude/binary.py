@@ -20,10 +20,17 @@ class BinaryVerificationError(RuntimeError):
 
 
 class BinaryManager:
-    def __init__(self, app_dir: Path, version: str, versions_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        app_dir: Path,
+        version: str,
+        versions_dir: Path | None = None,
+        platform_name: str | None = None,
+    ) -> None:
         self.app_dir, self.version = app_dir, version
         self.destination = app_dir / "claude" / version
         self.versions_dir = versions_dir
+        self._platform_name_override = platform_name
 
     def path(self) -> Path:
         path = self.destination / self._filename()
@@ -38,7 +45,8 @@ class BinaryManager:
         return path
 
     def _filename(self) -> str:
-        return "claude.exe" if platform.system() == "Windows" else "claude"
+        platform_name = self._platform_name()
+        return "claude.exe" if platform_name and platform_name.startswith("win32-") else "claude"
 
     def _verify_signature(self, path: Path) -> None:
         if platform.system() == "Windows":
@@ -163,8 +171,11 @@ class BinaryManager:
             raise BinaryVerificationError("manifest checksum is not lowercase SHA-256")
         return digest
 
+    def _platform_name(self) -> str | None:
+        return self._platform_name_override or self._current_platform_name()
+
     @staticmethod
-    def _platform_name() -> str | None:
+    def _current_platform_name() -> str | None:
         system = platform.system()
         machine = platform.machine().lower()
         arch = "arm64" if machine in {"arm64", "aarch64"} else "x64"
