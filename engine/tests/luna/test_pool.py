@@ -79,6 +79,7 @@ async def run_pool(
     max_consecutive_failures: int = 25,
     crash_window_s: float = 600,
     restart_backoff_s: float = 0,
+    rpc_timeout_s: float = 30,
 ) -> tuple[Callbacks, list[Path]]:
     scenario_path = tmp_path / "scenario.json"
     scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
@@ -106,6 +107,7 @@ async def run_pool(
         max_consecutive_failures=max_consecutive_failures,
         crash_window_s=crash_window_s,
         restart_backoff_s=restart_backoff_s,
+        rpc_timeout_s=rpc_timeout_s,
     )
     await pool.run_until_idle()
     return callbacks, launches
@@ -258,6 +260,7 @@ def test_crash_restarts(tmp_path: Path) -> None:
             [task(i) for i in range(2)],
             concurrency=1,
             crash_window_s=0.1,
+            rpc_timeout_s=0.1,
         )
     )
     assert_exactly_once(callbacks, ["attempt-0", "attempt-1"])

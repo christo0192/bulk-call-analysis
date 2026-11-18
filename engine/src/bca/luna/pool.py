@@ -81,6 +81,7 @@ class LunaPool:
         max_consecutive_failures: int = 25,
         crash_window_s: float = 600,
         restart_backoff_s: float = 0,
+        rpc_timeout_s: float = 30,
     ) -> None:
         self.launch_factory = launch_factory
         self.callbacks = callbacks
@@ -92,6 +93,7 @@ class LunaPool:
         self.max_consecutive_failures = max(1, max_consecutive_failures)
         self.crash_window_s = max(0, crash_window_s)
         self.restart_backoff_s = max(0, restart_backoff_s)
+        self.rpc_timeout_s = max(0, rpc_timeout_s)
         self._server: AppServer | None = None
         self._leads: dict[str, _Lead] = {}
         self._by_turn: dict[str, _Lead] = {}
@@ -170,10 +172,10 @@ class LunaPool:
         self._server = await self.launch_factory()
         client = self._client
         client.on_any_notification(self._notification)
-        rate = await client.request("account/rateLimits/read")
+        rate = await self._request("account/rateLimits/read")
         model = self._model_for_setup(rate)
         self._snapshot = parse_rate_limits(rate, model)
-        models = await client.request("model/list")
+        models = await self._request("model/list")
         self._models = self._model_names(models)
         if not self._model_available(models, model):
             await self.callbacks.on_pause("model_unavailable", None)
@@ -186,6 +188,9 @@ class LunaPool:
         if self._server is None:
             raise RuntimeError("Luna pool has no app-server")
         return self._server.client
+
+    async def _request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self._client.request(method, params, timeout_s=self.rpc_timeout_s)
 
     @staticmethod
     def _model_names(result: dict[str, Any]) -> set[str]:
@@ -256,13 +261,16 @@ class LunaPool:
         task = lead.task
         try:
             await self.callbacks.on_started(task)
-            started = await self._client.request("thread/start", {"model": task.model, "ephemeral": True})
+            if self._server is not None and self._server.returncode is not None:
+                await self._crash_or_failure(lead, f"app-server exited with code {self._server.returncode}")
+                return
+            started = await self._request("thread/start", {"model": task.model, "ephemeral": True})
             thread = started.get("thread")
             lead.thread_id = str(thread.get("id")) if isinstance(thread, dict) else None
             if lead.thread_id is None:
                 raise ValueError("thread/start returned no thread id")
             result = await asyncio.wait_for(
-                self._client.request(
+                self._request(
                     "turn/start",
                     {
                         "threadId": lead.thread_id,
@@ -295,7 +303,7 @@ class LunaPool:
                 await asyncio.gather(lead.pending_action, return_exceptions=True)
             if lead.thread_id is not None:
                 with contextlib.suppress(ConnectionError, BrokenPipeError, RpcError, RpcTimeout):
-                    await self._client.request("thread/unsubscribe", {"threadId": lead.thread_id})
+                    await self._request("thread/unsubscribe", {"threadId": lead.thread_id})
             self._leads.pop(task.attempt_id, None)
             if lead.turn_id:
                 self._by_turn.pop(lead.turn_id, None)
@@ -311,6 +319,8 @@ class LunaPool:
             if deadline <= 0:
                 await self._fail_timeout(lead)
                 return
+        if lead.outcome_delivered:
+            return
         if lead.text == "":
             await self._fail(lead, "invalid_output", True, "no agent message was returned")
             return
@@ -447,14 +457,20 @@ class LunaPool:
     async def _interrupt(self, lead: _Lead) -> None:
         if lead.turn_id is not None:
             with contextlib.suppress(ConnectionError, BrokenPipeError, RpcError, RpcTimeout):
-                await self._client.request(
-                    "turn/interrupt", {"threadId": lead.thread_id, "turnId": lead.turn_id}
-                )
+                await self._request("turn/interrupt", {"threadId": lead.thread_id, "turnId": lead.turn_id})
 
     async def _interrupt_all(self, reason: str) -> None:
-        for lead in list(self._leads.values()):
+        leads = list(self._leads.values())
+        interrupted: list[_Lead] = []
+        for lead in leads:
+            if not lead.outcome_delivered:
+                lead.outcome_delivered = True
+                lead.done = True
+                interrupted.append(lead)
+        for lead in interrupted:
+            await self.callbacks.on_failure(lead.task, "quota_interrupt", False, reason)
+        for lead in leads:
             await self._interrupt(lead)
-            await self._fail(lead, "quota_interrupt", False, reason)
         resume_at = self._snapshot.primary.resets_at if self._snapshot and self._snapshot.primary else None
         await self._pause(reason, resume_at)
 
@@ -475,7 +491,7 @@ class LunaPool:
             await self.callbacks.on_pause(reason, resume_at)
 
     async def _refresh_quota_after_usage_limit(self, model: str) -> None:
-        rate = await self._client.request("account/rateLimits/read")
+        rate = await self._request("account/rateLimits/read")
         self._snapshot = parse_rate_limits(rate, model)
         resume_at = self._snapshot.primary.resets_at if self._snapshot.primary else None
         await self._pause("quota", resume_at)

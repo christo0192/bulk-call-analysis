@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,13 +81,13 @@ class AppServer:
         if self.process.returncode is not None:
             return
         if kill_tree and self.process.pid is not None:
-            if os.name == "nt":
+            if sys.platform == "win32":
                 killer = await asyncio.create_subprocess_exec(
                     "taskkill", "/PID", str(self.process.pid), "/T", "/F", stderr=asyncio.subprocess.DEVNULL
                 )
                 await killer.wait()
             else:
-                os.killpg(self.process.pid, signal.SIGTERM)  # type: ignore[attr-defined]
+                os.killpg(self.process.pid, signal.SIGTERM)
         else:
             self.process.terminate()
         try:
