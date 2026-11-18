@@ -1,11 +1,26 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from bca.luna.appserver import DISABLED_FEATURES, LOCKDOWN_OVERRIDES, CodexLaunch, build_command, start
 from tests.fakes import fake_codex
+
+
+def read_json_lines(path: Path) -> list[Any]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    records: list[object] = []
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            if index != len(lines) - 1:
+                raise
+    return records
 
 
 def test_build_command_contains_lockdown_and_disabled_features(tmp_path: Path) -> None:
@@ -39,7 +54,7 @@ async def _test_launch_passes_lockdown_arguments_to_fake(tmp_path: Path) -> None
         )
     )
     await server.stop()
-    log = json.loads(Path(str(scenario) + ".methods.json").read_text(encoding="utf-8"))
+    log = read_json_lines(Path(str(scenario) + ".methods.json"))
     startup = log[0]
     assert all(
         any(value.startswith(f"{key}=") for value in startup["argv_overrides"])

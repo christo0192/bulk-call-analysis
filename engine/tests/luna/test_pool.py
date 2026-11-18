@@ -11,6 +11,7 @@ from bca.luna.appserver import AppServer, CodexLaunch, start
 from bca.luna.pool import LeadTask, LunaPool
 from bca.luna.quota import QuotaGuard
 from tests.fakes import fake_codex
+from tests.luna.test_appserver import read_json_lines
 
 
 class Callbacks:
@@ -127,7 +128,7 @@ async def _test_fifty_leads_exactly_once_and_unsubscribed(tmp_path: Path) -> Non
     assert_exactly_once(callbacks, [f"attempt-{i}" for i in range(50)])
     assert len(callbacks.results) == 50
     assert len({lead for lead, _ in callbacks.results}) == 50
-    methods = json.loads(Path(str(launches[0]) + ".methods.json").read_text(encoding="utf-8"))
+    methods = read_json_lines(Path(str(launches[0]) + ".methods.json"))
     assert "account/rateLimitResetCredit/consume" not in methods
     assert all("thread/unsubscribe" in methods for _ in [0])
 

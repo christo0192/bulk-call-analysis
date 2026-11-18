@@ -56,9 +56,17 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
             encoding="utf-8",
         )
     log_path = Path(str(path) + ".methods.json")
+    log_file = log_path.open("w", encoding="utf-8")
+
+    def record(value: str | dict[str, list[str]]) -> None:
+        log_file.write(json.dumps(value) + "\n")
+        log_file.flush()
+        os.fsync(log_file.fileno())
+
     methods: list[str | dict[str, list[str]]] = [
         {"argv_overrides": argv_overrides, "argv_disabled": argv_disabled}
     ]
+    record(methods[0])
     turns = 0
     quota = int(scenario.get("used_percent", 0))
     threads: dict[str, str] = {}
@@ -73,7 +81,7 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
         method, request_id, params = message.get("method"), message.get("id"), message.get("params") or {}
         if not isinstance(method, str):
             return
-        methods.append(method)
+        record(method)
         if method == "initialize":
             result: dict[str, Any] = {}
         elif method == "account/read":
@@ -319,7 +327,7 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
             raise
         except (json.JSONDecodeError, TypeError):
             continue
-    log_path.write_text(json.dumps(methods), encoding="utf-8")
+    log_file.close()
 
 
 def main() -> None:
