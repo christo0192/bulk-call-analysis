@@ -8,6 +8,7 @@ dependencies = [
     "google-cloud-bigquery>=3.30",
     "openpyxl>=3.1",
     "sqlparse>=0.5",
+    "mcp>=2.3.0",
 ]
 
 [build-system]
