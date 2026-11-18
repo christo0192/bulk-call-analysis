@@ -18,14 +18,23 @@ def test_profile_settings_and_empty_project(tmp_path: Path) -> None:
         "syncClaudeAiSkills",
         "syncClaudeAiPlugins",
         "hooks",
-        "modelPicker",
+        "switchModelsOnFlag",
+        "availableModels",
+        "availableModelsMatch",
         "fastMode",
         "cleanupPeriodDays",
+        "ultracode",
+        "disableWorkflows",
     }
     assert settings["disableClaudeAiConnectors"] is True
     assert settings["syncClaudeAiSkills"] is False
     assert settings["syncClaudeAiPlugins"] is False
     assert settings["hooks"] == {}
+    assert settings["switchModelsOnFlag"] is False
+    assert settings["availableModels"] == ["claude-opus-5-5"]
+    assert settings["availableModelsMatch"] == "exact"
+    assert settings["ultracode"] is False
+    assert settings["disableWorkflows"] is True
     assert settings["cleanupPeriodDays"] == 17
     if "ultracode" in settings:
         assert settings["ultracode"] is False
@@ -125,4 +134,8 @@ def test_child_env_strips_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
     assert env["DISABLE_AUTOUPDATER"] == "1"
     assert env["MCP_TIMEOUT"] == "120000"
-    assert env["ENABLE_TOOL_SEARCH"] == "0"
+    assert env["ENABLE_TOOL_SEARCH"] == "false"
+    assert env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
+    assert env["CLAUDE_CODE_DISABLE_FAST_MODE"] == "1"
+    assert env["CLAUDE_CODE_DISABLE_WORKFLOWS"] == "1"
+    assert env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"

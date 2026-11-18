@@ -16,7 +16,8 @@ from uuid import UUID, uuid4
 from bca.childenv import build_child_env
 
 from .profile import ENV_DISABLE_MEMORY, ClaudeProfile
-from .stream import Event, RateLimitGuard, TurnError, check_init, parse_line
+from .stream import Event, Limited, RateLimitGuard, TurnError, check_init, parse_line, result_error
+from .winjob import assign_kill_on_close, close_job, terminate_job
 
 FLAG_PROMPT = "-p"
 FLAG_VERBOSE = "--verbose"
@@ -40,6 +41,12 @@ ENV_DISABLE_UPDATE = "DISABLE_AUTOUPDATER"
 ENV_NONESSENTIAL = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
 ENV_TOOL_SEARCH = "ENABLE_TOOL_SEARCH"
 ENV_MCP_TIMEOUT = "MCP_TIMEOUT"
+ENV_MCP_SERVERS = "ENABLE_CLAUDEAI_MCP_SERVERS"
+ENV_DISABLE_FAST = "CLAUDE_CODE_DISABLE_FAST_MODE"
+ENV_DISABLE_WORKFLOWS = "CLAUDE_CODE_DISABLE_WORKFLOWS"
+ENV_DISABLE_MDS = "CLAUDE_CODE_DISABLE_CLAUDE_MDS"
+PINNED_CLAUDE_VERSION = "2.1.327"
+ALLOWED_EFFORTS = {"low", "medium", "high"}
 
 
 @dataclass(frozen=True)
@@ -70,8 +77,10 @@ def build_turn_command(
     max_turns: int = 25,
     session: SessionRef | None = None,
 ) -> list[str]:
-    if model in {"opus", "sonnet", "haiku", "fable", "default"}:
-        raise ValueError("Claude model must be a fully qualified subscription model name")
+    if not model.startswith("claude-") or "[" in model or model.endswith("plan"):
+        raise ValueError("Claude model must be a fully qualified pinned subscription model name")
+    if effort not in ALLOWED_EFFORTS:
+        raise ValueError("unsupported effort")
     if session is None:
         session = SessionRef(uuid4())
     session_flag = "--resume" if session.resumed else "--session-id"
@@ -114,19 +123,29 @@ def build_turn_command(
 
 def build_turn_env(profile: ClaudeProfile) -> dict[str, str]:
     config_dir = profile.config_dir.resolve()
+    isolated_anthropic = (config_dir / "anthropic").resolve()
+    isolated_anthropic.mkdir(parents=True, exist_ok=True)
     return build_child_env(
         {
             ENV_CONFIG: str(config_dir),
             ENV_DISABLE_MEMORY: "1",
             ENV_DISABLE_UPDATE: "1",
             ENV_NONESSENTIAL: "1",
-            ENV_TOOL_SEARCH: "0",
+            ENV_TOOL_SEARCH: "false",
+            ENV_MCP_SERVERS: "false",
+            ENV_DISABLE_FAST: "1",
+            ENV_DISABLE_WORKFLOWS: "1",
+            ENV_DISABLE_MDS: "1",
             ENV_MCP_TIMEOUT: "120000",
+            "APPDATA": str(isolated_anthropic),
+            "XDG_CONFIG_HOME": str(isolated_anthropic),
         }
     )
 
 
 _processes: dict[UUID, asyncio.subprocess.Process] = {}
+_jobs: dict[UUID, object | None] = {}
+_termination_tasks: set[asyncio.Task[None]] = set()
 _logger = logging.getLogger("bca.claude")
 
 
@@ -143,6 +162,10 @@ async def run_turn(
     max_turns: int = 25,
     session: SessionRef | None = None,
 ) -> AsyncIterator[Event]:
+    from .auth import auth_status
+
+    if not auth_status(binary, profile).ok:
+        raise TurnGuardError("Claude subscription authentication is not active")
     if session is None:
         session = SessionRef(uuid4())
     command = build_turn_command(
@@ -162,9 +185,12 @@ async def run_turn(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=build_turn_env(profile),
+        cwd=str(profile.project_workdir(str(session.session_id))),
         start_new_session=os.name != "nt",
     )
+    job = assign_kill_on_close(process.pid) if os.name == "nt" else None
     _processes[session.session_id] = process
+    _jobs[session.session_id] = job
     assert process.stdin is not None and process.stdout is not None
     message = (
         json.dumps(
@@ -175,44 +201,112 @@ async def run_turn(
     process.stdin.write(message.encode("utf-8"))
     await process.stdin.drain()
     process.stdin.close()
+    completed = False
+    stderr_task = asyncio.create_task(_drain_stderr(process.stderr))
     try:
         first = True
         rate_guard = RateLimitGuard()
         async for raw in process.stdout:
             event = parse_line(raw.decode("utf-8", errors="replace"))
-            if first and event.kind == "system":
+            if first and not (event.kind == "system" and event.data.get("subtype") == "init"):
+                raise TurnGuardError("Claude did not begin with system/init")
+            if first:
                 problems = check_init(event, model)
                 if problems:
                     raise TurnGuardError("Claude init rejected: " + "; ".join(problems))
                 first = False
+            if event.kind == "system" and event.data.get("subtype") == "model_refusal_fallback":
+                raise TurnGuardError("Claude attempted a safety model fallback")
+            if event.kind == "assistant":
+                message_data = event.data.get("message")
+                if isinstance(message_data, dict) and message_data.get("model") != model:
+                    raise TurnGuardError("Claude assistant used an unexpected model")
+            if event.kind == "result":
+                usage = event.data.get("modelUsage")
+                if isinstance(usage, dict) and set(usage) != {model}:
+                    raise TurnGuardError("Claude result used an unexpected model")
+                failure = result_error(event)
+                if failure:
+                    raise TurnGuardError(f"Claude turn failed: {failure.category}: {failure.message}")
             if event.kind == "rate_limit":
                 decision = rate_guard.inspect(event)
-                if decision.blocked_reason is not None:
-                    raise TurnGuardError("Claude rate policy blocked turn: " + decision.blocked_reason)
+                if decision.blocked_reason is not None or isinstance(decision.status, Limited):
+                    reason = decision.blocked_reason or "limited"
+                    raise TurnGuardError("Claude rate policy blocked turn: " + reason)
             yield event
-    except Exception:
+        if first:
+            raise TurnGuardError("Claude exited without system/init")
+        completed = True
+    except BaseException:
         if process.returncode is None:
-            _terminate_process_tree(process)
+            await _terminate_process_tree(process, job)
         raise
     finally:
-        await process.wait()
+        if not completed and process.returncode is None:
+            await _terminate_process_tree(process, job)
+        if process.returncode is None:
+            await _terminate_process_tree(process, job)
+        try:
+            await asyncio.wait_for(asyncio.shield(process.wait()), timeout=2.0)
+        except TimeoutError as error:
+            raise RuntimeError("Claude process did not exit after termination") from error
+        stderr_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stderr_task
+        close_job(job)
         _processes.pop(session.session_id, None)
+        _jobs.pop(session.session_id, None)
 
 
 def stop_turn(session: SessionRef | UUID) -> None:
     process = _processes.get(session.session_id if isinstance(session, SessionRef) else session)
     if process is None or process.returncode is not None:
         return
-    _terminate_process_tree(process)
+    process_id = session.session_id if isinstance(session, SessionRef) else session
+    task = asyncio.create_task(_terminate_process_tree(process, _jobs.get(process_id)))
+    _termination_tasks.add(task)
+    task.add_done_callback(_termination_tasks.discard)
 
 
-def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
+async def _drain_stderr(stderr: asyncio.StreamReader | None) -> None:
+    if stderr is not None:
+        while await stderr.read(65536):
+            pass
+
+
+async def _terminate_process_tree(process: asyncio.subprocess.Process, job: object | None) -> None:
     if os.name == "nt":
-        completed = subprocess.run(
-            ["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False
-        )
-        if completed.returncode != 0:
-            _logger.warning("taskkill failed for Claude process %s", process.pid)
+        if job is None or not terminate_job(job):
+            try:
+                completed = subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                    capture_output=True,
+                    check=False,
+                    timeout=2.0,
+                )
+            except subprocess.TimeoutExpired:
+                completed = None
+            if completed is None or completed.returncode != 0:
+                _logger.warning("taskkill failed for Claude process %s", process.pid)
+        try:
+            await asyncio.wait_for(asyncio.shield(process.wait()), timeout=2.0)
+        except TimeoutError:
+            process.kill()
+            try:
+                await asyncio.wait_for(asyncio.shield(process.wait()), timeout=2.0)
+            except TimeoutError as error:
+                raise RuntimeError("Claude process could not be killed") from error
     else:
         with contextlib.suppress(ProcessLookupError):
             cast(Any, os).killpg(process.pid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(asyncio.shield(process.wait()), timeout=1.0)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                cast(Any, os).killpg(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            try:
+                await asyncio.wait_for(asyncio.shield(process.wait()), timeout=2.0)
+            except TimeoutError as error:
+                raise RuntimeError("Claude process could not be killed") from error
+        with contextlib.suppress(ProcessLookupError):
+            cast(Any, os).killpg(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))

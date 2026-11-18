@@ -25,12 +25,11 @@ def test_session_store_resume_and_playbook_choice(tmp_path: Path) -> None:
 
 def test_binary_local_copy_and_digest_rejection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     version = "1.0.0"
-    source = tmp_path / "home" / ".local" / "share" / "claude" / "versions"
+    source = tmp_path / "versions"
     source.mkdir(parents=True)
     source_file = source / version
     source_file.write_bytes(b"official")
-    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
-    manager = BinaryManager(tmp_path / "app", version)
+    manager = BinaryManager(tmp_path / "app", version, versions_dir=source)
     monkeypatch.setattr(manager, "_verify_signature", lambda path: None)
     assert manager.install_from_local().read_bytes() == b"official"
     assert hashlib.sha256(b"wrong").hexdigest() != hashlib.sha256(b"official").hexdigest()
@@ -110,13 +109,26 @@ def test_download_install_uses_app_destination_and_mocked_http(
         def read(self) -> bytes:
             return self.value
 
+    binary_url = "https://download.claude.ai/1.0/win32-x64/claude.exe"
+    manifest_url = "https://download.claude.ai/manifest"
+    requested_urls: list[str] = []
+
+    def response_for(url: object) -> Response:
+        requested_urls.append(str(url))
+        if str(url) == binary_url:
+            return Response(binary)
+        assert str(url) == manifest_url
+        manifest = {"platforms": {"win32-x64": {"checksum": digest}}}
+        return Response(json.dumps(manifest).encode())
+
     monkeypatch.setattr(manager, "_verify_signature", lambda path: None)
-    monkeypatch.setattr(
-        "bca.claude.binary.urllib.request.urlopen",
-        lambda url: Response(binary if "download" in str(url) else json.dumps({"sha256": digest}).encode()),
-    )
+    monkeypatch.setattr("bca.claude.binary.urllib.request.urlopen", response_for)
     own_path = Path.home() / ".local" / "share" / "claude" / "versions" / "1.0"
     original = own_path.read_bytes() if own_path.is_file() else None
-    installed = manager.install_from_download("https://download/{version}", "https://manifest")
+    monkeypatch.setattr("bca.claude.binary.OFFICIAL_HOST", "download.claude.ai")
+    installed = manager.install_from_download(
+        "https://download.claude.ai/{version}/{platform}/claude.exe", manifest_url
+    )
     assert installed.read_bytes() == binary
+    assert requested_urls == [binary_url, manifest_url]
     assert not own_path.exists() or own_path.read_bytes() == original
