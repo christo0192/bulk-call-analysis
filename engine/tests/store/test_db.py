@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from bca.store import LeadStatus, Store, open_store
+from bca.store import ClaimError, LeadStatus, Store, open_store
 
 
 def prepared_store(path: Path | str = ":memory:") -> Store:
@@ -17,7 +17,7 @@ def prepared_store(path: Path | str = ":memory:") -> Store:
 def test_migrations_are_applied_and_reopen_is_idempotent(tmp_path: Path) -> None:
     path = tmp_path / "store.sqlite"
     store = prepared_store(path)
-    assert store.rows("PRAGMA user_version")[0][0] == 2
+    assert store.rows("PRAGMA user_version")[0][0] == 3
     assert store.rows("PRAGMA journal_mode")[0][0] == "wal"
     store.close()
     reopened = open_store(path)
@@ -41,8 +41,11 @@ def test_attempt_lifecycle_and_queue_order() -> None:
     assert store.next_queued("j", 10, False) == ["a", "b", "c"]
     assert store.next_queued("j", 10, True) == ["b", "c"]
     first = store.start_attempt("j", "a", "model")
+    with pytest.raises(ClaimError):
+        store.start_attempt("j", "a", "model")
+    store.fail_attempt(first, "temporary", counted=False)
     second = store.start_attempt("j", "a", "model")
-    assert store.rows("SELECT outcome FROM attempts WHERE attempt_id=?", (first,))[0][0] == "superseded"
+    assert store.rows("SELECT outcome FROM attempts WHERE attempt_id=?", (first,))[0][0] == "failed"
     store.fail_attempt(second, "temporary", counted=False)
     assert store.rows("SELECT status FROM leads WHERE lead_id='a'")[0][0] == LeadStatus.queued
     third = store.start_attempt("j", "a", "model")

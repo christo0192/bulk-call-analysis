@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import tempfile
+import time
 from contextlib import suppress
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 from typing import Literal, cast
 
 Speaker = Literal["learner", "advisor", "any"]
@@ -49,6 +52,12 @@ def _tuple_str(data: dict[str, object], key: str, *, path: str | None = None) ->
     return tuple(value)
 
 
+def _finite_number(value: object, path: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise _fail(path, "must be a finite number")
+    return float(value)
+
+
 @dataclass(frozen=True)
 class LeadSourceSql:
     kind: Literal["sql"]
@@ -88,8 +97,17 @@ class LeadSourceIds:
         data = _obj(value, "lead_source")
         if data.get("kind") != "ids":
             raise _fail("lead_source.kind", "must be 'ids'")
+        name = _str(data, "ids_file", path="lead_source.ids_file")
+        path = PurePath(name)
+        if (
+            PureWindowsPath(name).drive
+            or path.is_absolute()
+            or ".." in path.parts
+            or ".." in PureWindowsPath(name).parts
+        ):
+            raise _fail("lead_source.ids_file", "must be a relative path without parent components")
         return cls(
-            _str(data, "ids_file", path="lead_source.ids_file"),
+            name,
             _int(data, "count", minimum=0, path="lead_source.count"),
         )
 
@@ -116,6 +134,8 @@ class UsableRule:
             if data.get("statuses") is not None
             else None
         )
+        if statuses is not None and not statuses:
+            raise _fail("usable.statuses", "must not be empty")
         min_seconds = data.get("min_call_seconds")
         if min_seconds is not None and (
             isinstance(min_seconds, bool) or not isinstance(min_seconds, int) or min_seconds < 0
@@ -199,9 +219,27 @@ class Condition:
         if op not in ops:
             raise _fail("conditions[].op", "invalid operator")
         item = data.get("value")
+        if op in ("is_null", "not_null") and "value" in data:
+            raise _fail("conditions[].value", "must not be provided")
+        if op in ("in", "not_in") and (not isinstance(item, list) or not item):
+            raise _fail("conditions[].value", "must be a non-empty list")
+        if op in ("lt", "le", "gt", "ge") and not (
+            isinstance(item, (str, int, float)) and not isinstance(item, bool)
+        ):
+            raise _fail("conditions[].value", "must be a finite number or string")
+        if op in ("lt", "le", "gt", "ge") and isinstance(item, float) and not math.isfinite(item):
+            raise _fail("conditions[].value", "must be a finite number or string")
         if item is not None and not isinstance(item, (str, int, float, bool, list)):
             raise _fail("conditions[].value", "must be a scalar, array, or null")
-        if isinstance(item, list) and any(not isinstance(x, (str, int, float, bool)) for x in item):
+        if isinstance(item, float) and not math.isfinite(item):
+            raise _fail("conditions[].value", "must be finite")
+        if isinstance(item, list) and (
+            not item
+            or any(
+                not isinstance(x, (str, int, float, bool)) or (isinstance(x, float) and not math.isfinite(x))
+                for x in item
+            )
+        ):
             raise _fail("conditions[].value", "array contains invalid value")
         return cls(field, cast(ConditionOp, op), cast(Scalar | list[Scalar] | None, item))
 
@@ -210,6 +248,8 @@ def _conditions(data: dict[str, object], key: str = "conditions") -> tuple[Condi
     value = data.get(key)
     if not isinstance(value, list):
         raise _fail(key, "must be an array")
+    if not value:
+        raise _fail(key, "must contain at least one condition")
     return tuple(Condition.from_dict(item) for item in value)
 
 
@@ -286,7 +326,8 @@ class ThresholdGroupRule:
         edges = data.get("edges")
         labels = data.get("labels")
         if not isinstance(edges, list) or any(
-            isinstance(item, bool) or not isinstance(item, (int, float)) for item in edges
+            isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item)
+            for item in edges
         ):
             raise _fail("rules[].edges", "must be an array of numbers")
         if (
@@ -295,6 +336,10 @@ class ThresholdGroupRule:
             or len(labels) != len(edges) + 1
         ):
             raise _fail("rules[].labels", "must have one more item than edges")
+        if any(not label for label in labels) or len(set(labels)) != len(labels):
+            raise _fail("rules[].labels", "must be non-empty and unique")
+        if any(float(edges[index]) >= float(edges[index + 1]) for index in range(len(edges) - 1)):
+            raise _fail("rules[].edges", "must be strictly increasing")
         inclusive = data.get("inclusive_upper", True)
         if not isinstance(inclusive, bool):
             raise _fail("rules[].inclusive_upper", "must be boolean")
@@ -421,17 +466,53 @@ class JobSpec:
     @classmethod
     def from_dict(cls, value: object) -> JobSpec:
         data = _obj(value, "spec")
+        allowed = {
+            "spec_version",
+            "job_id",
+            "project_id",
+            "title",
+            "question",
+            "lead_source",
+            "calls_scope",
+            "window_start",
+            "window_end",
+            "usable",
+            "cap",
+            "instructions",
+            "output_schema",
+            "quote_fields",
+            "rules",
+            "luna_model",
+            "luna_effort",
+            "sample_size",
+        }
+        unknown = set(data) - allowed
+        if unknown:
+            raise _fail(next(iter(sorted(unknown))), "unknown field")
         version = _int(data, "spec_version", minimum=1) if "spec_version" in data else 1
         scope = data.get("calls_scope", "all")
         if scope not in ("all", "window"):
             raise _fail("calls_scope", "must be all or window")
         start, end = data.get("window_start"), data.get("window_end")
-        if scope == "window" and (
-            not isinstance(start, str) or not isinstance(end, str) or not start or not end
-        ):
-            raise _fail("window_start", "window scope requires start and end")
+        if scope == "window":
+            if not isinstance(start, str) or not isinstance(end, str):
+                raise _fail("window_start", "window scope requires start and end")
+            try:
+                from datetime import date
+
+                start_date, end_date = date.fromisoformat(start), date.fromisoformat(end)
+            except ValueError as exc:
+                raise _fail("window_start", "must be an ISO date") from exc
+            if start_date > end_date:
+                raise _fail("window_start", "must be on or before window_end")
+        elif start is not None or end is not None:
+            raise _fail("window_start", "must be null when calls_scope is all")
         schema = data.get("output_schema")
-        if not isinstance(schema, dict) or schema.get("type") != "object" or "properties" not in schema:
+        if (
+            not isinstance(schema, dict)
+            or schema.get("type") != "object"
+            or not isinstance(schema.get("properties"), dict)
+        ):
             raise _fail("output_schema", "must be an object schema with type object and properties")
         quote = data.get("quote_fields", [])
         rules = data.get("rules", [])
@@ -439,6 +520,14 @@ class JobSpec:
             raise _fail("quote_fields", "must be an array")
         if not isinstance(rules, list):
             raise _fail("rules", "must be an array")
+        quote_fields = tuple(QuoteField.from_dict(x) for x in quote)
+        properties = cast(dict[str, object], schema["properties"])
+        if any(field.field not in properties for field in quote_fields):
+            raise _fail("quote_fields", "every quote field must exist in output_schema.properties")
+        parsed_rules = tuple(_rule(x) for x in rules)
+        names = [rule.name for rule in parsed_rules if hasattr(rule, "name")]
+        if len(names) != len(set(names)):
+            raise _fail("rules", "rule names must be unique")
         return cls(
             version,
             _str(data, "job_id"),
@@ -450,14 +539,14 @@ class JobSpec:
             and cast(dict[str, object], data["lead_source"]).get("kind") == "sql"
             else LeadSourceIds.from_dict(data.get("lead_source")),
             scope,
-            cast(str | None, start),
-            cast(str | None, end),
+            start,
+            end,
             UsableRule.from_dict(data.get("usable", {})),
             CapRule.from_dict(data.get("cap", {})),
             _str(data, "instructions", nonempty=False),
             cast(dict[str, object], schema),
-            tuple(QuoteField.from_dict(x) for x in quote),
-            tuple(_rule(x) for x in rules),
+            quote_fields,
+            parsed_rules,
             _str(data, "luna_model"),
             _str(data, "luna_effort"),
             _sample_size(data),
@@ -473,31 +562,59 @@ def _sample_size(data: dict[str, object]) -> int:
 
 def save_spec(spec: JobSpec, job_dir: Path) -> Path:
     job_dir.mkdir(parents=True, exist_ok=True)
-    versions = [
-        int(p.name.split(".v")[1][:-5])
-        for p in job_dir.glob("spec.v*.json")
-        if p.name.split(".v")[1][:-5].isdigit()
-    ]
-    target = job_dir / f"spec.v{max(versions, default=0) + 1}.json"
-    fd, name = tempfile.mkstemp(prefix=".spec.", suffix=".tmp", dir=job_dir)
+    # The lock is deliberately a file created exclusively so separate processes share it.
+    lock_path = job_dir / ".spec.lock"
+    while True:
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(lock_fd)
+            break
+        except FileExistsError:
+            time.sleep(0.001)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(spec.to_dict() | {"spec_version": int(target.stem.split(".v")[1])}, handle, indent=2)
-            handle.write("\n")
-        os.replace(name, target)
-    except BaseException:
+        version = 1
+        pattern = re.compile(r"^spec\.v(\d+)\.json$")
+        for path in job_dir.iterdir():
+            match = pattern.fullmatch(path.name)
+            if match:
+                version = max(version, int(match.group(1)) + 1)
+        while True:
+            target = job_dir / f"spec.v{version}.json"
+            fd, name = tempfile.mkstemp(prefix=".spec.", suffix=".tmp", dir=job_dir)
+            try:
+                candidate = JobSpec.from_dict(spec.to_dict() | {"spec_version": version})
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                    json.dump(candidate.to_dict(), handle, indent=2)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                try:
+                    with target.open("x", encoding="utf-8", newline="\n") as handle:
+                        handle.write(Path(name).read_text(encoding="utf-8"))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.unlink(name)
+                    return target
+                except FileExistsError:
+                    version += 1
+            finally:
+                with suppress(OSError):
+                    os.unlink(name)
+    finally:
         with suppress(OSError):
-            os.unlink(name)
-        raise
-    return target
+            lock_path.unlink()
 
 
 def load_latest_spec(job_dir: Path) -> tuple[JobSpec, int]:
-    paths = sorted(job_dir.glob("spec.v*.json"), key=lambda p: int(p.stem.split(".v")[1]))
+    pattern = re.compile(r"^spec\.v(\d+)\.json$")
+    paths = [path for path in job_dir.iterdir() if pattern.fullmatch(path.name)]
+    paths.sort(key=lambda p: int(pattern.fullmatch(p.name).group(1)))  # type: ignore[union-attr]
     if not paths:
         raise SpecError("spec: no versioned spec found")
     path = paths[-1]
-    version = int(path.stem.split(".v")[1])
+    match = pattern.fullmatch(path.name)
+    assert match is not None
+    version = int(match.group(1))
     try:
         with path.open(encoding="utf-8") as handle:
             raw = json.load(handle)

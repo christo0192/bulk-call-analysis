@@ -1,4 +1,4 @@
-from .db import LeadStatus, Store, open_store
+from .db import ClaimError, LeadStatus, Store, open_store
 from .lifecycle import (
     JobState,
     PauseReason,
@@ -31,6 +31,7 @@ from .spec import (
 
 __all__ = [
     "CapRule",
+    "ClaimError",
     "Condition",
     "InScopeRule",
     "JobSpec",

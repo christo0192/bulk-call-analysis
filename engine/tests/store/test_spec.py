@@ -36,7 +36,10 @@ def make_spec(source: LeadSourceSql | LeadSourceIds | None = None) -> JobSpec:
         usable=UsableRule(10, ("completed",), 30, (1, 2)),
         cap=CapRule(1000, "keep_newest", 60),
         instructions="instructions",
-        output_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
+        output_schema={
+            "type": "object",
+            "properties": {"answer": {"type": "string"}, "text": {"type": "string"}},
+        },
         quote_fields=(QuoteField("text", "learner"),),
         rules=(
             InScopeRule("all", (condition,)),

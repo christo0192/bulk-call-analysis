@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E501
+import json
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
@@ -45,31 +47,21 @@ class TransitionError(ValueError):
 _TRANSITIONS: dict[JobState, set[JobState]] = {
     JobState.draft: {JobState.plan_proposed, JobState.cancelled},
     JobState.plan_approved: {JobState.pulling},
-    JobState.pulling: {JobState.masking_sample, JobState.paused, JobState.failed},
-    JobState.masking_sample: {JobState.sample_running, JobState.paused},
-    JobState.sample_running: {JobState.sample_ready, JobState.paused, JobState.stalled},
-    JobState.sample_ready: {JobState.sample_approved},
-    JobState.sample_approved: {JobState.full_running},
-    JobState.full_running: {JobState.paused, JobState.stalled, JobState.quote_check},
-    JobState.stalled: {JobState.paused, JobState.full_running, JobState.failed},
-    JobState.quote_check: {JobState.building_output, JobState.paused},
-    JobState.building_output: {JobState.verifying, JobState.failed},
-    JobState.verifying: {JobState.done, JobState.done_with_issues, JobState.failed},
-    JobState.paused: {
-        JobState.draft,
-        JobState.plan_proposed,
-        JobState.plan_approved,
+    JobState.pulling: {JobState.masking_sample, JobState.failed, JobState.stalled},
+    JobState.masking_sample: {JobState.sample_running, JobState.stalled},
+    JobState.sample_running: {JobState.sample_ready, JobState.stalled},
+    JobState.sample_ready: set(),
+    JobState.sample_approved: set(),
+    JobState.full_running: {JobState.stalled, JobState.quote_check},
+    JobState.stalled: {
         JobState.pulling,
         JobState.masking_sample,
         JobState.sample_running,
-        JobState.sample_ready,
-        JobState.sample_approved,
-        JobState.full_running,
-        JobState.stalled,
-        JobState.quote_check,
-        JobState.building_output,
-        JobState.verifying,
+        JobState.failed,
     },
+    JobState.quote_check: {JobState.building_output},
+    JobState.building_output: {JobState.verifying, JobState.failed},
+    JobState.verifying: {JobState.done, JobState.done_with_issues, JobState.failed},
 }
 
 
@@ -77,103 +69,153 @@ def _timestamp() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _job(store: Store, job_id: str) -> tuple[JobState, str | None]:
-    rows = store.rows("SELECT state, pause_reason FROM jobs WHERE id=?", (job_id,))
+def _job(store: Store, job_id: str) -> tuple[JobState, str | None, JobState | None, int]:
+    rows = store.rows(
+        "SELECT state, pause_reason, resume_state, spec_version FROM jobs WHERE id=?", (job_id,)
+    )
     if not rows:
         raise TransitionError("job not found")
-    return JobState(rows[0][0]), rows[0][1]
+    return JobState(rows[0][0]), rows[0][1], JobState(rows[0][2]) if rows[0][2] else None, int(rows[0][3])
+
+
+def _event(cur: object, job_id: str, current: JobState, target: JobState, reason: str | None) -> None:
+    assert hasattr(cur, "execute")
+    cur.execute(
+        "INSERT INTO job_events(job_id, ts, kind, data_json) VALUES (?, ?, 'state', ?)",
+        (job_id, _timestamp(), json.dumps({"from": current, "to": target, "reason": reason})),
+    )
 
 
 def transition(store: Store, job_id: str, to: JobState, reason: str | None = None) -> None:
-    current, _ = _job(store, job_id)
+    current, _, resume_state, _ = _job(store, job_id)
+    if (
+        to in {JobState.plan_approved, JobState.sample_approved, JobState.full_running, JobState.paused}
+        or current == JobState.paused
+    ):
+        raise TransitionError("gated and paused transitions require their dedicated operation")
+    if current == JobState.stalled and to != resume_state and to != JobState.failed:
+        raise TransitionError(f"stalled job can only recover to {resume_state}")
     if to not in _TRANSITIONS.get(current, set()):
         raise TransitionError(f"cannot move {current} to {to}")
-    with store.lock, store.connection:
-        store.connection.execute(
-            "UPDATE jobs SET state=?, updated_at=? WHERE id=?", (to, _timestamp(), job_id)
+    with store.transaction() as cur:
+        changed = cur.execute(
+            "UPDATE jobs SET state=?, resume_state=?, updated_at=? WHERE id=? AND state=?",
+            (to, current if to == JobState.stalled else None, _timestamp(), job_id, current),
         )
-        store.connection.execute(
-            "INSERT INTO job_events(job_id, ts, kind, data_json) VALUES (?, ?, 'state', json(?))",
-            (job_id, _timestamp(), __import__("json").dumps({"from": current, "to": to, "reason": reason})),
-        )
+        if changed.rowcount != 1:
+            raise TransitionError("job changed before transition")
+        _event(cur, job_id, current, to, reason)
 
 
-def approve_plan(store: Store, job_id: str, actor: Literal["operator"]) -> None:
+def _gate(
+    store: Store,
+    job_id: str,
+    actor: Literal["operator"],
+    expected: int | None,
+    source: JobState,
+    target: JobState,
+    timestamp_column: str,
+    message: str,
+) -> None:
     if actor != "operator":
-        raise TransitionError("plan approval requires operator")
-    current, _ = _job(store, job_id)
-    if current != JobState.plan_proposed:
-        raise TransitionError("plan is not awaiting approval")
-    with store.lock, store.connection:
-        store.connection.execute(
-            "UPDATE jobs SET state=?, updated_at=? WHERE id=?",
-            (JobState.plan_approved, _timestamp(), job_id),
+        raise TransitionError(f"{message} requires operator")
+    with store.transaction() as cur:
+        clauses = " AND spec_version=?" if expected is not None else ""
+        args_list: list[object] = [target, _timestamp(), _timestamp(), job_id, source]
+        if expected is not None:
+            args_list.append(expected)
+        args = tuple(args_list)
+        changed = cur.execute(
+            f"UPDATE jobs SET state=?, {timestamp_column}=?, updated_at=? WHERE id=? AND state=?{clauses}",
+            args,
         )
-        store.connection.execute(
-            "INSERT INTO job_events(job_id, ts, kind, data_json) VALUES (?, ?, 'state', json(?))",
-            (
-                job_id,
-                _timestamp(),
-                __import__("json").dumps(
-                    {"from": current, "to": JobState.plan_approved, "reason": "plan approved"}
-                ),
-            ),
-        )
-        store.connection.execute("UPDATE jobs SET plan_approved_at=? WHERE id=?", (_timestamp(), job_id))
+        if changed.rowcount != 1:
+            raise TransitionError(f"{message} is not valid for this job or spec version")
+        _event(cur, job_id, source, target, message)
 
 
-def approve_sample(store: Store, job_id: str, actor: Literal["operator"]) -> None:
-    if actor != "operator":
-        raise TransitionError("sample approval requires operator")
-    if _job(store, job_id)[0] != JobState.sample_ready:
-        raise TransitionError("sample is not awaiting approval")
-    transition(store, job_id, JobState.sample_approved, "sample approved")
-    with store.lock, store.connection:
-        store.connection.execute("UPDATE jobs SET sample_approved_at=? WHERE id=?", (_timestamp(), job_id))
+def approve_plan(
+    store: Store, job_id: str, actor: Literal["operator"], expected_spec_version: int | None = None
+) -> None:
+    _gate(
+        store,
+        job_id,
+        actor,
+        expected_spec_version,
+        JobState.plan_proposed,
+        JobState.plan_approved,
+        "plan_approved_at",
+        "plan approved",
+    )
 
 
-def start_full_run(store: Store, job_id: str, actor: Literal["operator"]) -> None:
-    if actor != "operator":
-        raise TransitionError("full run requires operator")
-    if _job(store, job_id)[0] != JobState.sample_approved:
-        raise TransitionError("sample is not approved")
-    transition(store, job_id, JobState.full_running, "full run started")
-    with store.lock, store.connection:
-        store.connection.execute("UPDATE jobs SET full_started_at=? WHERE id=?", (_timestamp(), job_id))
+def approve_sample(
+    store: Store, job_id: str, actor: Literal["operator"], expected_spec_version: int | None = None
+) -> None:
+    _gate(
+        store,
+        job_id,
+        actor,
+        expected_spec_version,
+        JobState.sample_ready,
+        JobState.sample_approved,
+        "sample_approved_at",
+        "sample approved",
+    )
+
+
+def start_full_run(
+    store: Store, job_id: str, actor: Literal["operator"], expected_spec_version: int | None = None
+) -> None:
+    _gate(
+        store,
+        job_id,
+        actor,
+        expected_spec_version,
+        JobState.sample_approved,
+        JobState.full_running,
+        "full_started_at",
+        "full run started",
+    )
 
 
 def edit_spec(store: Store, job_id: str, spec_version: int) -> None:
-    current, _ = _job(store, job_id)
-    if current in (
-        JobState.plan_proposed,
-        JobState.plan_approved,
-        JobState.pulling,
-        JobState.masking_sample,
-        JobState.sample_running,
-        JobState.sample_ready,
-        JobState.sample_approved,
-    ):
-        with store.lock, store.connection:
-            store.connection.execute(
-                "UPDATE jobs SET state='plan_proposed', spec_version=?, "
-                "plan_approved_at=NULL, sample_approved_at=NULL, updated_at=? WHERE id=?",
-                (spec_version, _timestamp(), job_id),
-            )
-            store.connection.execute(
-                "INSERT INTO job_events(job_id, ts, kind, data_json) VALUES (?, ?, 'state', json(?))",
-                (
-                    job_id,
-                    _timestamp(),
-                    __import__("json").dumps(
-                        {"from": current, "to": JobState.plan_proposed, "reason": "spec edited"}
-                    ),
-                ),
-            )
+    current, _, resume_state, _ = _job(store, job_id)
+    origin = resume_state if current in {JobState.paused, JobState.stalled} else current
+    if current in {
+        JobState.full_running,
+        JobState.quote_check,
+        JobState.building_output,
+        JobState.verifying,
+        JobState.done,
+        JobState.done_with_issues,
+    } or origin in {
+        JobState.full_running,
+        JobState.quote_check,
+        JobState.building_output,
+        JobState.verifying,
+    }:
+        raise TransitionError("spec cannot be edited after the full run starts")
+    with store.transaction() as cur:
+        cur.execute(
+            "UPDATE jobs SET state='plan_proposed', spec_version=?, plan_approved_at=NULL, sample_approved_at=NULL, pause_reason=NULL, resume_state=NULL, updated_at=? WHERE id=?",
+            (spec_version, _timestamp(), job_id),
+        )
+        cur.execute(
+            "UPDATE attempts SET ended_at=?, outcome='superseded_by_spec', counted=0 WHERE job_id=? AND ended_at IS NULL",
+            (_timestamp(), job_id),
+        )
+        cur.execute(
+            "UPDATE leads SET status='masked', reason=NULL WHERE job_id=? AND status IN ('in_flight','queued','done') AND in_sample=1",
+            (job_id,),
+        )
+        cur.execute("DELETE FROM results WHERE job_id=?", (job_id,))
+        _event(cur, job_id, current, JobState.plan_proposed, "spec edited")
 
 
 def pause(store: Store, job_id: str, reason: PauseReason) -> None:
-    current, _ = _job(store, job_id)
-    if current not in (
+    current, _, remembered, _ = _job(store, job_id)
+    if current not in {
         JobState.pulling,
         JobState.masking_sample,
         JobState.sample_running,
@@ -182,28 +224,28 @@ def pause(store: Store, job_id: str, reason: PauseReason) -> None:
         JobState.quote_check,
         JobState.building_output,
         JobState.verifying,
-    ):
+    }:
         raise TransitionError("job is not running")
-    with store.lock, store.connection:
-        store.connection.execute(
-            "UPDATE jobs SET state='paused', pause_reason=?, updated_at=? WHERE id=?",
-            (f"{reason}:{current}", _timestamp(), job_id),
+    with store.transaction() as cur:
+        resume_target = remembered if current == JobState.stalled and remembered is not None else current
+        changed = cur.execute(
+            "UPDATE jobs SET state='paused', pause_reason=?, resume_state=?, updated_at=? WHERE id=? AND state=?",
+            (reason, resume_target, _timestamp(), job_id, current),
         )
-        store.connection.execute(
-            "INSERT INTO job_events(job_id, ts, kind, data_json) VALUES (?, ?, 'state', json(?))",
-            (
-                job_id,
-                _timestamp(),
-                __import__("json").dumps({"from": current, "to": JobState.paused, "reason": reason}),
-            ),
-        )
+        if changed.rowcount != 1:
+            raise TransitionError("job changed before pause")
+        _event(cur, job_id, current, JobState.paused, reason)
 
 
 def resume(store: Store, job_id: str) -> None:
-    current, pause_reason = _job(store, job_id)
-    if current != JobState.paused or not pause_reason:
+    current, _, target, _ = _job(store, job_id)
+    if current != JobState.paused or target is None:
         raise TransitionError("job is not paused")
-    target = JobState(pause_reason.split(":", 1)[1])
-    transition(store, job_id, target, "resumed")
-    with store.lock, store.connection:
-        store.connection.execute("UPDATE jobs SET pause_reason=NULL WHERE id=?", (job_id,))
+    with store.transaction() as cur:
+        changed = cur.execute(
+            "UPDATE jobs SET state=?, pause_reason=NULL, resume_state=NULL, updated_at=? WHERE id=? AND state='paused' AND resume_state=?",
+            (target, _timestamp(), job_id, target),
+        )
+        if changed.rowcount != 1:
+            raise TransitionError("job changed before resume")
+        _event(cur, job_id, JobState.paused, target, "resumed")

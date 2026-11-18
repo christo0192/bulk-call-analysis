@@ -28,7 +28,9 @@ def test_consistent_reconciliation_is_ok() -> None:
     store = open_store(Path(":memory:"))
     store.create_project("p", "Project")
     store.create_job("j", "p", 1)
-    store.add_lead("j", "one", LeadStatus.done, calls_pulled=2, calls_sent=1, calls_dropped_cap=1)
+    store.add_lead("j", "one", LeadStatus.queued, calls_pulled=2, calls_sent=1, calls_dropped_cap=1)
+    attempt = store.start_attempt("j", "one", "model")
+    assert store.record_result("j", "one", attempt, {}, True, [])
     store.connection.execute("INSERT INTO id_intake VALUES ('j', 1, 1, 0, 0)")
     result = reconcile(store, "j")
     assert result.ok
