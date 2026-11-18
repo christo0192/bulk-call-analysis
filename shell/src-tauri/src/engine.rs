@@ -109,6 +109,8 @@ impl Engine {
         let (program, args) = command_line(&self.inner.app);
         let mut command = Command::new(program);
         command.args(args).env_clear().envs(minimal_environment());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let mut child = command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -168,7 +170,12 @@ impl Engine {
         let _ = client
             .request("shutdown", json!({}), Duration::from_secs(10))
             .await;
+        #[cfg(unix)]
+        procguard::terminate_group(child.id().unwrap_or_default());
+        #[cfg(windows)]
         let _ = child.kill().await;
+        #[cfg(unix)]
+        let _ = child.wait().await;
         *self.inner.rpc.lock().await = None;
         Err(RpcError::Closed)
     }
@@ -289,5 +296,48 @@ mod tests {
         }
         assert!(!t.allow(n));
         assert!(t.delay() <= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn restart_window_expires_attempts() {
+        let mut tracker = RestartTracker::new();
+        let start = Instant::now();
+        for _ in 0..5 {
+            assert!(tracker.allow(start));
+        }
+        assert!(!tracker.allow(start));
+        assert!(tracker.allow(start + Duration::from_secs(601)));
+    }
+
+    #[test]
+    fn restart_delay_grows() {
+        let mut tracker = RestartTracker::new();
+        let now = Instant::now();
+        assert_eq!(tracker.delay(), Duration::from_secs(1));
+        assert!(tracker.allow(now));
+        assert_eq!(tracker.delay(), Duration::from_secs(1));
+        for _ in 0..4 {
+            assert!(tracker.allow(now));
+        }
+        assert_eq!(tracker.delay(), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn environment_allowlist_strips_unapproved_variables() {
+        std::env::set_var("BCA_TEST_ALLOWED", "no");
+        std::env::set_var("ANTHROPIC_API_KEY", "secret");
+        let environment = minimal_environment();
+        assert!(!environment.contains_key("BCA_TEST_ALLOWED"));
+        assert!(!environment.contains_key("ANTHROPIC_API_KEY"));
+        std::env::remove_var("BCA_TEST_ALLOWED");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn tooltip_handles_zero_and_large_numbers() {
+        assert_eq!(
+            format_tooltip(0, 1_000_000, "done".into()),
+            "0 / 1,000,000 · done"
+        );
     }
 }

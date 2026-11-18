@@ -121,6 +121,7 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncBufReadExt, BufReader};
     #[test]
     fn framing_round_trip() {
         let value = json!({"jsonrpc":"2.0","id":1});
@@ -129,5 +130,84 @@ mod tests {
     #[test]
     fn malformed_line_is_rejected() {
         assert!(decode(b"not json\n").is_err());
+    }
+
+    #[test]
+    fn non_object_line_is_rejected() {
+        assert!(decode(b"[1, 2]\n").is_err());
+    }
+
+    #[test]
+    fn request_correlates_response_by_id() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, server_io) = tokio::io::duplex(1024);
+            let client = Client::new(client_io);
+            let request = {
+                let client = client.clone();
+                tokio::spawn(async move {
+                    client
+                        .request("echo", json!({}), Duration::from_secs(1))
+                        .await
+                })
+            };
+            let mut server = BufReader::new(server_io);
+            let mut line = String::new();
+            server.read_line(&mut line).await.unwrap();
+            let sent: Value = serde_json::from_str(&line).unwrap();
+            let (notifications, _) = mpsc::channel(1);
+            client
+                .dispatch(json!({"id":sent["id"],"result":42}), &notifications)
+                .await;
+            assert_eq!(request.await.unwrap().unwrap(), json!(42));
+        });
+    }
+
+    #[test]
+    fn request_times_out_and_removes_pending_entry() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, _server_io) = tokio::io::duplex(1024);
+            let client = Client::new(client_io);
+            assert!(matches!(
+                client
+                    .request("slow", json!({}), Duration::from_millis(5))
+                    .await,
+                Err(RpcError::Timeout)
+            ));
+            assert!(client.pending.lock().await.is_empty());
+        });
+    }
+
+    #[test]
+    fn remote_error_is_returned() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, server_io) = tokio::io::duplex(1024);
+            let client = Client::new(client_io);
+            let request = {
+                let client = client.clone();
+                tokio::spawn(async move {
+                    client
+                        .request("fail", json!({}), Duration::from_secs(1))
+                        .await
+                })
+            };
+            let mut server = BufReader::new(server_io);
+            let mut line = String::new();
+            server.read_line(&mut line).await.unwrap();
+            let sent: Value = serde_json::from_str(&line).unwrap();
+            let (notifications, _) = mpsc::channel(1);
+            client
+                .dispatch(
+                    json!({"id":sent["id"],"error":{"code":7,"message":"bad"}}),
+                    &notifications,
+                )
+                .await;
+            assert!(matches!(
+                request.await.unwrap(),
+                Err(RpcError::Remote { code: 7, .. })
+            ));
+        });
     }
 }

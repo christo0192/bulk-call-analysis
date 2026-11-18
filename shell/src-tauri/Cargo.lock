@@ -368,6 +368,7 @@ name = "bulk-call-analysis"
 version = "0.1.0"
 dependencies = [
  "core-foundation",
+ "libc",
  "log",
  "objc2 0.5.3",
  "objc2-foundation 0.2.2",
