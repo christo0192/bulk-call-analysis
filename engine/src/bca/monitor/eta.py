@@ -50,7 +50,14 @@ class EtaEstimator:
         self._sleep.append((start, end))
 
     def _excluded(self, start: float, end: float) -> float:
-        return sum(max(0.0, min(end, b) - max(start, a)) for a, b in (*self._paused, *self._sleep) if b > a)
+        spans = sorted((a, b) for a, b in (*self._paused, *self._sleep) if b > a)
+        merged: list[tuple[float, float]] = []
+        for a, b in spans:
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
+        return sum(max(0.0, min(end, b) - max(start, a)) for a, b in merged)
 
     def estimate(
         self,
@@ -62,40 +69,68 @@ class EtaEstimator:
     ) -> Eta:
         if remaining < 0 or concurrency < 1:
             raise ValueError("remaining must be non-negative and concurrency positive")
-        points = [ts for ts in self._completed if now - self.window_s <= ts <= now]
+        points = sorted(ts for ts in self._completed if ts <= now)
+        if len(points) > 10:
+            points = points[-max(10, len(points)) :]
         intervals = [b - a - self._excluded(a, b) for a, b in pairwise(points)]
-        intervals = [value for value in intervals if value > 0]
         seeded = len(points) < 10
         if seeded:
             durations = [value for value in sample_durations if value > 0]
-            base = (sum(durations) / len(durations) / concurrency) if durations else 0.0
-            low = high = base * (remaining + repair_pass_leads)
+            if not durations:
+                return Eta(math.inf, math.inf, True)
+            low = _percentile(durations, 25) / concurrency * (remaining + repair_pass_leads)
+            high = _percentile(durations, 75) / concurrency * (remaining + repair_pass_leads)
         else:
-            low_rate = _percentile(intervals, 25) / max(1, concurrency) if intervals else 0.0
-            high_rate = _percentile(intervals, 75) / max(1, concurrency) if intervals else 0.0
-            low = low_rate * (remaining + repair_pass_leads)
-            high = high_rate * (remaining + repair_pass_leads)
+            active = points[-1] - points[0] - self._excluded(points[0], points[-1])
+            if active <= 0 or not intervals:
+                return Eta(math.inf, math.inf, False)
+            rate = len(intervals) / active
+            spread = 1.96 / math.sqrt(len(intervals))
+            low_rate = rate / (1 + spread)
+            high_rate = rate / max(0.01, 1 - spread)
+            low = (remaining + repair_pass_leads) / high_rate
+            high = (remaining + repair_pass_leads) / low_rate
         return Eta(low, max(low, high), seeded)
 
     def with_quota(
-        self, eta: Eta, snapshot_history: Iterable[QuotaPoint], remaining: int, stop_percent: int
+        self,
+        eta: Eta,
+        snapshot_history: Iterable[QuotaPoint],
+        remaining: int,
+        stop_percent: int,
+        now: float | None = None,
     ) -> Eta:
         points = sorted(snapshot_history, key=lambda point: point.taken_at)
-        movement = [(a, b) for a, b in pairwise(points) if b.used_percent > a.used_percent]
-        if not movement or remaining <= 0:
+        if len(points) < 2 or remaining <= 0:
             return eta
-        first, last = movement[0][0], movement[-1][1]
-        percent_per_lead = (last.used_percent - first.used_percent) / max(1, len(points) - 1)
+        decrease = max(
+            (index for index, (a, b) in enumerate(pairwise(points)) if b.used_percent < a.used_percent),
+            default=-1,
+        )
+        first_index = decrease + 1
+        first, last = points[first_index], points[-1]
+        if last.used_percent <= first.used_percent:
+            return eta
+        completions = sum(first.taken_at <= ts <= last.taken_at for ts in self._completed)
+        if completions == 0:
+            return eta
+        percent_per_lead = (last.used_percent - first.used_percent) / completions
         if percent_per_lead <= 0:
             return eta
         capacity = max(0.0, (stop_percent - last.used_percent) / percent_per_lead)
         fraction = min(1.0, capacity / remaining)
-        if fraction >= 1.0 or last.resets_at is None:
+        current = last.taken_at if now is None else now
+        if fraction >= 1.0:
             return eta
+        if last.resets_at is None:
+            return Eta(eta.low, math.inf, eta.seeded, fraction, None)
         reset = float(last.resets_at)
-        wait = max(0.0, reset - last.taken_at)
-        extra = eta.high * (remaining - capacity) / max(1.0, remaining)
-        return Eta(eta.low + wait * (1 - fraction), eta.high + wait + extra, eta.seeded, fraction, reset)
+        if current + fraction * eta.high >= reset:
+            return eta
+        wait = max(0.0, reset - current)
+        return Eta(
+            wait + (1 - fraction) * eta.low, wait + (1 - fraction) * eta.high, eta.seeded, fraction, reset
+        )
 
 
 def _percentile(values: list[float], percentile: int) -> float:

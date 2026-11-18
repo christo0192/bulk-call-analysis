@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from collections import deque
 from dataclasses import dataclass
 from typing import Literal, TypeVar
@@ -38,29 +39,34 @@ class Subscription[T]:
         if limit < 1:
             raise ValueError("subscription limit must be positive")
         self._events: deque[T] = deque(maxlen=limit)
+        self._lock = threading.Lock()
         self.dropped = 0
         self.closed = False
 
     def put(self, item: T) -> None:
-        if self.closed:
-            return
-        if len(self._events) == self._events.maxlen:
-            self._events.popleft()
-            self.dropped += 1
-        self._events.append(item)
+        with self._lock:
+            if self.closed:
+                return
+            if len(self._events) == self._events.maxlen:
+                self._events.popleft()
+                self.dropped += 1
+            self._events.append(item)
 
     def get_nowait(self) -> T:
-        if not self._events:
-            raise LookupError("subscription is empty")
-        return self._events.popleft()
+        with self._lock:
+            if not self._events:
+                raise LookupError("subscription is empty")
+            return self._events.popleft()
 
     def drain(self) -> list[T]:
-        items = list(self._events)
-        self._events.clear()
-        return items
+        with self._lock:
+            items = list(self._events)
+            self._events.clear()
+            return items
 
     def close(self) -> None:
-        self.closed = True
+        with self._lock:
+            self.closed = True
 
 
 class EventBus:
@@ -69,17 +75,22 @@ class EventBus:
             raise ValueError("queue_size must be positive")
         self.queue_size = queue_size
         self._subscribers: list[Subscription[Event]] = []
+        self._lock = threading.Lock()
 
     def subscribe(self, queue_size: int | None = None) -> Subscription[Event]:
         subscription: Subscription[Event] = Subscription(queue_size or self.queue_size)
-        self._subscribers.append(subscription)
+        with self._lock:
+            self._subscribers.append(subscription)
         return subscription
 
     def unsubscribe(self, subscription: Subscription[Event]) -> None:
         subscription.close()
-        if subscription in self._subscribers:
-            self._subscribers.remove(subscription)
+        with self._lock:
+            if subscription in self._subscribers:
+                self._subscribers.remove(subscription)
 
     def publish(self, event: Event) -> None:
-        for subscriber in tuple(self._subscribers):
+        with self._lock:
+            subscribers = tuple(self._subscribers)
+        for subscriber in subscribers:
             subscriber.put(event)

@@ -56,3 +56,35 @@ def test_checklist_statuses_for_mid_run_job() -> None:
     assert checklist["quote check and repair"] == "pending"
     assert checklist["summary written"] == "pending"
     store.close()
+
+
+def test_counts_expose_each_terminal_status_and_retry_only_failed_attempts() -> None:
+    store = open_store(Path(":memory:"))
+    store.create_project("project", "Project")
+    store.create_job("job", "project", 1, state="done_with_issues")
+    for lead_id, status in {
+        "done": LeadStatus.done,
+        "failed": LeadStatus.failed,
+        "transcription": LeadStatus.transcription_failed,
+        "short": LeadStatus.too_short,
+        "not_started": LeadStatus.not_started,
+    }.items():
+        store.add_lead("job", lead_id, status)
+    result = counts(store, "job")
+    assert result.done == 1
+    assert result.transcription_failed == 1 and result.too_short == 1 and result.not_started == 1
+    assert result.remaining == 0
+    assert (
+        sum(
+            (
+                result.done,
+                sum(result.failed.values()),
+                result.transcription_failed,
+                result.too_short,
+                result.not_started,
+            )
+        )
+        == 5
+    )
+    assert all(item.status == "done" for item in result.checklist)
+    store.close()

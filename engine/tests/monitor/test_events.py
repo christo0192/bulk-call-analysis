@@ -1,3 +1,5 @@
+import threading
+
 from bca.monitor.events import Event, EventBus
 
 
@@ -28,3 +30,20 @@ def test_each_subscriber_receives_every_event_when_queues_have_capacity() -> Non
     for event in events:
         bus.publish(event)
     assert [sub.drain() for sub in subscribers] == [events, events]
+
+
+def test_concurrent_publish_accounts_for_every_eviction() -> None:
+    bus = EventBus(queue_size=8)
+    subscription = bus.subscribe()
+    total = 4 * 1000
+
+    def publish(offset: int) -> None:
+        for index in range(1000):
+            bus.publish(Event("activity", None, float(offset + index), {}))
+
+    threads = [threading.Thread(target=publish, args=(offset * 1000,)) for offset in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(subscription.drain()) + subscription.dropped == total
