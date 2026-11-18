@@ -3,7 +3,7 @@ from pathlib import Path
 from openpyxl import load_workbook  # type: ignore[import-untyped]
 
 from bca.outputs.excel import ColumnSpec, write_results
-from bca.outputs.quotes import check_answer, check_quote
+from bca.outputs.quotes import QuoteCheck, check_answer, check_quote, repair_prompt
 from bca.store import QuoteField
 
 LABELS = {"learner": ["Customer"], "advisor": ["Agent"]}
@@ -26,6 +26,24 @@ def test_quote_call_scope() -> None:
         {"quote": "second", "call_number": 2}, (QuoteField("quote", "learner"),), bundle, LABELS
     )
     assert checks[0].ok
+
+
+def test_quotes_require_one_line_words_case_insensitive_labels_and_continuations() -> None:
+    text = "=== CALL 2 of 2 === · date · 3 min ===\n[00:01:02] customer: I can't\n afford it\nAgent: okay"
+    assert check_quote("I can\u2019t afford it", text, "learner", LABELS).ok
+    assert not check_quote("able to pay", "Customer: I am unable to pay", "learner", LABELS).ok
+    splice = "Customer: I want to\nAgent: Go on\nCustomer: quit my job soon"
+    assert not check_quote("I want to quit my job", splice, "learner", LABELS).ok
+
+
+def test_quote_call_number_coercion_and_repair_prompt_context() -> None:
+    bundle = "=== CALL 1 of 2 ===\nCustomer: first words\n=== CALL 2 of 2 ===\nCustomer: second words"
+    field = (QuoteField("objection", "learner"),)
+    assert not check_answer({"objection": "first words", "call_number": "2"}, field, bundle, LABELS)[0].ok
+    assert check_answer({"objection": "second words", "call_number": 2.0}, field, bundle, LABELS)[0].ok
+    failure = QuoteCheck(False, "not found", "diagnostic", "objection", 2)
+    prompt = repair_prompt({"objection": "quoted text", "valid": 1}, [failure], "INSTR")
+    assert all(item in prompt for item in ("objection", "quoted text", "call=2", "valid"))
 
 
 def test_excel_formula_guard_numbers_and_header(tmp_path: Path) -> None:

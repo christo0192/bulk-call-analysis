@@ -13,7 +13,10 @@ def _cap(counter: Counter[str]) -> dict[str, int]:
     result = dict(common)
     other = sum(counter.values()) - sum(value for _, value in common)
     if other:
-        result["other"] = other
+        key = "other"
+        while key in result:
+            key = f"other ({key.count('other') + 1})"
+        result[key] = other
     return result
 
 
@@ -28,9 +31,24 @@ def aggregates(
     raw_fields = spec.output_schema.get("properties", {})
     fields = group_by or (list(raw_fields) if isinstance(raw_fields, dict) else [])
     answer_counts = {field: _cap(Counter(str(answer.get(field)) for answer in answers)) for field in fields}
+    rules = spec.rules
+    rebuilt = store.rows(
+        "SELECT data_json FROM job_events WHERE job_id=? AND kind='rules_rebuilt' ORDER BY id DESC LIMIT 1",
+        (job_id,),
+    )
+    if rebuilt:
+        from bca.store.spec import _rule
+
+        raw = json.loads(str(rebuilt[0][0]))["rules"]
+        rules = tuple(_rule(item) for item in raw)
     rule_counts: dict[str, Counter[str]] = {}
     for answer in answers:
-        for name, value in evaluate(spec.rules, answer, {}).items():
+        try:
+            evaluated = evaluate(rules, answer, {"lead_id": str(answer.get("lead_id", ""))})
+        except TypeError as exc:
+            evaluated = {str(getattr(rule, "name", "in_scope")): "rule error" for rule in rules}
+            evaluated["rule error"] = str(exc)
+        for name, value in evaluated.items():
             rule_counts.setdefault(name, Counter())[str(value)] += 1
     result: dict[str, object] = {
         "answer_fields": answer_counts,
@@ -38,5 +56,6 @@ def aggregates(
     }
     if len(fields) >= 2:
         cross = Counter((str(answer.get(fields[0])), str(answer.get(fields[1]))) for answer in answers)
-        result["crosstab"] = {f"{left} | {right}": count for (left, right), count in cross.most_common(50)}
+        capped = _cap(Counter({f"{left} | {right}": count for (left, right), count in cross.items()}))
+        result["crosstab"] = capped
     return result

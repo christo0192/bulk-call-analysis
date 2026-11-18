@@ -60,6 +60,43 @@ def test_rule_type_errors(condition: Condition, answer: dict[str, object]) -> No
         evaluate((ReviewFlagRule("flag", "all", (condition,)),), answer, {})
 
 
+def test_numeric_float_null_and_guarded_conditions() -> None:
+    rules = (
+        ReviewFlagRule("greater", "all", (Condition("score", "gt", 2),)),
+        ReviewFlagRule("equal", "all", (Condition("score", "eq", 3),)),
+        ReviewFlagRule("null", "all", (Condition("stage", "eq", "a"),)),
+        ReviewFlagRule("guarded", "all", (Condition("score", "not_null"), Condition("score", "gt", 5))),
+    )
+    result = evaluate(rules, {"score": 2.5, "stage": None}, {})
+    assert result == {"greater": True, "equal": False, "null": False, "guarded": False}
+    assert (
+        evaluate((ReviewFlagRule("missing", "all", (Condition("x", "ne", None),)),), {}, {})["missing"]
+        is True
+    )
+
+
+def test_match_short_circuits_and_nonfinite_thresholds_are_rejected() -> None:
+    rule = ReviewFlagRule("guarded", "any", (Condition("missing", "is_null"), Condition("bad", "gt", "x")))
+    assert evaluate((rule,), {}, {})["guarded"] is True
+    with pytest.raises(RuleTypeError):
+        evaluate((ThresholdGroupRule("band", "score", (10,), ("low", "high")),), {"score": float("nan")}, {})
+
+
+def test_validate_rules_checks_values_nullable_numbers_and_collisions() -> None:
+    schema = {"properties": {"score": {"type": ["number", "null"]}, "stage": {"type": "string"}}}
+    validate_rules((ReviewFlagRule("ok", "all", (Condition("score", "eq", 3),)),), schema)
+    with pytest.raises(ValueError, match="condition value"):
+        validate_rules((ReviewFlagRule("bad", "all", (Condition("stage", "eq", 3),)),), schema)
+    with pytest.raises(ValueError, match="only one"):
+        validate_rules(
+            (
+                InScopeRule("all", (Condition("score", "gt", 1),)),
+                InScopeRule("all", (Condition("score", "gt", 2),)),
+            ),
+            schema,
+        )
+
+
 def test_validate_rules_schema() -> None:
     rule = InScopeRule("all", (Condition("missing", "eq", 1),))
     with pytest.raises(ValueError, match="schema"):
