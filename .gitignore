@@ -1,0 +1,37 @@
+# Local-only material: design notes, research, orchestration state
+internal/
+.gsd/
+CLAUDE.local.md
+
+# Site-specific configuration (real names, paths, table ids)
+config/site.toml
+
+# Credentials and secrets: never commit
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*credentials*
+auth.json
+gcp-keys/
+
+# Data: transcripts and outputs contain personal data
+data/
+output/
+*.db
+*.sqlite
+*.sqlite3
+*.xlsx
+*.csv
+!engine/tests/fixtures/**/*.csv
+
+# Build and tooling
+node_modules/
+target/
+dist/
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
