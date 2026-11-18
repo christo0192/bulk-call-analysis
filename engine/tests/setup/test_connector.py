@@ -12,8 +12,9 @@ from bca.setup.connector import detect, recheck
 def test_defaults_are_found_per_os(tmp_path: Path, system: str) -> None:
     home = tmp_path / "home"
     name = "sample"
+    connector_root = tmp_path if system == "Windows" else home
     connector = (
-        home
+        connector_root
         / "mcp-servers"
         / name
         / ".venv"
@@ -26,7 +27,12 @@ def test_defaults_are_found_per_os(tmp_path: Path, system: str) -> None:
     key.parent.mkdir()
     key.touch()
     result = detect(
-        BigQueryConfig("project"), connector_name=name, key_name=key.name, system=system, home=home, env={}
+        BigQueryConfig("project"),
+        connector_name=name,
+        key_name=key.name,
+        system=system,
+        home=home,
+        env={"SystemDrive": str(tmp_path)} if system == "Windows" else {},
     )
     assert result.status == "located"
     assert result.connector == connector

@@ -13,7 +13,7 @@ def _archive(name: str = "codex") -> bytes:
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as bundle:
         data = b"synthetic codex binary"
-        info = tarfile.TarInfo("package/bin/" + name)
+        info = tarfile.TarInfo("bin/" + name)
         info.size = len(data)
         bundle.addfile(info, io.BytesIO(data))
     return output.getvalue()
@@ -31,7 +31,7 @@ def test_platform_asset_mapping(platform_name: str) -> None:
 def test_download_sha_signature_extract_replace_and_no_path_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    archive = _archive()
+    archive = _archive("codex.exe")
     asset = "codex-package-" + ASSET_SUFFIX["win32-x64"]
     calls: list[str] = []
 
