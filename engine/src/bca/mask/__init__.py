@@ -1,7 +1,16 @@
 """PII masking and post-mask leak scanning."""
 
 from .leakscan import Hit, LeakReport, calibrate, scan_lead
-from .masker import LeadMaskStats, Masked, MaskingContext, mask_lead_stream, mask_text, run_masking
+from .masker import (
+    LeadMaskStats,
+    Masked,
+    MaskingContext,
+    MissingNer,
+    load_harvest,
+    mask_lead_stream,
+    mask_text,
+    run_masking,
+)
 
 __all__ = [
     "Hit",
@@ -9,7 +18,9 @@ __all__ = [
     "LeakReport",
     "Masked",
     "MaskingContext",
+    "MissingNer",
     "calibrate",
+    "load_harvest",
     "mask_lead_stream",
     "mask_text",
     "run_masking",

@@ -6,6 +6,7 @@ import importlib
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 
@@ -42,11 +43,15 @@ class SpacyNer:
         return [Span(ent.start_char, ent.end_char) for ent in self._nlp(text).ents if ent.label_ == "PERSON"]
 
 
+@lru_cache(maxsize=32)
 def roster_pattern(path: Path | None) -> re.Pattern[str] | None:
     if path is None:
         return None
-    names = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    names += [part for name in names for part in name.split() if len(part) >= 3]
+    names = [line.strip() for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+    keep = {"more", "deep", "dev", "may", "will", "fine", "team", "course", "program", "the", "and"}
+    names += [
+        part for name in names for part in name.split() if len(part) >= 3 and part.casefold() not in keep
+    ]
     if not names:
         return None
     return re.compile(
@@ -57,9 +62,66 @@ def roster_pattern(path: Path | None) -> re.Pattern[str] | None:
     )
 
 
+MORE_STOP = {
+    "so",
+    "ok",
+    "okay",
+    "and",
+    "but",
+    "yes",
+    "no",
+    "dear",
+    "mr",
+    "mrs",
+    "ms",
+    "miss",
+    "dr",
+    "see",
+    "like",
+    "bye",
+    "also",
+    "actually",
+    "basically",
+    "because",
+    "then",
+    "where",
+    "when",
+    "why",
+    "who",
+    "great",
+    "nice",
+    "perfect",
+    "fine",
+    "cool",
+    "interview",
+    "program",
+    "programme",
+    "course",
+    "team",
+    "manager",
+    "sir",
+    "madam",
+    "mam",
+    "ji",
+    "hmm",
+    "uh",
+    "um",
+    "oh",
+    "ah",
+    "is",
+    "are",
+    "was",
+}
 _intro = re.compile(
-    r"(?i)\b(this is|my name is)\s+([A-Za-z]+(?:\s+(?!from\b)[A-Za-z]+){0,2})(?=\s*(?:from\b|[,.!?]|$))"
+    r"\b((?i:this is|my name is))\s+([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,})?)"
+    r"(?=\s*(?:from\b|and\b|[,.!?]|$))"
 )
+_cap_greet = re.compile(r"\b(Hi|Hello|Hey|Dear)([,!]?[\s]+)([A-Z][a-zA-Z]{2,})\b")
+_cap_slot = re.compile(
+    r"\b(This is|My name is|Myself|I am|I'm)\s+([A-Z][a-zA-Z]{2,})"
+    r"(?:\s+([A-Z][a-zA-Z]{2,}))?(?=\s*(?:[,.!?]|from\b|here\b|speaking\b|calling\b|this side\b|$))"
+)
+_calling = re.compile(r"\b([A-Z][a-zA-Z]{2,})(\s+)(?=(?:calling|this side|here)\s+(?:from|with|on behalf)\b)")
 
 
 def mask_names(
@@ -70,7 +132,22 @@ def mask_names(
         text, n = roster.subn("[ADVISOR]", text)
         if n:
             counts["ROSTER"] = n
-    text, n = _intro.subn(lambda m: f"{m.group(1)} [NAME]", text)
+
+    def slot(match: re.Match[str]) -> str:
+        return match.group(0) if match.group(2).casefold() in MORE_STOP else f"{match.group(1)} [NAME]"
+
+    text, n = _cap_greet.subn(
+        lambda m: m.group(0) if m.group(3).casefold() in MORE_STOP else f"{m.group(1)}{m.group(2)}[NAME]",
+        text,
+    )
+    text, n_intro = _intro.subn(slot, text)
+    n += n_intro
+    text, n_slot = _cap_slot.subn(slot, text)
+    n += n_slot
+    text, n_call = _calling.subn(
+        lambda m: m.group(0) if m.group(1).casefold() in MORE_STOP else f"[NAME]{m.group(2)}", text
+    )
+    n += n_call
     if n:
         counts["INTRODUCTION"] = n
     if ner:
@@ -79,18 +156,22 @@ def mask_names(
             if 0 <= span.start < span.end <= len(text):
                 text = text[: span.start] + "[NAME]" + text[span.end :]
                 counts["NER"] = counts.get("NER", 0) + 1
-    harvested_pattern = [name for name in harvested if name.strip()]
-    if harvested_pattern:
-        pattern = re.compile(
-            r"(?<!\w)(?:"
-            + "|".join(re.escape(n) for n in sorted(harvested_pattern, key=len, reverse=True))
-            + r")(?!\w)",
-            re.I,
-        )
+    pattern = harvested_pattern(tuple(name for name in harvested if name.strip()))
+    if pattern:
         text, n = pattern.subn("[NAME]", text)
         if n:
             counts["HARVESTED"] = n
     return text, counts
+
+
+@lru_cache(maxsize=32)
+def harvested_pattern(names: tuple[str, ...]) -> re.Pattern[str] | None:
+    if not names:
+        return None
+    return re.compile(
+        r"(?<!\w)(?:" + "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True)) + r")(?!\w)",
+        re.I,
+    )
 
 
 def harvest_seen_twice(calls: Iterable[str], ner: NerBackend) -> list[str]:
