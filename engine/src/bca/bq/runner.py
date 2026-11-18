@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol, cast
+
+from google.cloud import bigquery
+from google.oauth2 import service_account
+
+from bca.config import BigQueryConfig
+
+from .guard import assert_job_config_read_only, validate_select
+
+
+@dataclass(frozen=True)
+class DryRun:
+    bytes: int
+    referenced_tables: list[str]
+    schema: list[tuple[str, str]]
+
+
+class BqRunner(Protocol):
+    def dry_run(self, sql: str, params: Mapping[str, object] | None = None) -> DryRun: ...
+    def iter_pages(
+        self, sql: str, params: Mapping[str, object] | None = None, page_size: int = 1000
+    ) -> Iterator[list[dict[str, object]]]: ...
+
+
+class GoogleBqRunner:
+    def __init__(self, cfg: BigQueryConfig) -> None:
+        if cfg.key_path is None:
+            raise ValueError("bigquery.key_path is required")
+        credential_factory: Any = service_account.Credentials.from_service_account_file
+        credentials = credential_factory(str(Path(cfg.key_path)))
+        self._client = bigquery.Client(project=cfg.project, location=cfg.location, credentials=credentials)
+        self._cfg = cfg
+
+    def _config(
+        self, params: Mapping[str, object] | None, *, dry_run: bool = False
+    ) -> bigquery.QueryJobConfig:
+        values = [] if params is None else list(params.items())
+        query_parameters: list[Any] = []
+        for name, value in values:
+            if isinstance(value, (list, tuple)):
+                query_parameters.append(bigquery.ArrayQueryParameter(name, "STRING", [str(x) for x in value]))
+            elif isinstance(value, str):
+                query_parameters.append(bigquery.ScalarQueryParameter(name, "STRING", value))
+            else:
+                query_parameters.append(bigquery.ScalarQueryParameter(name, "DATE", cast(Any, value)))
+        config = bigquery.QueryJobConfig(
+            query_parameters=query_parameters,
+            use_legacy_sql=False,
+            maximum_bytes_billed=self._cfg.max_bytes_billed,
+            labels={"app": "bulk-call-analysis"},
+            use_query_cache=True,
+            dry_run=dry_run,
+        )
+        assert_job_config_read_only(config)
+        return config
+
+    def dry_run(self, sql: str, params: Mapping[str, object] | None = None) -> DryRun:
+        validate_select(sql)
+        job = self._client.query(sql, job_config=self._config(params, dry_run=True))
+        schema = [(field.name, field.field_type) for field in (job.schema or [])]
+        tables = [str(item.table_id) for item in job.referenced_tables or []]
+        return DryRun(int(job.total_bytes_processed or 0), tables, schema)
+
+    def iter_pages(
+        self, sql: str, params: Mapping[str, object] | None = None, page_size: int = 1000
+    ) -> Iterator[list[dict[str, object]]]:
+        validate_select(sql)
+        result = self._client.query(sql, job_config=self._config(params)).result(page_size=page_size)
+        page: list[dict[str, object]] = []
+        for row in result:
+            page.append(dict(row.items()))
+            if len(page) == page_size:
+                yield page
+                page = []
+        if page:
+            yield page

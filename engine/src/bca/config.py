@@ -38,6 +38,8 @@ class RecipeConfig:
     duration_unit: Literal["ms", "s"] = "ms"
     max_chars_per_lead: int = 400_000
     drop_calls_shorter_than_s: int = 180
+    advisor_column: str | None = None
+    transcript_status_column: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,15 @@ def _path(data: dict[str, Any], section: str, key: str) -> Path | None:
     return Path(value).expanduser()
 
 
+def _optional_str(data: dict[str, Any], section: str, key: str) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise _error(f"{section}.{key}", "must be a non-empty string")
+    return value
+
+
 def load_config(path: Path) -> SiteConfig:
     try:
         raw = tomllib.loads(path.read_bytes().decode("utf-8-sig"))
@@ -162,6 +173,8 @@ def load_config(path: Path) -> SiteConfig:
             "transcript_text_column",
             "call_start_column",
             "call_duration_column",
+            "advisor_column",
+            "transcript_status_column",
             "duration_unit",
             "max_chars_per_lead",
             "drop_calls_shorter_than_s",
@@ -215,6 +228,8 @@ def load_config(path: Path) -> SiteConfig:
             cast(Literal["ms", "s"], duration),
             _int(recipe, "recipe", "max_chars_per_lead", 400_000),
             _int(recipe, "recipe", "drop_calls_shorter_than_s", 180),
+            _optional_str(recipe, "recipe", "advisor_column"),
+            _optional_str(recipe, "recipe", "transcript_status_column"),
         ),
         ModelsConfig(
             _str(models, "models", "claude_model", "claude-opus-5-5"),
