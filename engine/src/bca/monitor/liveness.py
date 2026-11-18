@@ -22,6 +22,7 @@ class Liveness:
         self.last_activity: float | None = None
         self._leads: dict[str, _Lead] = {}
         self._sleeping = False
+        self._sleep_started: float | None = None
 
     def on_activity(self, ts: float) -> None:
         self.last_activity = ts
@@ -34,10 +35,19 @@ class Liveness:
         self._leads.pop(lead, None)
         self.on_activity(ts)
 
-    def sleep_detected(self) -> None:
+    def sleep_detected(self, ts: float | None = None) -> None:
         self._sleeping = True
+        if self._sleep_started is None:
+            self._sleep_started = ts if ts is not None else self.last_activity
 
     def wake(self, ts: float) -> None:
+        if self._sleep_started is not None:
+            slept_for = max(0.0, ts - self._sleep_started)
+            for lead in self._leads.values():
+                lead.started += slept_for
+            if self.last_activity is not None:
+                self.last_activity += slept_for
+            self._sleep_started = None
         self._sleeping = False
         self.on_activity(ts)
 

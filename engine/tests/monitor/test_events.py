@@ -10,3 +10,21 @@ def test_drop_oldest_and_multiple_subscribers() -> None:
     assert [event.ts for event in first.drain()] == [2.0, 3.0]
     assert [event.ts for event in second.drain()] == [2.0, 3.0]
     assert first.dropped == second.dropped == 1
+
+
+def test_slow_subscriber_does_not_block_producer() -> None:
+    bus = EventBus(queue_size=1)
+    slow = bus.subscribe()
+    bus.publish(Event("activity", "job", 1.0, {}))
+    bus.publish(Event("activity", "job", 2.0, {}))
+    assert slow.dropped == 1
+    assert slow.get_nowait().ts == 2.0
+
+
+def test_each_subscriber_receives_every_event_when_queues_have_capacity() -> None:
+    bus = EventBus(queue_size=3)
+    subscribers = [bus.subscribe() for _ in range(2)]
+    events = [Event("activity", "job", float(ts), {}) for ts in (1, 2, 3)]
+    for event in events:
+        bus.publish(event)
+    assert [sub.drain() for sub in subscribers] == [events, events]

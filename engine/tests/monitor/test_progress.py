@@ -1,7 +1,16 @@
 from pathlib import Path
 
 from bca.monitor.progress import counts
-from bca.store import LeadStatus, open_store, reconcile
+from bca.store import (
+    JobState,
+    LeadStatus,
+    approve_plan,
+    approve_sample,
+    open_store,
+    reconcile,
+    start_full_run,
+    transition,
+)
 
 
 def test_counts_reconcile_synthetic_store() -> None:
@@ -23,4 +32,27 @@ def test_counts_reconcile_synthetic_store() -> None:
     assert result.in_flight == 1 and result.remaining == 2
     assert len(result.checklist) == 12
     assert reconcile(store, "job").ok
+    store.close()
+
+
+def test_checklist_statuses_for_mid_run_job() -> None:
+    store = open_store(Path(":memory:"))
+    store.create_project("project", "Project")
+    store.create_job("job", "project", 1)
+    store.add_lead("job", "lead", LeadStatus.queued)
+    transition(store, "job", JobState.plan_proposed)
+    approve_plan(store, "job", "operator")
+    transition(store, "job", JobState.pulling)
+    transition(store, "job", JobState.masking_sample)
+    transition(store, "job", JobState.sample_running)
+    transition(store, "job", JobState.sample_ready)
+    approve_sample(store, "job", "operator")
+    start_full_run(store, "job", "operator")
+
+    checklist = {item.name: item.status for item in counts(store, "job").checklist}
+    assert checklist["plan approved"] == "done"
+    assert checklist["sample run"] == "done"
+    assert checklist["full run n/N"] == "active"
+    assert checklist["quote check and repair"] == "pending"
+    assert checklist["summary written"] == "pending"
     store.close()

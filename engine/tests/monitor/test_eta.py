@@ -10,6 +10,20 @@ class Point:
     taken_at: float
 
 
+class FakeClock:
+    def __init__(self, value: float = 0.0) -> None:
+        self.value = value
+
+    def now(self) -> float:
+        return self.value
+
+    def monotonic(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
 def test_seed_then_real_range_and_repair() -> None:
     estimator = EtaEstimator()
     for ts in (10.0, 20.0, 30.0):
@@ -22,6 +36,37 @@ def test_seed_then_real_range_and_repair() -> None:
     assert not real.seeded and real.low <= real.high
 
 
+def test_steady_throughput_gives_expected_remaining_time() -> None:
+    clock = FakeClock()
+    estimator = EtaEstimator()
+    for _ in range(10):
+        estimator.completed(clock.now())
+        clock.advance(10)
+    eta = estimator.estimate(clock.now() - 10, remaining=4, concurrency=2)
+    assert eta.low == eta.high == 20
+
+
+def test_seed_uses_sample_durations_until_ten_completions() -> None:
+    estimator = EtaEstimator()
+    for ts in range(9):
+        estimator.completed(float(ts))
+    seeded = estimator.estimate(8, remaining=2, concurrency=2, sample_durations=(8, 12))
+    assert seeded.seeded and seeded.low == seeded.high == 10
+
+    estimator.completed(9)
+    real = estimator.estimate(9, remaining=2, concurrency=2)
+    assert not real.seeded
+
+
+def test_repair_pass_leads_are_included_in_eta() -> None:
+    estimator = EtaEstimator()
+    for ts in range(10):
+        estimator.completed(float(ts * 10))
+    eta = estimator.estimate(90, remaining=2, repair_pass_leads=3)
+    assert eta.low <= eta.high
+    assert eta.high == 50
+
+
 def test_paused_and_sleep_intervals_are_excluded() -> None:
     estimator = EtaEstimator()
     estimator.pause(10, 30)
@@ -30,6 +75,14 @@ def test_paused_and_sleep_intervals_are_excluded() -> None:
         estimator.completed(float(ts))
     estimator.completed(100)
     assert estimator.estimate(100, 1).high == 10
+
+
+def test_range_ordering_is_preserved_for_real_window() -> None:
+    estimator = EtaEstimator()
+    for ts in range(0, 100, 10):
+        estimator.completed(float(ts))
+    eta = estimator.estimate(90, remaining=3, concurrency=1)
+    assert eta.low <= eta.high
 
 
 def test_quota_projection_requires_movement_and_includes_wait() -> None:
