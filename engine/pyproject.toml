@@ -3,7 +3,7 @@ name = "bca-engine"
 version = "0.1.0"
 description = "Bulk call analysis engine"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = ["jsonschema>=4.23.0"]
 
 [build-system]
 requires = ["hatchling"]
