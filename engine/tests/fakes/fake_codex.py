@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -16,11 +17,20 @@ def _scenario(path: Path) -> dict[str, Any]:
 
 async def run(path: Path) -> None:
     scenario = _scenario(path)
+    env_report = scenario.get("env_report")
+    if isinstance(env_report, str):
+        Path(env_report).write_text(
+            json.dumps(
+                {key: value for key, value in os.environ.items() if "API_KEY" in key or key == "CODEX_HOME"}
+            ),
+            encoding="utf-8",
+        )
     log_path = Path(str(path) + ".methods.json")
     methods: list[str] = []
     turns = 0
     quota = int(scenario.get("used_percent", 0))
     threads: dict[str, str] = {}
+    turn_threads: dict[str, str] = {}
 
     async def send(message: dict[str, Any]) -> None:
         sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
@@ -42,7 +52,7 @@ async def run(path: Path) -> None:
                     "limitId": "codex",
                     "primary": {"usedPercent": quota, "windowDurationMins": 300, "resetsAt": 9999999999},
                     "secondary": None,
-                    "credits": {"balance": str(scenario.get("credit_balance", "0")), "hasCredits": False},
+                    "credits": {"balance": str(scenario.get("credit_balance", "5")), "hasCredits": False},
                     "spendControlReached": scenario.get("spend_control_reached"),
                     "rateLimitReachedType": scenario.get("reached_type"),
                     "normalModelSlug": "codex",
@@ -51,7 +61,7 @@ async def run(path: Path) -> None:
                 "rateLimitsByLimitId": {},
             }
         elif method == "model/list":
-            result = {"models": scenario.get("models", [])}
+            result = {"models": scenario.get("models", ["codex"])}
         elif method == "thread/start":
             thread_id = f"thread-{len(threads) + 1}"
             threads[thread_id] = thread_id
@@ -61,6 +71,7 @@ async def run(path: Path) -> None:
             turns += 1
             thread_id = str(params.get("threadId", "thread-1"))
             turn_id = f"turn-{turns}"
+            turn_threads[turn_id] = thread_id
             await send(
                 {
                     "method": "turn/started",
@@ -87,8 +98,42 @@ async def run(path: Path) -> None:
             lead = lead_match.group(1) if lead_match else "default"
             errors = scenario.get("errors", {})
             if lead in scenario.get("hangs", []) or scenario.get("hang") == lead:
+                result = {"turn": {"id": turn_id}}
+                if request_id is not None:
+                    await send({"id": request_id, "result": result})
                 return
             await asyncio.sleep(float(scenario.get("latency_ms", 0)) / 1000)
+            if scenario.get("tool_call") == lead:
+                await send(
+                    {
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "item": {"type": "commandExecution"},
+                        },
+                    }
+                )
+                await send(
+                    {"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id}}}
+                )
+                result = {"turn": {"id": turn_id}}
+                if request_id is not None:
+                    await send({"id": request_id, "result": result})
+                return
+            if scenario.get("reroute") == lead:
+                await send(
+                    {
+                        "method": "model/rerouted",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "fromModel": "codex",
+                            "toModel": "codex-mini",
+                            "reason": "fake",
+                        },
+                    }
+                )
             if lead in errors:
                 await send(
                     {
@@ -102,7 +147,7 @@ async def run(path: Path) -> None:
                     }
                 )
             else:
-                answer = scenario.get("answers", {}).get(lead, scenario.get("default_answer", "{}"))
+                answer = scenario.get("answers", {}).get(lead, scenario.get("default_answer", {"ok": True}))
                 text = answer if isinstance(answer, str) else json.dumps(answer)
                 await send(
                     {
@@ -122,6 +167,22 @@ async def run(path: Path) -> None:
                     }
                 )
                 quota += int(scenario.get("quota_increment", 0))
+                if scenario.get("credit_drop"):
+                    await send(
+                        {
+                            "method": "account/rateLimits/updated",
+                            "params": {
+                                "rateLimits": {
+                                    "primary": {
+                                        "usedPercent": quota,
+                                        "windowDurationMins": 300,
+                                        "resetsAt": 9999999999,
+                                    },
+                                    "credits": {"balance": "0", "hasCredits": True},
+                                }
+                            },
+                        }
+                    )
                 await send(
                     {
                         "method": "turn/completed",
@@ -131,22 +192,31 @@ async def run(path: Path) -> None:
                         },
                     }
                 )
+                update: dict[str, Any] = {
+                    "primary": {
+                        "usedPercent": quota,
+                        "windowDurationMins": 300,
+                        "resetsAt": 9999999999,
+                    }
+                }
+                if scenario.get("credit_drop"):
+                    update["credits"] = {"balance": "0", "hasCredits": True}
+                await send({"method": "account/rateLimits/updated", "params": {"rateLimits": update}})
+            result = {"turn": {"id": turn_id}}
+        elif method == "turn/interrupt":
+            turn_id = str(params.get("turnId", ""))
+            if not scenario.get("ignore_interrupt"):
                 await send(
                     {
-                        "method": "account/rateLimits/updated",
+                        "method": "turn/completed",
                         "params": {
-                            "rateLimits": {
-                                "primary": {
-                                    "usedPercent": quota,
-                                    "windowDurationMins": 300,
-                                    "resetsAt": 9999999999,
-                                }
-                            }
+                            "threadId": turn_threads.get(turn_id),
+                            "turn": {"id": turn_id, "status": "interrupted"},
                         },
                     }
                 )
-            result = {"turn": {"id": turn_id}}
-        elif method in {"turn/interrupt", "thread/unsubscribe"}:
+            result = {}
+        elif method == "thread/unsubscribe":
             result = {}
         elif method == "initialized":
             return
@@ -154,8 +224,14 @@ async def run(path: Path) -> None:
             result = {}
         if request_id is not None:
             await send({"id": request_id, "result": result})
-        if scenario.get("crash_after_turns") and turns >= int(scenario["crash_after_turns"]):
-            raise SystemExit(2)
+            crash_once = scenario.get("crash_once_file")
+            should_crash = scenario.get("crash_after_turns") and turns >= int(scenario["crash_after_turns"])
+            if should_crash and isinstance(crash_once, str) and Path(crash_once).exists():
+                should_crash = False
+            if should_crash and isinstance(crash_once, str):
+                Path(crash_once).write_text("crashed", encoding="utf-8")
+            if should_crash:
+                raise SystemExit(2)
 
     for line in sys.stdin:
         try:

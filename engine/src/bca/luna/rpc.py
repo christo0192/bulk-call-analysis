@@ -116,10 +116,14 @@ class AppServerClient:
         if "id" in message:
             log.warning("declining server request %s", method)
             response: JsonObject
-            if method.endswith("requestApproval"):
-                response = {"decision": "decline"}
-            elif method == "execCommandApproval" or method == "applyPatchApproval":
+            if (
+                method == "execCommandApproval"
+                or method == "applyPatchApproval"
+                or method.endswith("commandExecution/requestApproval")
+            ):
                 response = {"decision": {"denied": {"rejection": "declined by policy"}}}
+            elif method.endswith("requestApproval"):
+                response = {"decision": "decline"}
             else:
                 response = {"error": {"code": -32601, "message": "server request not supported"}}
             self._write({"id": message["id"], **response})
