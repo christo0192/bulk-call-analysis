@@ -1,0 +1,478 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from jsonschema import ValidationError  # type: ignore[import-untyped]
+from jsonschema.validators import validator_for  # type: ignore[import-untyped]
+
+from .appserver import AppServer
+from .quota import (
+    ALLOW,
+    INTERRUPT_ALL,
+    STOP_DISPATCH,
+    Decision,
+    QuotaGuard,
+    QuotaSnapshot,
+    merge_update,
+    parse_rate_limits,
+)
+from .rpc import AppServerClient, RpcError, RpcTimeout
+
+
+@dataclass(frozen=True)
+class LeadTask:
+    lead_id: str
+    attempt_id: str
+    prompt: str
+    output_schema: dict[str, object]
+    model: str
+    effort: str
+
+
+class PoolCallbacks(Protocol):
+    async def next_tasks(self, n: int) -> list[LeadTask]: ...
+
+    async def on_started(self, task: LeadTask) -> None: ...
+
+    async def on_result(
+        self, task: LeadTask, answer: dict[str, Any], model_used: str, usage: dict[str, Any] | None
+    ) -> None: ...
+
+    async def on_failure(self, task: LeadTask, error_code: str, counted: bool, detail: str) -> None: ...
+
+    async def on_activity(self, ts: float) -> None: ...
+
+    async def on_quota(self, snapshot: QuotaSnapshot, decision: Decision) -> None: ...
+
+    async def on_reroute(self, task: LeadTask, from_model: str, to_model: str, reason: str) -> None: ...
+
+    async def on_pause(self, reason: str, resume_at: int | None) -> None: ...
+
+
+@dataclass
+class _Lead:
+    task: LeadTask
+    thread_id: str | None = None
+    turn_id: str | None = None
+    model_used: str = ""
+    text: str = ""
+    usage: dict[str, Any] | None = None
+    done: bool = False
+
+
+class LunaPool:
+    def __init__(
+        self,
+        launch_factory: Callable[[], Awaitable[AppServer]],
+        callbacks: PoolCallbacks,
+        guard: QuotaGuard,
+        concurrency: int,
+        lead_timeout_s: float,
+        interrupt_grace_s: float = 60,
+        recycle_every: int = 500,
+        max_consecutive_failures: int = 25,
+    ) -> None:
+        self.launch_factory = launch_factory
+        self.callbacks = callbacks
+        self.guard = guard
+        self.concurrency = max(1, concurrency)
+        self.lead_timeout_s = lead_timeout_s
+        self.interrupt_grace_s = interrupt_grace_s
+        self.recycle_every = max(1, recycle_every)
+        self.max_consecutive_failures = max(1, max_consecutive_failures)
+        self._server: AppServer | None = None
+        self._leads: dict[str, _Lead] = {}
+        self._by_turn: dict[str, _Lead] = {}
+        self._snapshot: QuotaSnapshot | None = None
+        self._paused = False
+        self._stopping = False
+        self._consecutive_failures = 0
+        self._completed = 0
+        self._backoff = 0
+        self._restart_lock = asyncio.Lock()
+        self._crashes: list[float] = []
+        self._models: set[str] = set()
+        self._needs_recycle = False
+
+    def set_concurrency(self, n: int) -> None:
+        self.concurrency = max(1, n)
+
+    async def run_until_idle(self) -> None:
+        self._stopping = False
+        await self._launch_and_prepare()
+        running: set[asyncio.Task[None]] = set()
+        try:
+            while not self._stopping and not self._paused:
+                await self._check_quota()
+                if self._paused:
+                    break
+                room = self.concurrency - len(running)
+                tasks: list[LeadTask] = []
+                if room > 0:
+                    tasks = await self.callbacks.next_tasks(room)
+                    for task in tasks:
+                        if len(running) >= self.concurrency:
+                            break
+                        if not await self._before_dispatch():
+                            break
+                        if task.model not in self._models:
+                            await self._pause("model_unavailable", None)
+                            break
+                        lead = _Lead(task)
+                        self._leads[task.attempt_id] = lead
+                        running.add(asyncio.create_task(self._run_lead(lead)))
+                if not running and not tasks:
+                    break
+                if running:
+                    done, running = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+                    for completed in done:
+                        await completed
+                if self._needs_recycle and not running and not self._paused:
+                    self._needs_recycle = False
+                    await self._restart("appserver_recycle")
+        finally:
+            if running:
+                if self._paused and not self._stopping:
+                    await asyncio.gather(*running, return_exceptions=True)
+                else:
+                    for running_task in running:
+                        running_task.cancel()
+                    await asyncio.gather(*running, return_exceptions=True)
+            if self._server is not None:
+                await self._server.stop()
+                self._server = None
+
+    async def stop(self) -> None:
+        self._stopping = True
+        server = self._server
+        if server is not None:
+            for lead in list(self._leads.values()):
+                await self._interrupt(lead)
+            await server.stop()
+            self._server = None
+
+    async def _launch_and_prepare(self) -> None:
+        self._server = await self.launch_factory()
+        client = self._client
+        client.on_any_notification(self._notification)
+        rate = await client.request("account/rateLimits/read")
+        model = self._model_for_setup(rate)
+        self._snapshot = parse_rate_limits(rate, model)
+        models = await client.request("model/list")
+        self._models = self._model_names(models)
+        if not self._model_available(models, model):
+            await self.callbacks.on_pause("model_unavailable", None)
+            self._paused = True
+            return
+        await self._report_quota()
+
+    @property
+    def _client(self) -> AppServerClient:
+        if self._server is None:
+            raise RuntimeError("Luna pool has no app-server")
+        return self._server.client
+
+    @staticmethod
+    def _model_names(result: dict[str, Any]) -> set[str]:
+        models = result.get("models", [])
+        if not isinstance(models, list):
+            return set()
+        names: set[str] = set()
+        for item in models:
+            if isinstance(item, str):
+                names.add(item)
+            elif isinstance(item, dict):
+                for key in ("slug", "id", "model"):
+                    if isinstance(item.get(key), str):
+                        names.add(item[key])
+        return names
+
+    @staticmethod
+    def _model_for_setup(result: dict[str, Any]) -> str:
+        limits = result.get("rateLimits")
+        if isinstance(limits, dict) and isinstance(limits.get("normalModelSlug"), str):
+            return str(limits["normalModelSlug"])
+        by_limit = result.get("rateLimitsByLimitId")
+        if isinstance(by_limit, dict):
+            for value in by_limit.values():
+                if isinstance(value, dict) and isinstance(value.get("normalModelSlug"), str):
+                    return str(value["normalModelSlug"])
+        return "codex"
+
+    @staticmethod
+    def _model_available(result: dict[str, Any], model: str) -> bool:
+        models = result.get("models", [])
+        if not isinstance(models, list):
+            return False
+        for item in models:
+            if isinstance(item, str) and item == model:
+                return True
+            if isinstance(item, dict) and item.get("slug", item.get("id")) == model:
+                return True
+        return False
+
+    async def _report_quota(self) -> Decision:
+        if self._snapshot is None:
+            return Decision(ALLOW, "quota is unavailable", None)
+        decision = self.guard.decide(self._snapshot)
+        await self.callbacks.on_quota(self._snapshot, decision)
+        return decision
+
+    async def _check_quota(self) -> None:
+        decision = await self._report_quota()
+        if decision.kind == STOP_DISPATCH:
+            await self._pause("quota", decision.resume_at)
+        elif decision.kind == INTERRUPT_ALL:
+            await self._interrupt_all("credit" if "credit" in decision.reason else "quota")
+
+    async def _before_dispatch(self) -> bool:
+        decision = await self._report_quota()
+        if decision.kind == ALLOW:
+            if self._backoff:
+                await asyncio.sleep(self._backoff)
+            return not self._paused and not self._stopping
+        if decision.kind == STOP_DISPATCH:
+            await self._pause("quota", decision.resume_at)
+        else:
+            await self._interrupt_all("credit" if "credit" in decision.reason else "quota")
+        return False
+
+    async def _run_lead(self, lead: _Lead) -> None:
+        task = lead.task
+        try:
+            await self.callbacks.on_started(task)
+            started = await self._client.request("thread/start", {"model": task.model, "ephemeral": True})
+            thread = started.get("thread")
+            lead.thread_id = str(thread.get("id")) if isinstance(thread, dict) else None
+            if lead.thread_id is None:
+                raise ValueError("thread/start returned no thread id")
+            result = await asyncio.wait_for(
+                self._client.request(
+                    "turn/start",
+                    {
+                        "threadId": lead.thread_id,
+                        "input": [{"type": "text", "text": f"LEAD_ID={task.lead_id} {task.prompt}"}],
+                        "outputSchema": task.output_schema,
+                        "model": task.model,
+                        "effort": task.effort,
+                        "summary": "concise",
+                    },
+                ),
+                self.lead_timeout_s,
+            )
+            turn = result.get("turn")
+            if isinstance(turn, dict) and turn.get("id"):
+                lead.turn_id = str(turn["id"])
+                self._by_turn[lead.turn_id] = lead
+            await self._complete_from_events(lead)
+        except TimeoutError:
+            await self._fail_timeout(lead)
+        except (RpcTimeout, ConnectionError, BrokenPipeError) as exc:
+            await self._crash_or_failure(lead, str(exc))
+        except RpcError as exc:
+            await self._handle_rpc_error(lead, exc)
+        except (json.JSONDecodeError, ValidationError) as exc:
+            await self._fail(lead, "invalid_output", True, str(exc))
+        except Exception as exc:
+            await self._fail(lead, "other", True, str(exc))
+        finally:
+            if lead.thread_id is not None:
+                with contextlib.suppress(ConnectionError, BrokenPipeError, RpcError, RpcTimeout):
+                    await self._client.request("thread/unsubscribe", {"threadId": lead.thread_id})
+            self._leads.pop(task.attempt_id, None)
+            if lead.turn_id:
+                self._by_turn.pop(lead.turn_id, None)
+
+    async def _complete_from_events(self, lead: _Lead) -> None:
+        deadline = self.lead_timeout_s
+        while not lead.done:
+            await asyncio.sleep(min(0.01, deadline))
+            deadline -= 0.01
+            if deadline <= 0:
+                await self._fail_timeout(lead)
+                return
+        if lead.text == "":
+            await self._fail(lead, "invalid_output", True, "no agent message was returned")
+            return
+        answer = json.loads(lead.text)
+        if not isinstance(answer, dict):
+            raise ValidationError("output must be an object")
+        validator_for(lead.task.output_schema).check_schema(lead.task.output_schema)
+        validator = validator_for(lead.task.output_schema)(lead.task.output_schema)
+        validator.validate(answer)
+        await self.callbacks.on_result(lead.task, answer, lead.model_used or lead.task.model, lead.usage)
+        self._completed += 1
+        self._consecutive_failures = 0
+        if self._completed % self.recycle_every == 0:
+            self._needs_recycle = True
+
+    async def _notification(self, message: dict[str, Any]) -> None:
+        await self.callbacks.on_activity(time.time())
+        method = message.get("method", "")
+        params = message.get("params")
+        if not isinstance(params, dict):
+            return
+        thread_id = str(params.get("threadId")) if params.get("threadId") is not None else None
+        turn_id = str(params.get("turnId")) if params.get("turnId") is not None else None
+        lead = self._by_turn.get(turn_id) if turn_id else None
+        if lead is None and thread_id:
+            lead = next((item for item in self._leads.values() if item.thread_id == thread_id), None)
+        if method == "account/rateLimits/updated":
+            if self._snapshot is not None:
+                self._snapshot = merge_update(self._snapshot, params)
+                await self._check_quota()
+            return
+        if method == "model/rerouted" and lead is not None:
+            from_model = str(params.get("fromModel", lead.model_used or lead.task.model))
+            to_model = str(params.get("toModel", params.get("model", lead.task.model)))
+            lead.model_used = to_model
+            await self.callbacks.on_reroute(lead.task, from_model, to_model, str(params.get("reason", "")))
+        if method == "error":
+            if params.get("willRetry") is True:
+                return
+            if lead is not None:
+                await self._handle_error_notification(lead, params)
+            return
+        item = params.get("item")
+        if lead is not None and isinstance(item, dict) and self._forbidden_item(item):
+            await self._interrupt(lead)
+            await self._fail(lead, "tool_call_forbidden", True, str(item.get("type", "tool call")))
+        if lead is not None and method == "item/agentMessage/delta":
+            lead.text += str(params.get("delta", ""))
+        if (
+            lead is not None
+            and method == "item/completed"
+            and isinstance(item, dict)
+            and item.get("type") == "agentMessage"
+            and isinstance(item.get("text"), str)
+        ):
+            lead.text = item["text"]
+        if lead is not None and method == "turn/completed":
+            turn = params.get("turn")
+            if isinstance(turn, dict) and isinstance(turn.get("usage"), dict):
+                lead.usage = turn["usage"]
+            lead.done = True
+
+    @staticmethod
+    def _forbidden_item(item: dict[str, Any]) -> bool:
+        item_type = str(item.get("type", "")).lower()
+        return item_type not in {"", "agentmessage", "reasoning", "userinput"} and any(
+            word in item_type
+            for word in ("command", "file", "mcp", "web", "image", "tool", "computer", "shell")
+        )
+
+    async def _handle_error_notification(self, lead: _Lead, params: dict[str, Any]) -> None:
+        error = params.get("error")
+        if not isinstance(error, dict):
+            error = params
+        info = error.get("codexErrorInfo", error.get("code", "other"))
+        code = self._error_code(info)
+        await self._handle_error_code(lead, code, str(error.get("message", "")))
+
+    async def _handle_rpc_error(self, lead: _Lead, error: RpcError) -> None:
+        code = self._error_code(error.data) if error.data is not None else str(error.code)
+        await self._handle_error_code(lead, code, error.message)
+
+    @staticmethod
+    def _error_code(value: Any) -> str:
+        if isinstance(value, dict):
+            for key in ("code", "type", "name", "codexErrorInfo"):
+                if isinstance(value.get(key), str):
+                    return str(value[key])
+        return str(value)
+
+    async def _handle_error_code(self, lead: _Lead, code: str, detail: str) -> None:
+        retryable = {
+            "rateLimitExceeded",
+            "serverOverloaded",
+            "httpConnectionFailed",
+            "responseStreamDisconnected",
+            "responseTooManyFailedAttempts",
+            "-32001",
+        }
+        if code in retryable:
+            self._backoff = min(60, 1 if self._backoff == 0 else self._backoff * 2)
+            self.set_concurrency(self.concurrency - 1)
+            await self._fail(lead, code, False, detail)
+        elif code == "usageLimitExceeded":
+            await self._fail(lead, code, False, detail)
+            rate = await self._client.request("account/rateLimits/read")
+            self._snapshot = parse_rate_limits(rate, lead.task.model)
+            await self._pause("quota", None)
+        elif code == "unauthorized":
+            await self._pause("auth", None)
+        elif code == "modelNotFound":
+            await self._pause("model_unavailable", None)
+        elif code in {"contextWindowExceeded", "badRequest"}:
+            await self._fail(lead, code, True, detail)
+        else:
+            await self._fail(lead, code, True, detail)
+
+    async def _fail_timeout(self, lead: _Lead) -> None:
+        await self._interrupt(lead)
+        try:
+            await asyncio.wait_for(self._wait_done(lead), self.interrupt_grace_s)
+        except TimeoutError:
+            await self._restart("appserver_restart")
+            await self._fail(lead, "appserver_restart", False, "interrupt grace expired")
+        else:
+            await self._fail(lead, "timeout", True, "lead timeout")
+
+    async def _wait_done(self, lead: _Lead) -> None:
+        while not lead.done:
+            await asyncio.sleep(0.01)
+
+    async def _interrupt(self, lead: _Lead) -> None:
+        if lead.turn_id is not None:
+            with contextlib.suppress(ConnectionError, BrokenPipeError, RpcError, RpcTimeout):
+                await self._client.request(
+                    "turn/interrupt", {"threadId": lead.thread_id, "turnId": lead.turn_id}
+                )
+
+    async def _interrupt_all(self, reason: str) -> None:
+        for lead in list(self._leads.values()):
+            await self._interrupt(lead)
+            await self._fail(lead, "quota_interrupt", False, reason)
+        resume_at = self._snapshot.primary.resets_at if self._snapshot and self._snapshot.primary else None
+        await self._pause(reason, resume_at)
+
+    async def _fail(self, lead: _Lead, code: str, counted: bool, detail: str) -> None:
+        if lead.done:
+            return
+        lead.done = True
+        await self.callbacks.on_failure(lead.task, code, counted, detail)
+        if counted:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self.max_consecutive_failures:
+                await self._pause("error_storm", None)
+
+    async def _pause(self, reason: str, resume_at: int | None) -> None:
+        if not self._paused:
+            self._paused = True
+            await self.callbacks.on_pause(reason, resume_at)
+
+    async def _crash_or_failure(self, lead: _Lead, detail: str) -> None:
+        await self._fail(lead, "appserver_crash", False, detail)
+        await self._restart("appserver_crash", crash=True)
+
+    async def _restart(self, reason: str, crash: bool = False) -> None:
+        async with self._restart_lock:
+            now = time.monotonic()
+            self._crashes = [stamp for stamp in self._crashes if now - stamp < 600]
+            if crash:
+                self._crashes.append(now)
+            if len(self._crashes) > 3:
+                await self._pause("error_storm", None)
+                return
+            if self._server is not None:
+                await self._server.stop()
+            self._server = None
+            for lead in list(self._leads.values()):
+                await self._fail(lead, reason, False, "app-server restarted")
+            await self._launch_and_prepare()
