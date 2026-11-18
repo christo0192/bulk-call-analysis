@@ -37,3 +37,5 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+engine/uv-*.lock
+engine/.pytest-os-temp/
