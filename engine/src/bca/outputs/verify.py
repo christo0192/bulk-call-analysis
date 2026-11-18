@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from openpyxl import load_workbook  # type: ignore[import-untyped]
+from openpyxl import load_workbook
 
 from bca.store import Store, reconcile
 
@@ -37,8 +37,8 @@ def verify_job(store: Store, job_id: str, workbook_path: Path) -> VerifyReport:
             problems.append("missing Results sheet")
             return VerifyReport(False, tuple(problems), reconciliation)
         for name in workbook.sheetnames:
-            for row in workbook[name].iter_rows():
-                for cell in row:
+            for worksheet_row in workbook[name].iter_rows():
+                for cell in worksheet_row:
                     if cell.data_type == "f":
                         problems.append(f"formula-like cell in {name} is not stored as a string")
         sheet = workbook["Results"]
@@ -81,13 +81,13 @@ def verify_job(store: Store, job_id: str, workbook_path: Path) -> VerifyReport:
             str(row[0]): json.loads(str(row[1]))
             for row in store.rows("SELECT lead_id, answer_json FROM results WHERE job_id=?", (job_id,))
         }
-        for row in rows[1:]:
-            if lead_index < 0 or str(row[lead_index]) not in result_rows:
+        for row_values in rows[1:]:
+            if lead_index < 0 or str(row_values[lead_index]) not in result_rows:
                 continue
-            lead_id = str(row[lead_index])
+            lead_id = str(row_values[lead_index])
             answer = result_rows[lead_id]
             for key, value in answer.items():
-                if key in headers and row[headers.index(key)] != value:
+                if key in headers and row_values[headers.index(key)] != value:
                     problems.append(f"cell mismatch for {lead_id}/{key}")
         return VerifyReport(not problems, tuple(problems), reconciliation)
     finally:

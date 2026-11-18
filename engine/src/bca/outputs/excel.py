@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from openpyxl import Workbook, load_workbook  # type: ignore[import-untyped]
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, WriteOnlyCell  # type: ignore[import-untyped]
-from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
+from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, Cell, WriteOnlyCell
+from openpyxl.utils import get_column_letter
 
 from bca.store import JobSpec, Store
 
@@ -43,7 +43,7 @@ def _safe_string(value: object, flags: list[str], label: str) -> str:
 
 def _cell(
     ws: Any, value: object, numeric: bool, flags: list[str] | None = None, label: str = "value"
-) -> WriteOnlyCell:
+) -> Cell:
     flags = flags if flags is not None else []
     if (
         numeric
@@ -76,7 +76,7 @@ def write_results(
     for row in materialized_rows:
         row_flags = row.get("flags", [])
         flags = row_flags if isinstance(row_flags, list) else []
-        cells: list[WriteOnlyCell | None] = []
+        cells: list[Cell | None] = []
         deferred_flags: list[int] = []
         for index, column in enumerate(columns):
             if column.name == "flags":
@@ -94,7 +94,7 @@ def write_results(
                 )
         for index in deferred_flags:
             cells[index] = _cell(sheet, json.dumps(flags), False, [], "flags")
-        sheet.append(cast(list[WriteOnlyCell], cells))
+        sheet.append(cast(list[Cell], cells))
 
     temporary_path: Path | None = None
     try:
