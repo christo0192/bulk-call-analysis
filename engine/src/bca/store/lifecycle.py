@@ -48,6 +48,7 @@ _TRANSITIONS: dict[JobState, set[JobState]] = {
     JobState.pulling: {JobState.masking_sample, JobState.paused, JobState.failed},
     JobState.masking_sample: {JobState.sample_running, JobState.paused},
     JobState.sample_running: {JobState.sample_ready, JobState.paused, JobState.stalled},
+    JobState.sample_ready: {JobState.sample_approved},
     JobState.sample_approved: {JobState.full_running},
     JobState.full_running: {JobState.paused, JobState.stalled, JobState.quote_check},
     JobState.stalled: {JobState.paused, JobState.full_running, JobState.failed},
@@ -150,6 +151,7 @@ def edit_spec(store: Store, job_id: str, spec_version: int) -> None:
         JobState.masking_sample,
         JobState.sample_running,
         JobState.sample_ready,
+        JobState.sample_approved,
     ):
         with store.lock, store.connection:
             store.connection.execute(

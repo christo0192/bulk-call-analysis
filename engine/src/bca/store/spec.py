@@ -27,25 +27,25 @@ def _obj(value: object, path: str) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
-def _str(data: dict[str, object], key: str, *, nonempty: bool = True) -> str:
+def _str(data: dict[str, object], key: str, *, nonempty: bool = True, path: str | None = None) -> str:
     value = data.get(key)
     if not isinstance(value, str) or (nonempty and not value):
-        raise _fail(key, "must be a non-empty string")
+        raise _fail(path or key, "must be a non-empty string")
     return value
 
 
-def _int(data: dict[str, object], key: str, *, minimum: int | None = None) -> int:
+def _int(data: dict[str, object], key: str, *, minimum: int | None = None, path: str | None = None) -> int:
     value = data.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or (minimum is not None and value < minimum):
         suffix = f" >= {minimum}" if minimum is not None else ""
-        raise _fail(key, f"must be an integer{suffix}")
+        raise _fail(path or key, f"must be an integer{suffix}")
     return value
 
 
-def _tuple_str(data: dict[str, object], key: str) -> tuple[str, ...]:
+def _tuple_str(data: dict[str, object], key: str, *, path: str | None = None) -> tuple[str, ...]:
     value = data.get(key)
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise _fail(key, "must be an array of strings")
+        raise _fail(path or key, "must be an array of strings")
     return tuple(value)
 
 
@@ -66,7 +66,7 @@ class LeadSourceSql:
         data = _obj(value, "lead_source")
         if data.get("kind") != "sql":
             raise _fail("lead_source.kind", "must be 'sql'")
-        return cls(_str(data, "sql"))
+        return cls(_str(data, "sql", path="lead_source.sql"))
 
 
 @dataclass(frozen=True)
@@ -88,7 +88,10 @@ class LeadSourceIds:
         data = _obj(value, "lead_source")
         if data.get("kind") != "ids":
             raise _fail("lead_source.kind", "must be 'ids'")
-        return cls(_str(data, "ids_file"), _int(data, "count", minimum=0))
+        return cls(
+            _str(data, "ids_file", path="lead_source.ids_file"),
+            _int(data, "count", minimum=0, path="lead_source.count"),
+        )
 
 
 @dataclass(frozen=True)
@@ -107,8 +110,12 @@ class UsableRule:
     @classmethod
     def from_dict(cls, value: object) -> UsableRule:
         data = _obj(value, "usable")
-        min_chars = _int(data, "min_chars", minimum=0) if "min_chars" in data else 1
-        statuses = tuple(_tuple_str(data, "statuses")) if data.get("statuses") is not None else None
+        min_chars = _int(data, "min_chars", minimum=0, path="usable.min_chars") if "min_chars" in data else 1
+        statuses = (
+            tuple(_tuple_str(data, "statuses", path="usable.statuses"))
+            if data.get("statuses") is not None
+            else None
+        )
         min_seconds = data.get("min_call_seconds")
         if min_seconds is not None and (
             isinstance(min_seconds, bool) or not isinstance(min_seconds, int) or min_seconds < 0
@@ -141,11 +148,15 @@ class CapRule:
     @classmethod
     def from_dict(cls, value: object) -> CapRule:
         data = _obj(value, "cap")
-        max_chars = _int(data, "max_chars", minimum=1) if "max_chars" in data else 400_000
+        max_chars = (
+            _int(data, "max_chars", minimum=1, path="cap.max_chars") if "max_chars" in data else 400_000
+        )
         policy = data.get("policy", "drop_short_then_oldest")
         if policy not in ("drop_short_then_oldest", "keep_newest"):
             raise _fail("cap.policy", "invalid policy")
-        drop = _int(data, "drop_short_s", minimum=0) if "drop_short_s" in data else 180
+        drop = (
+            _int(data, "drop_short_s", minimum=0, path="cap.drop_short_s") if "drop_short_s" in data else 180
+        )
         return cls(max_chars, policy, drop)
 
 
@@ -160,7 +171,7 @@ class QuoteField:
     @classmethod
     def from_dict(cls, value: object) -> QuoteField:
         data = _obj(value, "quote_fields[]")
-        field = _str(data, "field")
+        field = _str(data, "field", path="quote_fields[].field")
         speaker = data.get("speaker")
         if speaker not in ("learner", "advisor", "any"):
             raise _fail("quote_fields[].speaker", "invalid speaker")
@@ -182,7 +193,7 @@ class Condition:
     @classmethod
     def from_dict(cls, value: object) -> Condition:
         data = _obj(value, "conditions[]")
-        field = _str(data, "field")
+        field = _str(data, "field", path="conditions[].field")
         op = data.get("op")
         ops = ("eq", "ne", "in", "not_in", "lt", "le", "gt", "ge", "is_null", "not_null", "contains")
         if op not in ops:
@@ -221,6 +232,16 @@ class InScopeRule:
     def to_dict(self) -> dict[str, object]:
         return {"kind": self.kind, "match": self.match, "conditions": [x.to_dict() for x in self.conditions]}
 
+    @classmethod
+    def from_dict(cls, value: object) -> InScopeRule:
+        data = _obj(value, "rules[]")
+        if data.get("kind") != "in_scope":
+            raise _fail("rules[].kind", "must be 'in_scope'")
+        match = data.get("match")
+        if match not in ("all", "any"):
+            raise _fail("rules[].match", "must be all or any")
+        return cls(match, _conditions(data))
+
 
 @dataclass(frozen=True)
 class ThresholdGroupRule:
@@ -257,6 +278,34 @@ class ThresholdGroupRule:
             "inclusive_upper": self.inclusive_upper,
         }
 
+    @classmethod
+    def from_dict(cls, value: object) -> ThresholdGroupRule:
+        data = _obj(value, "rules[]")
+        if data.get("kind") != "threshold_group":
+            raise _fail("rules[].kind", "must be 'threshold_group'")
+        edges = data.get("edges")
+        labels = data.get("labels")
+        if not isinstance(edges, list) or any(
+            isinstance(item, bool) or not isinstance(item, (int, float)) for item in edges
+        ):
+            raise _fail("rules[].edges", "must be an array of numbers")
+        if (
+            not isinstance(labels, list)
+            or any(not isinstance(item, str) for item in labels)
+            or len(labels) != len(edges) + 1
+        ):
+            raise _fail("rules[].labels", "must have one more item than edges")
+        inclusive = data.get("inclusive_upper", True)
+        if not isinstance(inclusive, bool):
+            raise _fail("rules[].inclusive_upper", "must be boolean")
+        return cls(
+            _str(data, "name", path="rules[].name"),
+            _str(data, "field", path="rules[].field"),
+            tuple(edges),
+            tuple(labels),
+            inclusive,
+        )
+
 
 @dataclass(frozen=True)
 class ReviewFlagRule:
@@ -285,6 +334,16 @@ class ReviewFlagRule:
             "conditions": [x.to_dict() for x in self.conditions],
         }
 
+    @classmethod
+    def from_dict(cls, value: object) -> ReviewFlagRule:
+        data = _obj(value, "rules[]")
+        if data.get("kind") != "review_flag":
+            raise _fail("rules[].kind", "must be 'review_flag'")
+        match = data.get("match")
+        if match not in ("all", "any"):
+            raise _fail("rules[].match", "must be all or any")
+        return cls(_str(data, "name", path="rules[].name"), match, _conditions(data))
+
 
 def _rule(value: object) -> InScopeRule | ThresholdGroupRule | ReviewFlagRule:
     data = _obj(value, "rules[]")
@@ -294,8 +353,8 @@ def _rule(value: object) -> InScopeRule | ThresholdGroupRule | ReviewFlagRule:
         if match not in ("all", "any"):
             raise _fail("rules[].match", "must be all or any")
         if kind == "in_scope":
-            return InScopeRule(match, _conditions(data))
-        return ReviewFlagRule(_str(data, "name"), match, _conditions(data))
+            return InScopeRule.from_dict(data)
+        return ReviewFlagRule.from_dict(data)
     if kind == "threshold_group":
         edges = data.get("edges")
         labels = data.get("labels")
@@ -312,9 +371,7 @@ def _rule(value: object) -> InScopeRule | ThresholdGroupRule | ReviewFlagRule:
         inclusive = data.get("inclusive_upper", True)
         if not isinstance(inclusive, bool):
             raise _fail("rules[].inclusive_upper", "must be boolean")
-        return ThresholdGroupRule(
-            _str(data, "name"), _str(data, "field"), tuple(edges), tuple(labels), inclusive
-        )
+        return ThresholdGroupRule.from_dict(data)
     raise _fail("rules[].kind", "invalid rule kind")
 
 
@@ -403,8 +460,15 @@ class JobSpec:
             tuple(_rule(x) for x in rules),
             _str(data, "luna_model"),
             _str(data, "luna_effort"),
-            _int(data, "sample_size", minimum=1) if "sample_size" in data else 20,
+            _sample_size(data),
         )
+
+
+def _sample_size(data: dict[str, object]) -> int:
+    value = _int(data, "sample_size", minimum=1) if "sample_size" in data else 20
+    if value > 200:
+        raise _fail("sample_size", "must be <= 200")
+    return value
 
 
 def save_spec(spec: JobSpec, job_dir: Path) -> Path:

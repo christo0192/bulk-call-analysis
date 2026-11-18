@@ -1,0 +1,31 @@
+from pathlib import Path
+
+from bca.store import LeadStatus, open_store, reconcile
+
+
+def test_reconciliation_reports_all_imbalances() -> None:
+    store = open_store(Path(":memory:"))
+    store.create_project("p", "Project")
+    store.create_job("j", "p", 1)
+    store.add_lead("j", "one", LeadStatus.queued, calls_pulled=2, calls_sent=1, calls_dropped_cap=0)
+    store.add_lead("j", "two", LeadStatus.queued, calls_pulled=1, calls_sent=1, calls_dropped_cap=0)
+    store.connection.execute("INSERT INTO leads(job_id, lead_id, status) VALUES ('j', 'two', 'queued')")
+    store.connection.execute("INSERT INTO id_intake VALUES ('j', 6, 4, 1, 0)")
+    result = reconcile(store, "j")
+    assert not result.ok
+    assert any("distinct ids" in problem for problem in result.problems)
+    assert "call identity mismatch for one" in result.problems
+    assert "duplicate lead rows" in result.problems
+    assert "id intake counts do not reconcile" in result.problems
+    assert "| Status | Count |" in result.to_markdown()
+
+
+def test_consistent_reconciliation_is_ok() -> None:
+    store = open_store(Path(":memory:"))
+    store.create_project("p", "Project")
+    store.create_job("j", "p", 1)
+    store.add_lead("j", "one", LeadStatus.done, calls_pulled=2, calls_sent=1, calls_dropped_cap=1)
+    store.connection.execute("INSERT INTO id_intake VALUES ('j', 1, 1, 0, 0)")
+    result = reconcile(store, "j")
+    assert result.ok
+    assert "| done | 1 |" in result.to_markdown()
