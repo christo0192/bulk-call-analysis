@@ -12,6 +12,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/bca"]
 
+[project.optional-dependencies]
+nlp = ["spacy>=3.7"]
+
 [dependency-groups]
 dev = ["ruff>=0.8", "mypy>=1.13", "pytest>=8.3"]
 
