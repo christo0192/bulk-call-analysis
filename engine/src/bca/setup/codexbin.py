@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import platform
+import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -85,7 +87,14 @@ class CodexBinaryManager:
                 data = json.loads(result.stdout)
             except json.JSONDecodeError:
                 data = {}
-            if result.returncode or data.get("Status") != "Valid" or SIGNER not in data.get("Subject", ""):
+            subject = data.get("Subject", "")
+            signer_match = re.search(r"(?:^|,)\s*CN=([^,]+)", subject)
+            if (
+                result.returncode
+                or data.get("Status") != "Valid"
+                or not signer_match
+                or signer_match.group(1) != SIGNER
+            ):
                 raise CodexVerificationError("Codex binary signature is not valid")
         elif platform.system() == "Darwin":
             signature_result = subprocess.run(
@@ -108,6 +117,7 @@ class CodexBinaryManager:
         with tempfile.NamedTemporaryFile(dir=self.app_dir, suffix=".tar.gz", delete=False) as handle:
             temp = Path(handle.name)
             handle.write(archive)
+        extraction_dir: Path | None = None
         try:
             with tarfile.open(temp, "r:gz") as bundle:
                 member = next(
@@ -116,7 +126,8 @@ class CodexBinaryManager:
                 )
                 if member is None or not member.isfile():
                     raise CodexVerificationError("Codex archive has no binary")
-                extracted = Path(tempfile.mkdtemp(dir=self.app_dir)) / Path(member.name).name
+                extraction_dir = Path(tempfile.mkdtemp(dir=self.app_dir))
+                extracted = extraction_dir / Path(member.name).name
                 source = bundle.extractfile(member)
                 if source is None:
                     raise CodexVerificationError("Codex archive member cannot be read")
@@ -130,3 +141,5 @@ class CodexBinaryManager:
             return target
         finally:
             temp.unlink(missing_ok=True)
+            if extraction_dir is not None:
+                shutil.rmtree(extraction_dir, ignore_errors=True)

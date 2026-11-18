@@ -66,7 +66,11 @@ class Checklist:
             if probe is None:
                 item.status, item.detail = "failed", "probe not supplied"
                 continue
-            ok, detail = probe()
+            try:
+                ok, detail = probe()
+            except Exception as exc:
+                item.status, item.detail = "failed", f"probe failed: {exc}"
+                continue
             item.status, item.detail = ("ok" if ok else "failed"), detail
         self.save()
         return self.items

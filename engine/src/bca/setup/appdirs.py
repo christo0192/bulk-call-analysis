@@ -46,9 +46,15 @@ def is_cloud_synced(
     resolved = str(path.expanduser())
     if os_name == "Windows":
         lower = resolved.casefold()
+
+        def under_root(root: str) -> bool:
+            normalized = root.rstrip("\\/")
+            folded = normalized.casefold()
+            return lower == folded or lower.startswith((folded + "\\", folded + "/"))
+
         if (
             any(
-                resolved.startswith(str(values[name]))
+                under_root(str(values[name]))
                 for name in ("OneDrive", "OneDriveCommercial")
                 if values.get(name)
             )
