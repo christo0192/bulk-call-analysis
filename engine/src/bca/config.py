@@ -25,6 +25,8 @@ class BigQueryConfig:
     reject_bytes: int = 10 * 1024**3
     connector_dir: Path | None = None
     key_path: Path | None = None
+    connector_name: str | None = None
+    key_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -176,8 +178,13 @@ def load_config(path: Path) -> SiteConfig:
             "reject_bytes",
             "connector_dir",
             "key_path",
+            "connector_name",
+            "key_name",
         },
     )
+    for name_key in ("connector_name", "key_name"):
+        if name_key in bq and (not isinstance(bq[name_key], str) or not bq[name_key]):
+            raise _error(f"bigquery.{name_key}", "must be a non-empty string")
     _table(
         recipe,
         "recipe",
@@ -263,6 +270,8 @@ def load_config(path: Path) -> SiteConfig:
             reject,
             _path(bq, "bigquery", "connector_dir"),
             _path(bq, "bigquery", "key_path"),
+            bq.get("connector_name") if isinstance(bq.get("connector_name"), str) else None,
+            bq.get("key_name") if isinstance(bq.get("key_name"), str) else None,
         ),
         RecipeConfig(
             _str(recipe, "recipe", "transcripts_table"),
