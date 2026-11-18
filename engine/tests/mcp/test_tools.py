@@ -122,10 +122,10 @@ def test_write_file_enforces_200k_cap(tmp_path: Path) -> None:
         make_host(tmp_path).call("write_file", {"name": "plan.md", "text": "x" * 200_001})
 
 
-def test_tool_errors_are_short_and_numbers_are_not_masked(tmp_path: Path) -> None:
+def test_tool_errors_are_short_and_phone_like_numbers_are_masked(tmp_path: Path) -> None:
     host = make_host(tmp_path, FakeBqRunner(pages=[[{"number": 9876543210, "text": "9876543210"}]]))
     result = host.call("bq_query", {"sql": "SELECT 1"})
-    assert result["rows"][0] == {"number": 9876543210, "text": "[PHONE]"}  # type: ignore[index]
+    assert result["rows"][0] == {"number": "[NUMBER]", "text": "[PHONE]"}  # type: ignore[index]
     with pytest.raises(ToolHostError) as error:
         host.call("not_a_tool")
     assert "Traceback" not in str(error.value)

@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from .ipc import call_engine
 
@@ -37,7 +38,10 @@ def _authkey() -> bytes:
 
 
 def _call(address: str, tool: str, arguments: dict[str, object]) -> object:
-    return call_engine(address, _authkey(), tool, arguments)
+    try:
+        return call_engine(address, _authkey(), tool, arguments)
+    except Exception as exc:
+        raise ToolError(str(exc)) from None
 
 
 def _typed(function: Any, annotations: dict[str, object]) -> Any:

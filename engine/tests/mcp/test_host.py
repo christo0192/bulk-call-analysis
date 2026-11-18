@@ -9,10 +9,16 @@ import pytest
 from bca.bq.runner import DryRun
 from bca.config import BigQueryConfig
 from bca.mask.masker import MaskingContext
+from bca.mask.names import Span
 from bca.mcp.host import MAX_RESULT_CHARS, ToolHost, ToolHostError, start_ipc_thread
 from bca.mcp.ipc import call_engine, new_ipc_address
 from bca.store import LeadStatus, open_store
 from tests.fakes.fake_bq import FakeBqRunner
+
+
+class FakeNer:
+    def persons(self, text: str) -> list[Span]:
+        return []
 
 
 def make_host(tmp_path: Path, runner: FakeBqRunner | None = None) -> ToolHost:
@@ -23,7 +29,8 @@ def make_host(tmp_path: Path, runner: FakeBqRunner | None = None) -> ToolHost:
         store=store,
         project_dir=tmp_path,
         bq_config=BigQueryConfig("project", reject_bytes=100),
-        mask_context=MaskingContext(),
+        mask_context=MaskingContext(ner=FakeNer()),
+        project_id="project",
     )
 
 
@@ -43,8 +50,8 @@ def test_result_cap_has_marker(tmp_path: Path) -> None:
 
 def test_large_scan_is_refused_without_confirm_parameter(tmp_path: Path) -> None:
     runner = FakeBqRunner(dry=DryRun(101, [], []))
-    with pytest.raises(ToolHostError, match="unexpected keyword argument 'confirm'"):
-        make_host(tmp_path, runner).call("bq_query", {"sql": "SELECT 1", "confirm": True})
+    with pytest.raises(ToolHostError, match="too large for chat; propose it as the job's lead source"):
+        make_host(tmp_path, runner).call("bq_query", {"sql": "SELECT 1"})
 
 
 def test_write_file_rejects_traversal_and_other_names(tmp_path: Path) -> None:
@@ -52,6 +59,35 @@ def test_write_file_rejects_traversal_and_other_names(tmp_path: Path) -> None:
     for name in ("../plan.md", "notes.md", "plan.md/child"):
         with pytest.raises(ToolHostError):
             host.call("write_file", {"name": name, "text": "x"})
+
+
+def test_job_ids_are_confined_before_store_or_filesystem_access(tmp_path: Path) -> None:
+    host = make_host(tmp_path)
+    for job_id in ("/absolute", "..", r"C:\outside", r"\\server\share\job"):
+        with pytest.raises(ToolHostError, match="invalid job id"):
+            host.call("job_status", {"job_id": job_id})
+
+
+def test_host_requires_an_explicit_real_masking_context(tmp_path: Path) -> None:
+    store = open_store(tmp_path / "store.sqlite")
+    with pytest.raises(TypeError):
+        ToolHost(  # type: ignore[call-arg]
+            runner=FakeBqRunner(), store=store, project_dir=tmp_path, bq_config=BigQueryConfig("project")
+        )
+    with pytest.raises(ValueError, match="real masking NER"):
+        ToolHost(
+            runner=FakeBqRunner(),
+            store=store,
+            project_dir=tmp_path,
+            bq_config=BigQueryConfig("project"),
+            mask_context=MaskingContext(),
+        )
+
+
+def test_nested_keys_and_bytes_are_masked(tmp_path: Path) -> None:
+    runner = FakeBqRunner(pages=[[{"x@example.com 9876543210": b"x@example.com"}]])
+    result = make_host(tmp_path, runner).call("bq_query", {"sql": "SELECT 1"})
+    assert result["rows"][0] == {"[EMAIL] [PHONE]": "[BYTES 13]"}  # type: ignore[index]
 
 
 def test_lead_transcript_rejects_non_sample_lead(tmp_path: Path) -> None:
