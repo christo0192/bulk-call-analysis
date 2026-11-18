@@ -553,7 +553,10 @@ class LunaPool:
         await asyncio.gather(
             *(self.callbacks.on_failure(lead.task, "quota_interrupt", False, reason) for lead in interrupted)
         )
-        resume_at = self._latched_decision.resume_at if self._latched_decision else None
+        decision = self._latched_decision
+        resume_at = decision.resume_at if decision else None
+        if resume_at is None and decision and decision.reason == "a rate-limit window is exhausted":
+            resume_at = self._latest_reset()
         await self._pause(reason, resume_at)
 
     async def _fail(self, lead: _Lead, code: str, counted: bool, detail: str) -> None:
@@ -587,7 +590,20 @@ class LunaPool:
             self.guard.decide(self._snapshot) if self._snapshot else Decision(INTERRUPT_ALL, "quota", None)
         )
         self._latched_decision = decision
-        await self._pause("quota", decision.resume_at)
+        resume_at = decision.resume_at if decision.resume_at is not None else self._latest_reset()
+        await self._pause("quota", resume_at)
+
+    def _latest_reset(self) -> int | None:
+        if self._snapshot is None:
+            return None
+        return max(
+            (
+                window.resets_at
+                for window in (self._snapshot.primary, self._snapshot.secondary)
+                if window is not None and window.resets_at is not None
+            ),
+            default=None,
+        )
 
     async def _fail_unstarted(self, task: LeadTask) -> None:
         await self.callbacks.on_failure(task, "not_dispatched", False, "dispatch closed before start")

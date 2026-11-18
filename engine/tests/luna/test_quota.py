@@ -56,6 +56,17 @@ def test_stop_resume_is_latest_reset() -> None:
     assert (decision.kind, decision.resume_at) == (STOP_DISPATCH, 20)
 
 
+def test_exhausted_resume_falls_back_to_latest_known_reset() -> None:
+    result = {
+        "rateLimits": {
+            "primary": {"usedPercent": 100, "resetsAt": 10},
+            "secondary": {"usedPercent": 99, "resetsAt": 20},
+        }
+    }
+    decision = QuotaGuard(101, None).decide(parse_rate_limits(result, "codex"))
+    assert (decision.kind, decision.resume_at) == (INTERRUPT_ALL, 20)
+
+
 def test_bucket_selection_and_codex_fallback() -> None:
     result = {
         "rateLimitsByLimitId": {

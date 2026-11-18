@@ -150,6 +150,8 @@ class QuotaGuard:
         if s.spend_control_reached or s.rate_limit_reached_type is not None or not s.ordinary_usage_allowed:
             return Decision(INTERRUPT_ALL, "subscription usage is unavailable", resume)
         if any(w.used_percent >= 100 for w in windows):
+            if resume is None:
+                resume = max((w.resets_at for w in windows if w.resets_at is not None), default=None)
             return Decision(INTERRUPT_ALL, "a rate-limit window is exhausted", resume)
         if any(w.used_percent >= self.stop_percent for w in windows):
             return Decision(STOP_DISPATCH, "rate-limit stop threshold reached", resume)
