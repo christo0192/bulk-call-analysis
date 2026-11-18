@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from openpyxl import Workbook, load_workbook  # type: ignore[import-untyped]
 from openpyxl.cell.cell import WriteOnlyCell  # type: ignore[import-untyped]
+from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
 
 from bca.store import JobSpec, Store
 
@@ -35,24 +36,26 @@ def _cell(ws: Any, value: object, numeric: bool) -> WriteOnlyCell:
 def write_results(
     path: Path, columns: list[ColumnSpec], rows: Iterable[dict[str, object]], sheet_title: str
 ) -> None:
+    materialized_rows = list(rows)
     workbook = Workbook(write_only=True)
     sheet = workbook.create_sheet(sheet_title)
     headers = [column.name for column in columns]
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(materialized_rows) + 1}"
+    for index, header in enumerate(headers, 1):
+        sheet.column_dimensions[get_column_letter(index)].width = min(60, max(12, len(header) + 2))
     sheet.append([_cell(sheet, header, False) for header in headers])
-    for cell in headers:
-        _ = cell
-    for row in rows:
+    for row in materialized_rows:
         sheet.append(
             [
                 _cell(sheet, row.get(column.field or column.name), column.value_type in ("number", "integer"))
                 for column in columns
             ]
         )
-    sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = f"A1:{chr(64 + len(headers))}{sheet.max_row}" if len(headers) <= 26 else None
-    for index, header in enumerate(headers, 1):
-        sheet.column_dimensions[chr(64 + index)].width = min(60, max(12, len(header) + 2))
-    workbook.save(path)
+    try:
+        workbook.save(path)
+    finally:
+        workbook.close()
 
 
 def _spec_rows(
@@ -120,16 +123,19 @@ def build_workbook(store: Store, job_id: str, spec: JobSpec, out_dir: Path, vers
     columns, rows, not_read = _spec_rows(store, job_id, spec)
     write_results(path, columns, rows, "Results")
     workbook = load_workbook(path)
-    sheet = workbook.create_sheet("Not read")
-    sheet.append(["lead id", "bucket", "reason"])
-    for row in not_read:
-        sheet.append([row["lead id"], row["bucket"], row["reason"]])
-    about = workbook.create_sheet("About")
-    about.append(["job title", spec.title])
-    about.append(["question", spec.question])
-    about.append(["spec version", spec.spec_version])
-    about.append(["rules", json.dumps([rule.to_dict() for rule in spec.rules], sort_keys=True)])
-    workbook.save(path)
+    try:
+        sheet = workbook.create_sheet("Not read")
+        sheet.append(["lead id", "bucket", "reason"])
+        for row in not_read:
+            sheet.append([row["lead id"], row["bucket"], row["reason"]])
+        about = workbook.create_sheet("About")
+        about.append(["job title", spec.title])
+        about.append(["question", spec.question])
+        about.append(["spec version", spec.spec_version])
+        about.append(["rules", json.dumps([rule.to_dict() for rule in spec.rules], sort_keys=True)])
+        workbook.save(path)
+    finally:
+        workbook.close()
     return path
 
 
@@ -140,16 +146,20 @@ def rebuild_with_rules(store: Store, job_id: str, new_rules: tuple[object, ...],
     old = load_workbook(old_paths[-1], read_only=True, data_only=False)
     source = old["Results"]
     values = list(source.values)
+    source_rows = list(source.iter_rows(min_row=2))
+    old.close()
     if not values:
         raise ValueError("existing Results sheet has no header")
     headers = [str(item) for item in values[0]]
     rule_index = headers.index("rule results") if "rule results" in headers else -1
     if rule_index < 0:
         raise ValueError("existing Results sheet has no rule results column")
-    columns = [
-        ColumnSpec(header, header, "integer" if header in ("calls read", "calls not read") else "string")
-        for header in headers
-    ]
+    value_types: list[str] = []
+    for index in range(len(headers)):
+        cells = [row[index] for row in source_rows if index < len(row) and row[index].value is not None]
+        data_type = cells[0].data_type if cells else "s"
+        value_types.append({"n": "number", "b": "boolean"}.get(data_type, "string"))
+    columns = [ColumnSpec(header, header, value_types[index]) for index, header in enumerate(headers)]
     result_rows = store.rows("SELECT lead_id, answer_json FROM results WHERE job_id=?", (job_id,))
     answers = {str(row[0]): json.loads(str(row[1])) for row in result_rows}
     output: list[dict[str, object]] = []

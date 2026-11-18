@@ -44,6 +44,20 @@ def test_rule_type_error_and_ambiguous_paths() -> None:
 def test_threshold_edges(inclusive: bool) -> None:
     rule = ThresholdGroupRule("band", "score", (10,), ("low", "high"), inclusive)
     assert evaluate((rule,), {"score": 10}, {})["band"] == ("low" if inclusive else "high")
+    assert evaluate((rule,), {"score": 11}, {})["band"] == "high"
+
+
+@pytest.mark.parametrize(
+    ("condition", "answer"),
+    [
+        (Condition("score", "lt", 4), {"score": "3"}),
+        (Condition("score", "in", [3, "4"]), {"score": 3}),
+        (Condition("text", "contains", 3), {"text": "abc"}),
+    ],
+)
+def test_rule_type_errors(condition: Condition, answer: dict[str, object]) -> None:
+    with pytest.raises(RuleTypeError):
+        evaluate((ReviewFlagRule("flag", "all", (condition,)),), answer, {})
 
 
 def test_validate_rules_schema() -> None:
@@ -53,3 +67,8 @@ def test_validate_rules_schema() -> None:
     numeric = ReviewFlagRule("f", "all", (Condition("score", "gt", 2),))
     with pytest.raises(ValueError, match="numeric"):
         validate_rules((numeric,), {"type": "object", "properties": {"score": {"type": "string"}}})
+
+    validate_rules(
+        (ReviewFlagRule("meta", "all", (Condition("meta.source", "eq", "x"),)),),
+        {"properties": {}},
+    )

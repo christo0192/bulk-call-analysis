@@ -14,7 +14,10 @@ def test_quotes_exact_normalised_wrong_speaker_and_near_miss() -> None:
     assert check_quote("hello world", text, "learner", LABELS).ok
     assert check_quote("HELLO WORLD", text, "learner", LABELS).ok
     assert check_quote("hello world", text, "advisor", LABELS).reason == "wrong speaker"
-    assert not check_quote("hello worlx", text, "learner", LABELS).ok
+    near_miss = check_quote("hello worlx", text, "learner", LABELS)
+    assert not near_miss.ok
+    assert near_miss.reason == "near miss"
+    assert "ratio=" in near_miss.diag
 
 
 def test_quote_call_scope() -> None:
@@ -38,3 +41,17 @@ def test_excel_formula_guard_numbers_and_header(tmp_path: Path) -> None:
     assert rows[1][0] == "=1+1"
     assert sheet["A2"].data_type == "s"
     assert rows[1][1] == 4
+
+
+def test_excel_write_only_path_handles_many_rows(tmp_path: Path) -> None:
+    path = tmp_path / "many.xlsx"
+    write_results(
+        path,
+        [ColumnSpec("lead id"), ColumnSpec("number", value_type="number")],
+        ({"lead id": f"lead-{index}", "number": index} for index in range(10_000)),
+        "Results",
+    )
+    sheet = load_workbook(path, read_only=True, data_only=False)["Results"]
+    rows = list(sheet.values)
+    assert len(rows) == 10_001
+    assert rows[-1] == ("lead-9999", 9999)
