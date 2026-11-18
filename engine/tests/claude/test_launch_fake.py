@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,6 +13,7 @@ import bca.claude.launch as launch
 from bca.childenv import build_child_env
 from bca.claude.launch import SessionRef, TurnGuardError, run_turn, stop_turn
 from bca.claude.profile import ClaudeProfile
+from bca.procutil import pid_alive
 
 FAKE = Path(__file__).parents[1] / "fakes" / "fake_claude.py"
 
@@ -143,9 +144,13 @@ def test_stop_turn_kills_process_tree(tmp_path: Path, monkeypatch: pytest.Monkey
             await asyncio.sleep(0.01)
         await started.wait()
         child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+        parent_pid = launch._processes[session.session_id].pid
         stop_turn(session)
         await task
-        with pytest.raises(ProcessLookupError):
-            os.kill(child_pid, 0)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and (pid_alive(parent_pid) or pid_alive(child_pid)):
+            await asyncio.sleep(0.01)
+        assert not pid_alive(parent_pid)
+        assert not pid_alive(child_pid)
 
     asyncio.run(stop_after_start())
