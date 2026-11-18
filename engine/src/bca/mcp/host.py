@@ -6,6 +6,8 @@ import re
 import sys
 import threading
 from collections.abc import Callable, Mapping
+from multiprocessing import AuthenticationError
+from multiprocessing.connection import Client
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -110,6 +112,9 @@ class ToolHost:
         self._ipc_stop = threading.Event()
         self._ipc_listener: object | None = None
         self._ipc_thread: threading.Thread | None = None
+        self._ipc_address: str | None = None
+        self._ipc_family: str | None = None
+        self._ipc_authkey: bytes | None = None
 
     def call(self, name: str, arguments: Mapping[str, object] | None = None) -> object:
         args = {} if arguments is None else dict(arguments)
@@ -297,14 +302,25 @@ class ToolHost:
     def close(self) -> None:
         """Stop a listener started with :func:`start_ipc_thread`."""
         self._ipc_stop.set()
-        listener = self._ipc_listener
-        if listener is not None:
-            cast(Any, listener).close()
+        address = self._ipc_address
+        family = self._ipc_family
+        authkey = self._ipc_authkey
+        if address is not None and family is not None and authkey is not None:
+            try:
+                wake = Client(address, family=family, authkey=authkey)
+                wake.close()
+            except (OSError, EOFError, AuthenticationError):
+                pass
         thread = self._ipc_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=5)
-            if thread.is_alive():
-                raise RuntimeError("IPC listener did not stop")
+        listener = self._ipc_listener
+        if listener is not None:
+            cast(Any, listener).close()
+        if address is not None and family is not None:
+            _remove_ipc_socket(address, family)
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            raise RuntimeError("IPC listener did not stop")
 
 
 def _remove_ipc_socket(address: str, family: str) -> None:
@@ -330,6 +346,9 @@ def serve_ipc(
 
     selected_family = family or ("AF_PIPE" if sys.platform == "win32" else "AF_UNIX")
     stopping = stop_event or host._ipc_stop
+    host._ipc_address = address
+    host._ipc_family = selected_family
+    host._ipc_authkey = authkey
     if host._ipc_thread is None:
         host._ipc_thread = threading.current_thread()
     listener = Listener(address, family=selected_family, authkey=authkey)
@@ -343,6 +362,10 @@ def serve_ipc(
                     break
                 raise
             try:
+                if stopping.is_set():
+                    break
+                if not connection.poll(0.1):
+                    continue
                 request = connection.recv()
                 if not isinstance(request, dict):
                     raise ToolHostError("invalid IPC request")

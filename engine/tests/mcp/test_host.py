@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -72,6 +73,16 @@ def test_ipc_forwards_call_and_does_not_log_authkey(tmp_path: Path, caplog: pyte
         assert authkey.hex() not in caplog.text
     finally:
         host.close()
+    assert not thread.is_alive()
+
+
+def test_ipc_close_without_client_stops_thread(tmp_path: Path) -> None:
+    host = make_host(tmp_path)
+    address, _family = new_ipc_address()
+    thread = start_ipc_thread(host, address, b"b" * 32)
+    started = time.monotonic()
+    host.close()
+    assert time.monotonic() - started < 5
     assert not thread.is_alive()
 
 
