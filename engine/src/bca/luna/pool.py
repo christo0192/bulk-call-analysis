@@ -8,8 +8,8 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
-from jsonschema import ValidationError  # type: ignore[import-untyped]
-from jsonschema.validators import validator_for  # type: ignore[import-untyped]
+from jsonschema import ValidationError
+from jsonschema.validators import validator_for
 
 from .appserver import AppServer
 from .quota import (

@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft7Validator
+
+from tests.fakes import fake_codex
 
 
 def test_fake_protocol_samples_match_pinned_v2_schemas() -> None:
@@ -45,3 +48,11 @@ def test_fake_protocol_samples_match_pinned_v2_schemas() -> None:
         (schema_path.parent / "CommandExecutionRequestApprovalResponse.json").read_text(encoding="utf-8")
     )
     Draft7Validator(approval_schema).validate({"decision": "cancel"})
+
+
+def test_fake_rejects_unknown_scenario_keys(tmp_path: Path) -> None:
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_text(json.dumps({"unknown": True}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unknown fake Codex scenario keys"):
+        fake_codex._scenario(scenario_path)

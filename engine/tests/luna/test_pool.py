@@ -1,5 +1,6 @@
 import json
 import sys
+from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -54,9 +55,9 @@ class Callbacks:
 def assert_exactly_once(callbacks: Callbacks, attempt_ids: list[str]) -> None:
     results = [lead for lead, _ in callbacks.results]
     failures = [lead for lead, _, _ in callbacks.failures]
-    assert set(results) | set(failures) == set(attempt_ids)
-    assert set(results) & set(failures) == set()
-    assert len(results) + len(failures) == len(attempt_ids)
+    terminal = Counter(results)
+    terminal.update(failures)
+    assert terminal == Counter(attempt_ids)
 
 
 def task(index: int, model: str = "codex") -> LeadTask:
@@ -134,9 +135,9 @@ async def _test_fifty_leads_exactly_once_and_unsubscribed(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     ("scenario", "expected"),
     [
-        ({"answers": {"0": "not json"}}, "invalid_output"),
-        ({"answers": {"0": {"wrong": 1}}}, "invalid_output"),
-        ({"tool_call": "0"}, "tool_call_forbidden"),
+        ({"answers": {"default": "not json"}}, "invalid_output"),
+        ({"answers": {"default": {"wrong": 1}}}, "invalid_output"),
+        ({"tool_call": "default"}, "tool_call_forbidden"),
     ],
 )
 def test_invalid_and_forbidden_outputs_are_counted(
@@ -162,7 +163,9 @@ def test_reroute_records_new_model(tmp_path: Path) -> None:
 
 
 async def _test_reroute_records_new_model(tmp_path: Path) -> None:
-    callbacks, _ = await run_pool(tmp_path, {"reroute": "0", "models": ["codex", "codex-mini"]}, [task(0)])
+    callbacks, _ = await run_pool(
+        tmp_path, {"reroute": "default", "models": ["codex", "codex-mini"]}, [task(0)]
+    )
     assert_exactly_once(callbacks, ["attempt-0"])
     assert callbacks.results == [("attempt-0", "codex-mini")]
     assert callbacks.reroutes == [("attempt-0", "codex-mini")]
@@ -204,7 +207,7 @@ async def _test_recycle_between_batches_does_not_duplicate(tmp_path: Path) -> No
 def test_hang_interrupts_and_times_out(tmp_path: Path) -> None:
     import asyncio
 
-    callbacks, _ = asyncio.run(run_pool(tmp_path, {"hang": "0"}, [task(0)]))
+    callbacks, _ = asyncio.run(run_pool(tmp_path, {"hang": "default"}, [task(0)]))
     assert_exactly_once(callbacks, ["attempt-0"])
     assert callbacks.failures == [("attempt-0", "timeout", True)]
 
@@ -237,7 +240,7 @@ def test_credit_drop_interrupts_inflight_and_pauses(tmp_path: Path) -> None:
 def test_error_table_maps_actions(tmp_path: Path, code: str, counted: bool) -> None:
     import asyncio
 
-    callbacks, _ = asyncio.run(run_pool(tmp_path, {"errors": {"0": code}}, [task(0)]))
+    callbacks, _ = asyncio.run(run_pool(tmp_path, {"errors": {"default": code}}, [task(0)]))
     assert_exactly_once(callbacks, ["attempt-0"])
     if code == "unauthorized":
         assert callbacks.pauses == [("auth", None)]

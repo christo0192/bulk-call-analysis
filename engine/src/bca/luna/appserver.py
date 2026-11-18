@@ -97,7 +97,7 @@ class AppServer:
                 await killer.wait()
             else:
                 try:
-                    os.killpg(self.process.pid, signal.SIGTERM)  # type: ignore[attr-defined]
+                    os.killpg(self.process.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     return
         else:
@@ -107,7 +107,7 @@ class AppServer:
         except TimeoutError:
             with contextlib.suppress(ProcessLookupError):
                 if sys.platform != "win32":
-                    os.killpg(self.process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
+                    os.killpg(self.process.pid, signal.SIGKILL)
                 else:
                     self.process.kill()
             await self.process.wait()
@@ -127,7 +127,7 @@ async def start(
         "cwd": str(launch.work_dir),
         "env": childenv.build_child_env({"CODEX_HOME": str(launch.codex_home)}),
     }
-    if os.name != "nt":
+    if sys.platform != "win32":
         kwargs["start_new_session"] = True
     try:
         process = await asyncio.create_subprocess_exec(*command, **kwargs)  # type: ignore[arg-type]
@@ -146,14 +146,14 @@ async def start(
     except BaseException as exc:
         await client.close()
         if process.returncode is None:
-            if os.name == "nt" and process.pid is not None:
+            if sys.platform == "win32" and process.pid is not None:
                 killer = await asyncio.create_subprocess_exec(
                     "taskkill", "/PID", str(process.pid), "/T", "/F"
                 )
                 await killer.wait()
-            elif process.pid is not None:
+            elif sys.platform != "win32" and process.pid is not None:
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
+                    os.killpg(process.pid, signal.SIGKILL)
             await process.wait()
         if not isinstance(exc, ConnectionError):
             raise

@@ -9,10 +9,40 @@ import sys
 from pathlib import Path
 from typing import Any
 
+_SCENARIO_KEYS = frozenset(
+    {
+        "answers",
+        "approval_request",
+        "crash_after_turns",
+        "crash_once_file",
+        "credit_balance",
+        "credit_drop",
+        "default_answer",
+        "env_report",
+        "errors",
+        "hang",
+        "hangs",
+        "ignore_interrupt",
+        "latency_ms",
+        "models",
+        "quota_increment",
+        "reached_type",
+        "reroute",
+        "spend_control_reached",
+        "tool_call",
+        "used_percent",
+    }
+)
+
 
 def _scenario(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        raise ValueError("fake Codex scenario must be an object")
+    unknown = set(value) - _SCENARIO_KEYS
+    if unknown:
+        raise ValueError(f"unknown fake Codex scenario keys: {sorted(unknown)}")
+    return value
 
 
 async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -> None:
@@ -159,7 +189,7 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                     }
                 )
             if lead in errors:
-                info = {str(errors[lead]): {}}
+                info: dict[str, dict[str, Any]] = {str(errors[lead]): {}}
                 await send(
                     {
                         "method": "error",
