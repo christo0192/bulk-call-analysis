@@ -22,7 +22,7 @@ def test_migrations_are_applied_and_reopen_is_idempotent(tmp_path: Path) -> None
     store.close()
     reopened = open_store(path)
     assert reopened.rows("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    assert reopened.rows("PRAGMA user_version")[0][0] == 2
+    assert reopened.rows("PRAGMA user_version")[0][0] == 3
     reopened.close()
 
 
