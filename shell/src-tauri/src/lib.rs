@@ -1,13 +1,36 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod engine;
 mod power;
 mod procguard;
-mod rpc;
+pub mod rpc;
 mod sleepwatch;
 mod tray;
 use engine::Engine;
 use serde_json::Value;
+use std::{path::PathBuf, sync::Mutex};
+use tauri::RunEvent;
 use tauri::{Manager, State};
+
+struct AppLogger(Mutex<PathBuf>);
+impl log::Log for AppLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            if let Ok(path) = self.0.lock() {
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&*path)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(file, "{} {}", record.level(), record.args());
+                }
+            }
+        }
+    }
+    fn flush(&self) {}
+}
 
 #[tauri::command]
 async fn engine_call(
@@ -28,10 +51,7 @@ async fn engine_status(engine: State<'_, Engine>) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+            let _ = crate::tray::show_main_window(app);
         }))
         .plugin(
             tauri_plugin_autostart::Builder::new()
@@ -39,19 +59,21 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            let log_dir = app.path().app_log_dir()?;
+            std::fs::create_dir_all(&log_dir)?;
+            log::set_logger(Box::leak(Box::new(AppLogger(Mutex::new(
+                log_dir.join("app.log"),
+            )))))
+            .map_err(|_| tauri::Error::AssetNotFound("app logger".into()))?;
+            log::set_max_level(log::LevelFilter::Info);
             let engine = Engine::new(app.handle().clone());
             app.manage(engine.clone());
             tray::setup(app.handle(), engine.clone())?;
             let autostart = std::env::args().any(|arg| arg == "--autostart");
             if !autostart {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                }
-            } else if let Some(w) = app.get_webview_window("main") {
-                let _ = w.destroy();
+                tray::show_main_window(app.handle())?;
             }
-            let start_engine = engine.clone();
-            tokio::spawn(async move { start_engine.start().await });
+            engine.start();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![engine_call, engine_status])
@@ -60,6 +82,22 @@ pub fn run() {
                 let _ = window.destroy();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building desktop application")
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { api, code, .. } => {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+                if let Some(engine) = app.try_state::<Engine>() {
+                    tauri::async_runtime::block_on(engine.shutdown());
+                }
+            }
+            RunEvent::Exit => {
+                if let Some(engine) = app.try_state::<Engine>() {
+                    tauri::async_runtime::block_on(engine.shutdown());
+                }
+            }
+            _ => {}
+        })
 }

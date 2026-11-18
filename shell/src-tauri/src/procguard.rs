@@ -1,5 +1,9 @@
 #[cfg(windows)]
 pub struct Guard(#[allow(dead_code)] windows::Win32::Foundation::HANDLE);
+#[cfg(windows)]
+unsafe impl Send for Guard {}
+#[cfg(windows)]
+unsafe impl Sync for Guard {}
 #[cfg(unix)]
 pub struct Guard(u32);
 
@@ -25,22 +29,54 @@ fn attach_windows(pid: u32) -> std::io::Result<Guard> {
         let job = CreateJobObjectW(None, None).map_err(|e| std::io::Error::other(e.to_string()))?;
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(
+        if let Err(error) = SetInformationJobObject(
             job,
             JobObjectExtendedLimitInformation,
             &limits as *const _ as *const _,
             std::mem::size_of_val(&limits) as u32,
-        )
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-        let process = OpenProcess(
+        ) {
+            let _ = windows::Win32::Foundation::CloseHandle(job);
+            return Err(std::io::Error::other(error.to_string()));
+        }
+        let process = match OpenProcess(
             windows::Win32::System::Threading::PROCESS_SET_QUOTA
                 | windows::Win32::System::Threading::PROCESS_TERMINATE,
             false,
             pid,
-        )
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-        AssignProcessToJobObject(job, process).map_err(|e| std::io::Error::other(e.to_string()))?;
+        ) {
+            Ok(process) => process,
+            Err(error) => {
+                let _ = windows::Win32::Foundation::CloseHandle(job);
+                return Err(std::io::Error::other(error.to_string()));
+            }
+        };
+        if let Err(error) = AssignProcessToJobObject(job, process) {
+            let _ = windows::Win32::Foundation::CloseHandle(process);
+            let _ = windows::Win32::Foundation::CloseHandle(job);
+            return Err(std::io::Error::other(error.to_string()));
+        }
+        let _ = windows::Win32::Foundation::CloseHandle(process);
         Ok(Guard(HANDLE(job.0)))
+    }
+}
+
+#[cfg(windows)]
+pub fn terminate_process(pid: u32) {
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    unsafe {
+        if let Ok(process) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+            let _ = TerminateProcess(process, 1);
+            let _ = windows::Win32::Foundation::CloseHandle(process);
+        }
+    }
+}
+
+#[cfg(unix)]
+pub fn terminate_process(pid: u32) {
+    if pid != 0 {
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
     }
 }
 
@@ -75,6 +111,33 @@ pub fn terminate_group(pid: u32) {
 #[cfg(unix)]
 impl Drop for Guard {
     fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[cfg(unix)]
+impl Guard {
+    pub fn terminate(&self) {
         terminate_group(self.0);
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.terminate();
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Guard {
+    pub fn terminate(&self) {
+        use windows::Win32::System::JobObjects::TerminateJobObject;
+        unsafe {
+            let _ = TerminateJobObject(self.0, 1);
+        }
     }
 }

@@ -4,6 +4,7 @@ use log::{error, warn};
 use serde_json::{json, Value};
 use std::{
     collections::VecDeque,
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -24,6 +25,9 @@ struct Inner {
     rpc: Mutex<Option<Arc<Client<tokio::process::ChildStdin>>>>,
     status: Mutex<String>,
     restarts: Mutex<RestartTracker>,
+    active_pid: AtomicU32,
+    shutting_down: AtomicBool,
+    guard: Mutex<Option<Arc<procguard::Guard>>>,
 }
 
 #[derive(Debug)]
@@ -66,24 +70,29 @@ impl Engine {
                 rpc: Mutex::new(None),
                 status: Mutex::new("starting".into()),
                 restarts: Mutex::new(RestartTracker::new()),
+                active_pid: AtomicU32::new(0),
+                shutting_down: AtomicBool::new(false),
+                guard: Mutex::new(None),
             }),
         }
     }
-    pub async fn start(&self) {
+    pub fn start(&self) {
         let this = self.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             this.supervise().await;
         });
     }
     async fn supervise(&self) {
-        let mut failures = 0u32;
         loop {
+            if self.inner.shutting_down.load(Ordering::Acquire) {
+                break;
+            }
             match self.spawn_once().await {
-                Ok(()) => {
-                    failures = 0;
-                }
+                Ok(()) => {}
                 Err(e) => {
-                    failures += 1;
+                    if self.inner.shutting_down.load(Ordering::Acquire) {
+                        break;
+                    }
                     error!("engine stopped: {e}");
                     *self.inner.status.lock().await = "error".into();
                     let now = Instant::now();
@@ -98,9 +107,6 @@ impl Engine {
                     let wait = tracker.delay();
                     drop(tracker);
                     sleep(wait).await;
-                    if failures > 5 {
-                        break;
-                    }
                 }
             }
         }
@@ -110,72 +116,120 @@ impl Engine {
         let mut command = Command::new(program);
         command.args(args).env_clear().envs(minimal_environment());
         #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+        command.kill_on_drop(true);
         let mut child = command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::piped())
             .spawn()?;
-        let _guard = procguard::attach(child.id().ok_or(RpcError::Closed)?)?;
+        let pid = child.id().ok_or(RpcError::Closed)?;
+        let guard = Arc::new(procguard::attach(pid)?);
+        *self.inner.guard.lock().await = Some(guard.clone());
+        self.inner.active_pid.store(pid, Ordering::Release);
         let stdout = child.stdout.take().ok_or(RpcError::Closed)?;
         let stderr = child.stderr.take().ok_or(RpcError::Closed)?;
         let stdin = child.stdin.take().ok_or(RpcError::Closed)?;
         let client = Client::new(stdin);
         *self.inner.rpc.lock().await = Some(client.clone());
-        *self.inner.status.lock().await = "ready".into();
-        self.emit("engine/status", json!({"status":"ready"}));
         let (tx, mut rx) = mpsc::channel(64);
         let reader_client = client.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                match rpc::decode(line.as_bytes()) {
+            let mut reader = BufReader::new(stdout);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!("engine stdout read failed: {error}");
+                        break;
+                    }
+                }
+                match rpc::decode(&line) {
                     Ok(v) => reader_client.dispatch(v, &tx).await,
                     Err(e) => warn!("engine RPC line ignored: {e}"),
                 }
             }
+            reader_client.close().await;
         });
         let app = self.inner.app.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stderr);
+            let mut bytes = Vec::new();
+            loop {
+                bytes.clear();
+                match reader.read_until(b'\n', &mut bytes).await {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!("engine stderr read failed: {error}");
+                        break;
+                    }
+                }
+                let line = String::from_utf8_lossy(&bytes);
                 if let Ok(path) = app.path().app_log_dir() {
                     let _ = std::fs::create_dir_all(&path);
                     let _ = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(path.join("engine.log"))
-                        .and_then(|mut f| {
-                            std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes())
-                        });
+                        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
                 }
             }
         });
         let ping = client.clone();
+        let ping_engine = self.clone();
         tokio::spawn(async move {
+            let mut failures = 0;
             loop {
-                sleep(Duration::from_secs(30)).await;
                 if ping
                     .request("health/ping", json!({}), Duration::from_secs(10))
                     .await
-                    .is_err()
+                    .is_ok()
                 {
-                    break;
+                    failures = 0;
+                    if *ping_engine.inner.status.lock().await != "ready" {
+                        *ping_engine.inner.status.lock().await = "ready".into();
+                        ping_engine.emit("engine/status", json!({"status":"ready"}));
+                    }
+                } else {
+                    failures += 1;
+                    if failures >= 3 {
+                        procguard::terminate_process(pid);
+                        break;
+                    }
                 }
+                sleep(Duration::from_secs(30)).await;
             }
         });
         while let Some(notification) = rx.recv().await {
+            if notification.get("method").and_then(Value::as_str) == Some("job/progress") {
+                if let Some(tray) = self.inner.app.tray_by_id("main") {
+                    let params = notification.get("params").cloned().unwrap_or_default();
+                    let done = params.get("done").and_then(Value::as_u64).unwrap_or(0);
+                    let total = params.get("total").and_then(Value::as_u64).unwrap_or(0);
+                    let remaining = params
+                        .get("remaining")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let _ =
+                        tray.set_tooltip(Some(format_tooltip(done, total, remaining.to_owned())));
+                }
+            }
             self.emit("engine-event", notification);
         }
-        let _ = client
-            .request("shutdown", json!({}), Duration::from_secs(10))
-            .await;
+        client.close().await;
         #[cfg(unix)]
         procguard::terminate_group(child.id().unwrap_or_default());
         #[cfg(windows)]
         let _ = child.kill().await;
-        #[cfg(unix)]
         let _ = child.wait().await;
+        self.inner.active_pid.store(0, Ordering::Release);
+        *self.inner.guard.lock().await = None;
         *self.inner.rpc.lock().await = None;
         Err(RpcError::Closed)
     }
@@ -192,17 +246,39 @@ impl Engine {
     pub async fn status(&self) -> String {
         self.inner.status.lock().await.clone()
     }
+    pub async fn shutdown(&self) {
+        if self.inner.shutting_down.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(rpc) = self.inner.rpc.lock().await.clone() {
+            let _ = rpc
+                .request("shutdown", json!({}), Duration::from_secs(10))
+                .await;
+        }
+        let stopped = tokio::time::timeout(Duration::from_secs(10), async {
+            while self.inner.active_pid.load(Ordering::Acquire) != 0 {
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !stopped {
+            if let Some(guard) = self.inner.guard.lock().await.clone() {
+                let _ = tokio::task::spawn_blocking(move || guard.terminate()).await;
+            }
+        }
+    }
     fn emit(&self, event: &str, payload: Value) {
         let _ = self.inner.app.emit(event, payload);
     }
 }
 pub fn command_line(app: &AppHandle) -> (String, Vec<String>) {
-    if let Ok(value) = std::env::var("BCA_ENGINE_CMD") {
-        let mut words = value.split_whitespace();
-        return (
-            words.next().unwrap_or("python").into(),
-            words.map(str::to_owned).collect(),
-        );
+    if let Ok(program) = std::env::var("BCA_ENGINE_PROGRAM") {
+        let args = std::env::var("BCA_ENGINE_ARGS")
+            .ok()
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default();
+        return (program, args);
     }
     let root = app
         .path()
@@ -244,6 +320,10 @@ pub fn minimal_environment() -> std::collections::HashMap<String, String> {
     ];
     std::env::vars()
         .filter(|(k, _)| allow.iter().any(|a| a.eq_ignore_ascii_case(k)))
+        .chain([
+            (String::from("PYTHONUTF8"), String::from("1")),
+            (String::from("PYTHONIOENCODING"), String::from("utf-8")),
+        ])
         .collect()
 }
 #[allow(dead_code)]

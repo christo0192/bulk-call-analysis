@@ -1,5 +1,12 @@
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use thiserror::Error;
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt},
@@ -44,6 +51,7 @@ pub struct Client<W> {
     writer: Mutex<W>,
     pending: Pending,
     next_id: std::sync::atomic::AtomicU64,
+    closed: AtomicBool,
 }
 
 impl<W: AsyncWrite + Unpin + Send> Client<W> {
@@ -52,6 +60,7 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
             writer: Mutex::new(writer),
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: std::sync::atomic::AtomicU64::new(1),
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -67,9 +76,21 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
         let message = json!({"jsonrpc":"2.0", "id": id, "method": method, "params": params});
-        if let Err(error) = self.writer.lock().await.write_all(&encode(&message)?).await {
+        let write = async {
+            self.writer
+                .lock()
+                .await
+                .write_all(&encode(&message)?)
+                .await
+                .map_err(RpcError::from)
+        };
+        if let Err(error) = timeout(wait, write).await.unwrap_or(Err(RpcError::Timeout)) {
             self.pending.lock().await.remove(&id);
-            return Err(error.into());
+            return Err(error);
+        }
+        if self.closed.load(Ordering::Acquire) {
+            self.pending.lock().await.remove(&id);
+            return Err(RpcError::Closed);
         }
         match timeout(wait, rx).await {
             Ok(Ok(result)) => result,
@@ -78,6 +99,14 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
                 self.pending.lock().await.remove(&id);
                 Err(RpcError::Timeout)
             }
+        }
+    }
+
+    pub async fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        let mut pending = self.pending.lock().await;
+        for (_, sender) in pending.drain() {
+            let _ = sender.send(Err(RpcError::Closed));
         }
     }
 
@@ -96,7 +125,9 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
         let Some(object) = message.as_object() else {
             return;
         };
-        if let Some(id) = object.get("id").and_then(Value::as_u64) {
+        if object.get("method").is_some() {
+            let _ = notifications.send(message).await;
+        } else if let Some(id) = object.get("id").and_then(Value::as_u64) {
             if let Some(sender) = self.pending.lock().await.remove(&id) {
                 let result = if let Some(error) = object.get("error") {
                     Err(RpcError::Remote {
@@ -112,8 +143,6 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
                 };
                 let _ = sender.send(result);
             }
-        } else if object.get("method").is_some() {
-            let _ = notifications.send(message).await;
         }
     }
 }
@@ -208,6 +237,45 @@ mod tests {
                 request.await.unwrap(),
                 Err(RpcError::Remote { code: 7, .. })
             ));
+        });
+    }
+
+    #[test]
+    fn closing_connection_fails_all_pending_requests() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, _server_io) = tokio::io::duplex(1024);
+            let client = Client::new(client_io);
+            let request = {
+                let client = client.clone();
+                tokio::spawn(async move {
+                    client
+                        .request("wait", json!({}), Duration::from_secs(10))
+                        .await
+                })
+            };
+            for _ in 0..10 {
+                if !client.pending.lock().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            client.close().await;
+            assert!(matches!(request.await.unwrap(), Err(RpcError::Closed)));
+        });
+    }
+
+    #[test]
+    fn request_with_id_and_method_is_not_response() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, _server_io) = tokio::io::duplex(1024);
+            let client = Client::new(client_io);
+            let (notifications, mut received) = mpsc::channel(1);
+            client
+                .dispatch(json!({"id": 1, "method": "callback"}), &notifications)
+                .await;
+            assert_eq!(received.recv().await.unwrap()["method"], "callback");
         });
     }
 }
