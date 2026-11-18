@@ -67,7 +67,17 @@ class ChildEnvError(ValueError):
 
 def is_denied(name: str) -> bool:
     upper = name.upper()
-    return upper in DENIED_EXACT or upper.endswith(("_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN"))
+    return (
+        upper in DENIED_EXACT
+        or upper
+        in {
+            "API_KEY",
+            "AUTH_TOKEN",
+            "ACCESS_TOKEN",
+            "ANTHROPIC_CUSTOM_HEADERS",
+        }
+        or upper.endswith(("_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_TOKEN", "_SECRET", "_KEY"))
+    )
 
 
 def build_child_env(

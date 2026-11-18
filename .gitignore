@@ -24,6 +24,8 @@ output/
 *.sqlite3
 *.xlsx
 *.csv
+*.log
+*.log.*
 !engine/tests/fixtures/**/*.csv
 
 # Build and tooling

@@ -48,6 +48,34 @@ def test_tilde_expands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert load_config(path).bigquery.connector_dir == Path("~/connectors").expanduser()
 
 
+@pytest.mark.parametrize("payload", [b"\xef\xbb\xbf" + b"", b"\xe9"])
+def test_invalid_or_bom_toml(tmp_path: Path, payload: bytes) -> None:
+    path = example(tmp_path)
+    if payload == b"\xef\xbb\xbf":
+        path.write_bytes(payload + path.read_bytes())
+        assert load_config(path).bigquery.project == "your-gcp-project"
+    else:
+        path.write_bytes(payload)
+        with pytest.raises(ConfigError, match="invalid TOML"):
+            load_config(path)
+
+
+def test_toml_typo_and_unknown_key(tmp_path: Path) -> None:
+    path = example(tmp_path)
+    path.write_text(path.read_text().replace("[bigquery]", '[bigquery]\nlocatoin = "EU"'))
+    with pytest.raises(ConfigError, match=r"bigquery\.locatoin"):
+        load_config(path)
+    path.write_text("not = [valid")
+    with pytest.raises(ConfigError, match="invalid TOML"):
+        load_config(path)
+
+
+def test_bca_config_missing_does_not_fallback(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.toml"
+    with pytest.raises(ConfigError, match=r"missing\.toml"):
+        find_config(env={"BCA_CONFIG": str(missing)}, cwd=tmp_path, home=tmp_path)
+
+
 @pytest.mark.parametrize(
     "system",
     [
@@ -76,6 +104,7 @@ def test_find_config_order(tmp_path: Path, system: str) -> None:
     assert find_config(system=system, env=env, home=home, cwd=cwd) == env_path
 
     env_path.unlink()
+    env.pop("BCA_CONFIG")
     config_path = tmp_path / "config" / "site.toml"
     config_path.parent.mkdir()
     config_path.write_text("x")
@@ -90,6 +119,5 @@ def test_find_config_order(tmp_path: Path, system: str) -> None:
     with pytest.raises(ConfigError) as error:
         find_config(system=system, env=env, home=home, cwd=cwd)
     message = str(error.value)
-    assert str(env_path) in message
     assert str(config_path) in message
     assert str(user_path) in message

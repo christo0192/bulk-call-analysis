@@ -114,10 +114,11 @@ def _path(data: dict[str, Any], section: str, key: str) -> Path | None:
 
 def load_config(path: Path) -> SiteConfig:
     try:
-        with path.open("rb") as handle:
-            raw = tomllib.load(handle)
+        raw = tomllib.loads(path.read_bytes().decode("utf-8-sig"))
     except OSError as exc:
         raise ConfigError(f"{path}: cannot read configuration: {exc}") from exc
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError("configuration: must be a TOML table")
     sections = {"bigquery", "recipe", "models", "limits", "retention", "masking"}
@@ -253,6 +254,7 @@ def find_config(
         checked.append(candidate)
         if candidate.is_file():
             return candidate
+        raise ConfigError(f"BCA_CONFIG path is not a file: {candidate}")
     current = cwd.resolve()
     for folder in (current, *current.parents):
         candidate = folder / "config" / "site.toml"
