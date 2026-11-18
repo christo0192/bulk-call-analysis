@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from openpyxl import load_workbook  # type: ignore[import-untyped]
+from openpyxl import load_workbook
 
 from bca.outputs.excel import ColumnSpec, write_results
 from bca.outputs.quotes import QuoteCheck, check_answer, check_quote, repair_prompt
