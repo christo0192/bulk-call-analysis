@@ -46,3 +46,11 @@ class SessionStore:
 
     def reseed(self, project: str, playbook_version: str) -> UUID:
         return self.new(project, playbook_version)
+
+    def resume_or_reseed(
+        self, project: str, playbook_version: str, conversation_exists: bool
+    ) -> SessionChoice:
+        choice = self.get(project, playbook_version)
+        if choice.status == "resume" and not conversation_exists:
+            return SessionChoice("new", self.reseed(project, playbook_version))
+        return choice

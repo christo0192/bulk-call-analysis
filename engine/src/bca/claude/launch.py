@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from bca.childenv import build_child_env
 
@@ -66,10 +66,14 @@ def build_turn_command(
     playbook_path: Path,
     settings_path: Path,
     model: str,
-    effort: str,
-    max_turns: int,
-    session: SessionRef,
+    effort: str = "high",
+    max_turns: int = 25,
+    session: SessionRef | None = None,
 ) -> list[str]:
+    if model in {"opus", "sonnet", "haiku", "fable", "default"}:
+        raise ValueError("Claude model must be a fully qualified subscription model name")
+    if session is None:
+        session = SessionRef(uuid4())
     session_flag = "--resume" if session.resumed else "--session-id"
     return [
         str(binary),
@@ -135,10 +139,12 @@ async def run_turn(
     brief: str,
     operator_message: str,
     model: str,
-    effort: str,
-    max_turns: int,
-    session: SessionRef,
+    effort: str = "high",
+    max_turns: int = 25,
+    session: SessionRef | None = None,
 ) -> AsyncIterator[Event]:
+    if session is None:
+        session = SessionRef(uuid4())
     command = build_turn_command(
         binary,
         profile.config_dir,
@@ -184,6 +190,10 @@ async def run_turn(
                 if decision.blocked_reason is not None:
                     raise TurnGuardError("Claude rate policy blocked turn: " + decision.blocked_reason)
             yield event
+    except Exception:
+        if process.returncode is None:
+            _terminate_process_tree(process)
+        raise
     finally:
         await process.wait()
         _processes.pop(session.session_id, None)
@@ -193,6 +203,10 @@ def stop_turn(session: SessionRef | UUID) -> None:
     process = _processes.get(session.session_id if isinstance(session, SessionRef) else session)
     if process is None or process.returncode is not None:
         return
+    _terminate_process_tree(process)
+
+
+def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
     if os.name == "nt":
         completed = subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False

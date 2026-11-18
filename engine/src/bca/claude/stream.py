@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
@@ -57,6 +58,35 @@ def parse_line(line: str) -> Event:
         "result": "result",
     }
     return Event(kinds.get(raw_type, "unknown"), value)
+
+
+class StreamParser:
+    """Parse stream-json lines and combine adjacent partial assistant deltas."""
+
+    def __init__(self) -> None:
+        self.bad_lines = 0
+        self._partial = ""
+
+    def feed(self, line: str) -> Event:
+        event = parse_line(line)
+        if event.kind == "unknown" and event.data.get("bad") is True:
+            self.bad_lines += 1
+        if event.kind == "assistant_delta":
+            delta = event.data.get("delta", event.data.get("text", ""))
+            if isinstance(delta, dict):
+                delta = delta.get("text", "")
+            if isinstance(delta, str):
+                self._partial += delta
+                data = dict(event.data)
+                data["assembled"] = self._partial
+                return Event("assistant_delta", data)
+        return event
+
+
+def parse_stream(lines: Iterable[str]) -> Iterator[Event]:
+    parser = StreamParser()
+    for line in lines:
+        yield parser.feed(line)
 
 
 def check_init(init: Event, expected: str) -> list[str]:
@@ -137,6 +167,10 @@ class RateLimitGuard:
 class TurnError:
     category: Literal["auth", "limited", "declined", "max_turns", "other"]
     message: str
+
+    @property
+    def retryable(self) -> bool:
+        return self.category != "declined"
 
 
 def result_error(event: Event) -> TurnError | None:
