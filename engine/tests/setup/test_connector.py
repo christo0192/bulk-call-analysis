@@ -1,11 +1,19 @@
 import json
+import sys
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from bca.config import BigQueryConfig
-from bca.setup.connector import detect, recheck
+from bca.setup.connector import _system_drive_root, detect, recheck
+
+
+def test_system_drive_root_handles_drive_and_full_path(tmp_path: Path) -> None:
+    drive_root = _system_drive_root({"SystemDrive": "C:"})
+    if sys.platform == "win32":
+        assert str(drive_root).endswith("\\")
+    assert _system_drive_root({"SystemDrive": str(tmp_path)}) == tmp_path
 
 
 @pytest.mark.parametrize("system", ["Windows", "Darwin", "Linux"])

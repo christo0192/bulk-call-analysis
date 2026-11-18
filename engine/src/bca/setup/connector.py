@@ -19,6 +19,13 @@ class ConnectorResult:
     config_path: Path | None = None
 
 
+def _system_drive_root(values: Mapping[str, str]) -> Path:
+    drive = values.get("SystemDrive", "C:")
+    if len(drive) == 2 and drive.endswith(":"):
+        return Path(drive + "\\")
+    return Path(drive)
+
+
 def _candidate_config(*, env: Mapping[str, str], home: Path, system: str) -> list[Path]:
     if system == "Windows":
         paths = [
@@ -88,7 +95,7 @@ def detect(
     if connector is None and connector_name:
         if os_name == "Windows":
             connector = (
-                Path(values.get("SystemDrive", "C:") + "\\")
+                _system_drive_root(values)
                 / "mcp-servers"
                 / connector_name
                 / ".venv"
