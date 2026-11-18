@@ -7,6 +7,8 @@ warn_bytes = 1073741824
 reject_bytes = 10737418240
 # connector_dir = "~/connectors"
 # key_path = "~/credentials/connector.json"
+# connector_name = "your_connector_name"
+# key_name = "your_connector_key.json"
 
 [recipe]
 transcripts_table = "your_dataset.your_transcripts_view"
