@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
+from google.cloud import bigquery
 
 from bca.bq.guard import ReadOnlyViolation, validate_select
+from bca.config import BigQueryConfig
+
+
+class StubClient:
+    def query(self, sql: str, *, job_config: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            statement_type="SCRIPT", schema=[], referenced_tables=[], total_bytes_processed=0
+        )
 
 
 @pytest.mark.parametrize(
@@ -67,16 +79,11 @@ def test_semicolon_inside_a_literal_is_allowed_locally() -> None:
 
 
 def test_google_runner_requires_bigquery_select_statement_type() -> None:
-    from types import SimpleNamespace
-
     from bca.bq.runner import GoogleBqRunner
 
     runner = GoogleBqRunner.__new__(GoogleBqRunner)
-    runner._cfg = SimpleNamespace(max_bytes_billed=100, project="p")
-    runner._client = SimpleNamespace(
-        query=lambda sql, job_config: SimpleNamespace(
-            statement_type="SCRIPT", schema=[], referenced_tables=[], total_bytes_processed=0
-        )
-    )
+    runner._cfg = BigQueryConfig(project="p", max_bytes_billed=100)
+    # The test double implements only the client method exercised by dry_run.
+    runner._client = cast(bigquery.Client, StubClient())
     with pytest.raises(ReadOnlyViolation):
         runner.dry_run("SELECT 1")

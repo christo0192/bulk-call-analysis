@@ -124,7 +124,11 @@ def _optional_str(data: dict[str, Any], section: str, key: str) -> str | None:
     return value
 
 
-_TABLE = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){2}$")
+_PROJECT = r"[A-Za-z][A-Za-z0-9-]{4,28}[A-Za-z0-9]"
+_DATASET_OR_TABLE = r"[A-Za-z_][A-Za-z0-9_]*"
+_TABLE = re.compile(
+    rf"^(?:{_DATASET_OR_TABLE}\.{_DATASET_OR_TABLE}|{_PROJECT}\.{_DATASET_OR_TABLE}\.{_DATASET_OR_TABLE})$"
+)
 _COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
