@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Bulk Call Analysis",
+  "version": "0.1.0",
+  "identifier": "app.bulkcallanalysis.desktop",
+  "build": {
+    "frontendDist": "../ui",
+    "devUrl": "http://localhost:1420"
+  },
+  "app": {
+    "windows": [{
+      "label": "main",
+      "title": "Bulk Call Analysis",
+      "width": 900,
+      "height": 600,
+      "visible": false,
+      "resizable": true,
+      "fullscreen": false
+    }],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self'; img-src 'self' asset: data:; style-src 'self'; script-src 'self'"
+    },
+    "trayIcon": {
+      "iconPath": "icons/tray.svg",
+      "tooltip": "Bulk Call Analysis"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "nsis"],
+    "createUpdaterArtifacts": false,
+    "windows": { "nsis": { "installMode": "currentUser" } },
+    "macOS": { "signingIdentity": null, "providerShortName": null }
+  }
+}

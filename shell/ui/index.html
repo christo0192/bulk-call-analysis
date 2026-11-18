@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Bulk Call Analysis</title></head>
+  <body>
+    <h1>Bulk Call Analysis</h1>
+    <p>Interface coming soon</p>
+    <p id="engine-status">Engine status: starting</p>
+    <script>
+      window.__TAURI_INTERNALS__?.invoke('engine_status').then(status => {
+        document.querySelector('#engine-status').textContent = 'Engine status: ' + status;
+      });
+      window.__TAURI_INTERNALS__?.event?.listen?.('engine-event', event => {
+        if (event.payload?.method === 'engine/status') {
+          document.querySelector('#engine-status').textContent = 'Engine status: ' + (event.payload.params?.status ?? 'unknown');
+        }
+      });
+    </script>
+  </body>
+</html>
