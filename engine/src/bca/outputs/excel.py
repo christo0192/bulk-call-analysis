@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,6 +95,20 @@ def write_results(
         for index in deferred_flags:
             cells[index] = _cell(sheet, json.dumps(flags), False, [], "flags")
         sheet.append(cast(list[WriteOnlyCell], cells))
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=f".{path.stem}.", suffix=path.suffix, delete=False
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+        workbook.save(str(temporary_path))
+        os.replace(str(temporary_path), str(path))
+        temporary_path = None
+    finally:
+        workbook.close()
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def cast_mapping(value: object) -> Mapping[str, object]:
@@ -223,7 +239,7 @@ def _write_side_sheets(path: Path, spec: JobSpec, not_read: list[dict[str, objec
         ]
         for about_row in about_rows:
             about.append([_cell(about, item, False) for item in about_row])
-        workbook.save(path)
+        workbook.save(str(path))
     finally:
         workbook.close()
 

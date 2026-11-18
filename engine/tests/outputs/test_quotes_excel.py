@@ -54,6 +54,7 @@ def test_excel_formula_guard_numbers_and_header(tmp_path: Path) -> None:
         [{"a very long header that must remain intact": "=1+1", "number": 4}],
         "Results",
     )
+    assert path.exists()
     sheet = load_workbook(path, read_only=True, data_only=False)["Results"]
     rows = list(sheet.values)
     assert rows[1][0] == "=1+1"
@@ -69,6 +70,7 @@ def test_excel_write_only_path_handles_many_rows(tmp_path: Path) -> None:
         ({"lead id": f"lead-{index}", "number": index} for index in range(10_000)),
         "Results",
     )
+    assert path.exists()
     sheet = load_workbook(path, read_only=True, data_only=False)["Results"]
     rows = list(sheet.values)
     assert len(rows) == 10_001
