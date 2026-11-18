@@ -19,6 +19,38 @@ def test_valid_example_loads(tmp_path: Path) -> None:
     assert load_config(example(tmp_path)).bigquery.project == "your-gcp-project"
 
 
+@pytest.mark.parametrize(
+    "table",
+    [
+        "dataset.table",
+        "project-with-hyphens.dataset.table",
+        "PROJECT123.dataset_name.table_name",
+    ],
+)
+def test_table_identifiers_accept_default_and_explicit_projects(tmp_path: Path, table: str) -> None:
+    path = example(tmp_path)
+    path.write_text(path.read_text().replace("your_dataset.your_transcripts_view", table))
+    assert load_config(path).recipe.transcripts_table == table
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "dataset",
+        "project.dataset.table.extra",
+        "project.dataset-name.table",
+        "1project.dataset.table",
+        "project.dataset.table; DROP TABLE other.table",
+        "`project.dataset.table`",
+    ],
+)
+def test_table_identifiers_reject_invalid_values(tmp_path: Path, table: str) -> None:
+    path = example(tmp_path)
+    path.write_text(path.read_text().replace("your_dataset.your_transcripts_view", table))
+    with pytest.raises(ConfigError, match=r"recipe\.transcripts_table"):
+        load_config(path)
+
+
 def test_config_validation(tmp_path: Path) -> None:
     path = example(tmp_path)
     original = path.read_text()

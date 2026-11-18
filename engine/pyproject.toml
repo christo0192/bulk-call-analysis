@@ -3,7 +3,12 @@ name = "bca-engine"
 version = "0.1.0"
 description = "Bulk call analysis engine"
 requires-python = ">=3.12,<3.13"
-dependencies = ["jsonschema>=4.23.0"]
+dependencies = [
+    "jsonschema>=4.23.0",
+    "google-cloud-bigquery>=3.30",
+    "openpyxl>=3.1",
+    "sqlparse>=0.5",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -21,6 +26,7 @@ dev = [
     "mypy>=1.13",
     "pytest>=8.3",
     "types-jsonschema>=4.26.0.20261006",
+    "types-openpyxl>=3.1.5.20261017",
 ]
 
 [tool.ruff]

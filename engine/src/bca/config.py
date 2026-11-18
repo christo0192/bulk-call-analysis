@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -38,6 +39,8 @@ class RecipeConfig:
     duration_unit: Literal["ms", "s"] = "ms"
     max_chars_per_lead: int = 400_000
     drop_calls_shorter_than_s: int = 180
+    advisor_column: str | None = None
+    transcript_status_column: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,29 @@ def _path(data: dict[str, Any], section: str, key: str) -> Path | None:
     return Path(value).expanduser()
 
 
+def _optional_str(data: dict[str, Any], section: str, key: str) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise _error(f"{section}.{key}", "must be a non-empty string")
+    return value
+
+
+_PROJECT = r"[A-Za-z][A-Za-z0-9-]{4,28}[A-Za-z0-9]"
+_DATASET_OR_TABLE = r"[A-Za-z_][A-Za-z0-9_]*"
+_TABLE = re.compile(
+    rf"^(?:{_DATASET_OR_TABLE}\.{_DATASET_OR_TABLE}|{_PROJECT}\.{_DATASET_OR_TABLE}\.{_DATASET_OR_TABLE})$"
+)
+_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _identifier(value: str, key: str, pattern: re.Pattern[str]) -> str:
+    if "`" in value or pattern.fullmatch(value) is None:
+        raise _error(key, "contains an invalid identifier")
+    return value
+
+
 def load_config(path: Path) -> SiteConfig:
     try:
         raw = tomllib.loads(path.read_bytes().decode("utf-8-sig"))
@@ -162,6 +188,8 @@ def load_config(path: Path) -> SiteConfig:
             "transcript_text_column",
             "call_start_column",
             "call_duration_column",
+            "advisor_column",
+            "transcript_status_column",
             "duration_unit",
             "max_chars_per_lead",
             "drop_calls_shorter_than_s",
@@ -194,6 +222,20 @@ def load_config(path: Path) -> SiteConfig:
     stop = _int(limits, "limits", "codex_stop_percent", 95)
     if not 50 <= stop <= 99:
         raise _error("limits.codex_stop_percent", "must be between 50 and 99")
+    for key in ("transcripts_table", "calls_table"):
+        _identifier(_str(recipe, "recipe", key), f"recipe.{key}", _TABLE)
+    for key in (
+        "lead_id_column",
+        "call_id_column",
+        "transcript_text_column",
+        "call_start_column",
+        "call_duration_column",
+    ):
+        _identifier(_str(recipe, "recipe", key), f"recipe.{key}", _COLUMN)
+    for key in ("advisor_column", "transcript_status_column"):
+        value = _optional_str(recipe, "recipe", key)
+        if value is not None:
+            _identifier(value, f"recipe.{key}", _COLUMN)
     return SiteConfig(
         BigQueryConfig(
             _str(bq, "bigquery", "project"),
@@ -215,6 +257,8 @@ def load_config(path: Path) -> SiteConfig:
             cast(Literal["ms", "s"], duration),
             _int(recipe, "recipe", "max_chars_per_lead", 400_000),
             _int(recipe, "recipe", "drop_calls_shorter_than_s", 180),
+            _optional_str(recipe, "recipe", "advisor_column"),
+            _optional_str(recipe, "recipe", "transcript_status_column"),
         ),
         ModelsConfig(
             _str(models, "models", "claude_model", "claude-opus-5-5"),
