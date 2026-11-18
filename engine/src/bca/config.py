@@ -41,6 +41,7 @@ class RecipeConfig:
     drop_calls_shorter_than_s: int = 180
     advisor_column: str | None = None
     transcript_status_column: str | None = None
+    speaker_labels: dict[str, tuple[str, ...]] = None  # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,7 @@ def load_config(path: Path) -> SiteConfig:
             "duration_unit",
             "max_chars_per_lead",
             "drop_calls_shorter_than_s",
+            "speaker_labels",
         },
     )
     _table(models, "models", {"claude_model", "claude_effort", "luna_model", "luna_effort"})
@@ -236,6 +238,22 @@ def load_config(path: Path) -> SiteConfig:
         value = _optional_str(recipe, "recipe", key)
         if value is not None:
             _identifier(value, f"recipe.{key}", _COLUMN)
+    labels = recipe.get(
+        "speaker_labels",
+        {"learner": ["Customer", "Lead", "Learner"], "advisor": ["Agent", "Advisor", "PA"]},
+    )
+    if (
+        not isinstance(labels, dict)
+        or set(labels) != {"learner", "advisor"}
+        or any(
+            not isinstance(value, list)
+            or not value
+            or any(not isinstance(item, str) or not item for item in value)
+            for value in labels.values()
+        )
+    ):
+        raise _error("recipe.speaker_labels", "must map learner and advisor to non-empty string arrays")
+    speaker_labels = {key: tuple(cast(list[str], value)) for key, value in labels.items()}
     return SiteConfig(
         BigQueryConfig(
             _str(bq, "bigquery", "project"),
@@ -259,6 +277,7 @@ def load_config(path: Path) -> SiteConfig:
             _int(recipe, "recipe", "drop_calls_shorter_than_s", 180),
             _optional_str(recipe, "recipe", "advisor_column"),
             _optional_str(recipe, "recipe", "transcript_status_column"),
+            speaker_labels,
         ),
         ModelsConfig(
             _str(models, "models", "claude_model", "claude-opus-5-5"),
