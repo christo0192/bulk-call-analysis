@@ -97,6 +97,7 @@ class CodexBinaryManager:
             raise CodexVerificationError("Codex package SHA-256 mismatch")
         temp: Path | None = None
         extraction_dir: Path | None = None
+        binary_temp: Path | None = None
         try:
             self.app_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=self.app_dir, suffix=".tar.gz", delete=False) as handle:
@@ -108,7 +109,8 @@ class CodexBinaryManager:
                 if member is None or not member.isfile():
                     raise CodexVerificationError("Codex archive has no binary")
                 extraction_dir = Path(tempfile.mkdtemp(dir=self.app_dir))
-                binary = b""
+                binary: bytes | None = None
+                binary_digest: str | None = None
                 for item in bundle.getmembers():
                     if not item.isfile() or not (
                         item.name.startswith("bin/")
@@ -125,9 +127,13 @@ class CodexBinaryManager:
                     if source_handle is None:
                         raise CodexVerificationError("Codex archive member cannot be read")
                     contents = source_handle.read()
-                    output.write_bytes(contents)
                     if item.name == member.name:
                         binary = contents
+                        binary_digest = hashlib.sha256(contents).hexdigest()
+                        continue
+                    output.write_bytes(contents)
+                if binary is None or binary_digest is None:
+                    raise CodexVerificationError("Codex archive binary cannot be read")
                 if self.platform_name and not self.platform_name.startswith("win32-"):
                     for candidate in extraction_dir.rglob("*"):
                         if candidate.is_file():
@@ -146,9 +152,19 @@ class CodexBinaryManager:
                     output = self.destination / relative
                     output.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(source_path, output)
-            self._verify_signature(target)
+            target = self.destination / self._filename()
+            with tempfile.NamedTemporaryFile(
+                dir=self.destination, prefix=f".{target.name}.", suffix=".tmp", delete=False
+            ) as handle:
+                binary_temp = Path(handle.name)
+                handle.write(binary)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._verify_signature(binary_temp)
+            os.replace(binary_temp, target)
+            binary_temp = None
             final_digest = hashlib.sha256(target.read_bytes()).hexdigest()
-            if final_digest != hashlib.sha256(binary).hexdigest():
+            if final_digest != binary_digest:
                 raise CodexVerificationError("Codex binary changed during install")
             with target.with_suffix(target.suffix + ".sha256").open(
                 "w", encoding="utf-8", newline="\n"
@@ -160,5 +176,7 @@ class CodexBinaryManager:
         finally:
             if temp is not None:
                 temp.unlink(missing_ok=True)
+            if binary_temp is not None:
+                binary_temp.unlink(missing_ok=True)
             if extraction_dir is not None:
                 shutil.rmtree(extraction_dir, ignore_errors=True)

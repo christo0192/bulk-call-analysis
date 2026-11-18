@@ -24,7 +24,7 @@ def test_defaults_are_found_per_os(tmp_path: Path, system: str) -> None:
     key = home / ".gcp-keys" / "sample.json"
     connector.parent.mkdir(parents=True)
     connector.touch()
-    key.parent.mkdir()
+    key.parent.mkdir(parents=True, exist_ok=True)
     key.touch()
     result = detect(
         BigQueryConfig("project"),
