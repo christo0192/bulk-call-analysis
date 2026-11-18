@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+import time
+from collections.abc import Callable
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+
+import bca.claude.launch as launch
+from bca.claude.launch import SessionRef, TurnGuardError, run_turn, stop_turn
+from bca.claude.profile import ClaudeProfile
+from bca.procutil import pid_alive
+
+FAKE = Path(__file__).parents[1] / "fakes" / "fake_claude.py"
+
+
+def fake_environment(
+    profile: ClaudeProfile,
+    scenario: str,
+    env_builder: Callable[[ClaudeProfile], dict[str, str]],
+    **extra: str,
+) -> dict[str, str]:
+    env = env_builder(profile)
+    env.update({"FAKE_CLAUDE_SCENARIO": scenario, **extra})
+    return env
+
+
+def test_run_turn_yields_fake_events_and_sends_both_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("bca.claude.auth.auth_status", lambda binary, current: type("S", (), {"ok": True})())
+    profile = ClaudeProfile(tmp_path / "config", tmp_path / "work")
+    stdin_log = tmp_path / "stdin.jsonl"
+    env_log = tmp_path / "env.json"
+    original_env_builder = launch.build_turn_env
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "planted")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "planted")
+    original_builder = launch.build_turn_command
+    monkeypatch.setattr(
+        launch,
+        "build_turn_env",
+        lambda current: fake_environment(
+            current,
+            "normal",
+            original_env_builder,
+            FAKE_CLAUDE_STDIN_LOG=str(stdin_log),
+            FAKE_CLAUDE_ENV_LOG=str(env_log),
+        ),
+    )
+    monkeypatch.setattr(
+        launch,
+        "build_turn_command",
+        lambda *args, **kwargs: [sys.executable, str(FAKE), *original_builder(*args, **kwargs)[1:]],
+    )
+    session = SessionRef(uuid4())
+
+    async def collect() -> list[object]:
+        return [
+            event
+            async for event in run_turn(
+                Path(sys.executable),
+                profile,
+                tmp_path / "mcp",
+                tmp_path / "brief",
+                tmp_path / "settings",
+                "brief text",
+                "operator text",
+                "claude-opus-5-5",
+                session=session,
+            )
+        ]
+
+    events = asyncio.run(asyncio.wait_for(collect(), timeout=15))
+    assert [event.kind for event in events] == ["system", "result"]  # type: ignore[attr-defined]
+    payload = json.loads(stdin_log.read_text(encoding="utf-8"))
+    assert payload["message"]["content"] == "brief text\n\noperator text"
+    child_env = json.loads(env_log.read_text(encoding="utf-8"))
+    assert "ANTHROPIC_API_KEY" not in child_env and "CLAUDE_CODE_OAUTH_TOKEN" not in child_env
+
+
+def test_bad_init_aborts_and_kills_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bca.claude.auth.auth_status", lambda binary, current: type("S", (), {"ok": True})())
+    profile = ClaudeProfile(tmp_path / "config", tmp_path / "work")
+    original_env_builder = launch.build_turn_env
+    original_builder = launch.build_turn_command
+    monkeypatch.setattr(
+        launch,
+        "build_turn_env",
+        lambda current: fake_environment(current, "bad_init", original_env_builder),
+    )
+    monkeypatch.setattr(
+        launch,
+        "build_turn_command",
+        lambda *args, **kwargs: [sys.executable, str(FAKE), *original_builder(*args, **kwargs)[1:]],
+    )
+
+    async def collect() -> None:
+        async for _event in run_turn(
+            Path(sys.executable),
+            profile,
+            tmp_path / "mcp",
+            tmp_path / "brief",
+            tmp_path / "settings",
+            "brief",
+            "operator",
+            "claude-opus-5-5",
+        ):
+            pass
+
+    with pytest.raises(TurnGuardError):
+        asyncio.run(asyncio.wait_for(collect(), timeout=15))
+
+
+def test_stop_turn_kills_process_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bca.claude.auth.auth_status", lambda binary, current: type("S", (), {"ok": True})())
+    profile = ClaudeProfile(tmp_path / "config", tmp_path / "work")
+    child_pid_file = tmp_path / "child.pid"
+    original_env_builder = launch.build_turn_env
+    original_builder = launch.build_turn_command
+    monkeypatch.setattr(
+        launch,
+        "build_turn_env",
+        lambda current: fake_environment(
+            current, "spawn_child", original_env_builder, FAKE_CLAUDE_CHILD_PID=str(child_pid_file)
+        ),
+    )
+    monkeypatch.setattr(
+        launch,
+        "build_turn_command",
+        lambda *args, **kwargs: [sys.executable, str(FAKE), *original_builder(*args, **kwargs)[1:]],
+    )
+    session = SessionRef(uuid4())
+    started = asyncio.Event()
+
+    async def consume() -> None:
+        async for _event in run_turn(
+            Path(sys.executable),
+            profile,
+            tmp_path / "mcp",
+            tmp_path / "brief",
+            tmp_path / "settings",
+            "brief",
+            "operator",
+            "claude-opus-5-5",
+            session=session,
+        ):
+            pass
+
+    async def stop_after_start() -> None:
+        task = asyncio.create_task(consume())
+        for _ in range(100):
+            if child_pid_file.exists() and session.session_id in launch._processes:
+                started.set()
+                break
+            await asyncio.sleep(0.01)
+        await started.wait()
+        child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+        parent_pid = launch._processes[session.session_id].pid
+        stop_turn(session)
+        await task
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and (pid_alive(parent_pid) or pid_alive(child_pid)):
+            await asyncio.sleep(0.01)
+        assert not pid_alive(parent_pid)
+        assert not pid_alive(child_pid)
+
+    asyncio.run(asyncio.wait_for(stop_after_start(), timeout=15))
