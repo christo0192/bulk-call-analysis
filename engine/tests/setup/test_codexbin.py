@@ -53,9 +53,10 @@ def test_download_sha_signature_extract_replace_and_no_path_use(
 
     monkeypatch.setattr(manager, "_verify_signature", verify)
     target = manager.install()
+    assert target == manager.destination / "codex.exe"
     assert target.read_bytes() == b"synthetic codex binary"
     assert (
-        target.with_suffix(".exe.sha256").read_text(encoding="utf-8").strip()
+        target.with_suffix(target.suffix + ".sha256").read_text(encoding="utf-8").strip()
         == hashlib.sha256(target.read_bytes()).hexdigest()
     )
     assert seen and seen[0] != target

@@ -59,9 +59,7 @@ class CodexBinaryManager:
         return "codex-app-server-package-" + ASSET_SUFFIX[self.platform_name]
 
     def path(self) -> Path:
-        target = self.destination / (
-            "codex.exe" if self.platform_name and self.platform_name.startswith("win32") else "codex"
-        )
+        target = self.destination / self._filename()
         digest = target.with_suffix(target.suffix + ".sha256")
         if (
             not target.is_file()
@@ -70,6 +68,9 @@ class CodexBinaryManager:
         ):
             raise CodexVerificationError(f"verified Codex binary is missing or changed: {target}")
         return target
+
+    def _filename(self) -> str:
+        return "codex.exe" if self.platform_name and self.platform_name.startswith("win32-") else "codex"
 
     def _verify_signature(self, path: Path) -> None:
         if platform.system() == "Windows":
@@ -133,7 +134,7 @@ class CodexBinaryManager:
                     raise CodexVerificationError("Codex archive member cannot be read")
                 extracted.write_bytes(source.read())
             self._verify_signature(extracted)
-            target = self.destination / extracted.name
+            target = self.destination / self._filename()
             os.replace(extracted, target)
             target.with_suffix(target.suffix + ".sha256").write_text(
                 hashlib.sha256(target.read_bytes()).hexdigest() + "\n", encoding="utf-8"

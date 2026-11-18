@@ -23,7 +23,7 @@ def test_old_caches_deleted_new_kept_and_dry_run_lists(tmp_path: Path) -> None:
     old = tmp_path / "cache/transcripts/old.txt"
     new = tmp_path / "cache/transcripts/new.txt"
     _old(old, now)
-    new.parent.mkdir(parents=True)
+    new.parent.mkdir(parents=True, exist_ok=True)
     new.write_text("new", encoding="utf-8")
     found = sweep(tmp_path, RetentionConfig(1, 90), finished_at=now, dry_run=True)
     assert found == [old]
@@ -56,6 +56,27 @@ def test_outside_symlink_is_never_deleted(tmp_path: Path) -> None:
         pytest.skip("symlinks are unavailable")
     assert link not in sweep(tmp_path, RetentionConfig(1, 90), finished_at=now)
     assert outside.exists()
+
+
+def test_outside_resolved_paths_are_never_deleted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    outside_relative = tmp_path.parent / "outside-relative.txt"
+    outside_absolute = tmp_path.parent / "outside-absolute.txt"
+    _old(outside_relative, now)
+    _old(outside_absolute, now)
+    cache = tmp_path / "cache" / "transcripts"
+    cache.mkdir(parents=True, exist_ok=True)
+    relative_escape = cache / ".." / ".." / ".." / outside_relative.name
+
+    def rglob(path: Path, pattern: str) -> list[Path]:
+        if path == cache:
+            return [relative_escape, outside_absolute]
+        return []
+
+    monkeypatch.setattr(Path, "rglob", rglob)
+    assert sweep(tmp_path, RetentionConfig(1, 90), finished_at=now) == []
+    assert outside_relative.exists()
+    assert outside_absolute.exists()
 
 
 def test_spacy_model_present_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
