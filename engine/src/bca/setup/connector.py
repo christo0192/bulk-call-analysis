@@ -36,15 +36,25 @@ def _candidate_config(*, env: Mapping[str, str], home: Path, system: str) -> lis
 
 def _entry(path: Path, name: str) -> tuple[str | None, Path | None]:
     try:
-        raw: Any = json.loads(path.read_text(encoding="utf-8"))
-        entry = raw.get("mcpServers", {}).get(name, {}) if isinstance(raw, dict) else {}
+        if path.stat().st_size > 1024 * 1024:
+            return None, None
+        raw: Any = json.loads(path.read_text(encoding="utf-8-sig"))
+        servers = raw.get("mcpServers") if isinstance(raw, dict) else None
+        entry = servers.get(name) if isinstance(servers, dict) else None
+        entry = entry if isinstance(entry, dict) else {}
         command = entry.get("command") if isinstance(entry, dict) else None
         args = entry.get("args", []) if isinstance(entry, dict) else []
-        command_path = Path(command) if isinstance(command, str) else None
-        if command_path is not None and not command_path.exists():
-            command_path = next(
-                (Path(arg) for arg in args if isinstance(arg, str) and Path(arg).exists()), None
-            )
+        command_path: Path | None = None
+        if isinstance(command, str) and Path(command).is_absolute() and Path(command).is_file():
+            candidate = Path(command)
+            if candidate.stem.casefold() == name.casefold():
+                command_path = candidate
+        if command_path is None and isinstance(args, list):
+            directory = next((args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--directory"), None)
+            if isinstance(directory, str) and Path(directory).is_absolute():
+                candidate = Path(directory) / ".venv" / "Scripts" / f"{name}.exe"
+                if candidate.is_file():
+                    command_path = candidate
         env_values = entry.get("env", {}) if isinstance(entry, dict) else {}
         key = env_values.get("GOOGLE_APPLICATION_CREDENTIALS") if isinstance(env_values, dict) else None
         return (
@@ -78,7 +88,7 @@ def detect(
     if connector is None and connector_name:
         if os_name == "Windows":
             connector = (
-                Path(values.get("USERPROFILE", str(home_path)))
+                Path(values.get("SystemDrive", "C:") + "\\")
                 / "mcp-servers"
                 / connector_name
                 / ".venv"

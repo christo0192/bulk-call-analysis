@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +43,15 @@ def test_raw_text_is_deleted_only_for_passed_leads(tmp_path: Path) -> None:
     found = sweep(tmp_path, RetentionConfig(1, 90), finished_at=now, passed_leads={"passed"})
     assert found == [passed]
     assert passed in found and failed not in found
+
+
+def test_fresh_raw_text_for_passed_lead_is_deleted(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    passed = tmp_path / "raw/passed.jsonl.gz"
+    passed.parent.mkdir(parents=True)
+    passed.write_text("synthetic", encoding="utf-8")
+    assert passed in sweep(tmp_path, RetentionConfig(30, 90), finished_at=now, passed_leads={"passed"})
+    assert not passed.exists()
 
 
 def test_outside_symlink_is_never_deleted(tmp_path: Path) -> None:
@@ -92,8 +102,20 @@ def test_spacy_model_present_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not called
 
 
-def test_spacy_model_install_uses_pinned_wheel_and_surfaces_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pinned_model_minor_matches_locked_spacy() -> None:
+    lock = Path(__file__).parents[2] / "uv.lock"
+    text = lock.read_text(encoding="utf-8")
+    spacy = re.search(r'name = "spacy"\s+version = "([0-9]+\.[0-9]+)\.', text)
+    model = re.search(r"en_core_web_sm-([0-9]+\.[0-9]+)\.0", MODEL_WHEEL_URL)
+    assert spacy and model and spacy.group(1) == model.group(1)
+
+
+def test_spacy_model_install_uses_pinned_wheel_and_surfaces_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr("bca.setup.spacy_model.importlib.util.find_spec", lambda name: None)
+    uv = tmp_path / "uv.exe"
+    monkeypatch.setattr("bca.setup.spacy_model.shutil.which", lambda name: str(uv))
     commands: list[list[str]] = []
 
     class Result:
@@ -104,16 +126,7 @@ def test_spacy_model_install_uses_pinned_wheel_and_surfaces_failure(monkeypatch:
         return Result()
 
     assert ensure_model(run=cast(Any, run)) is True
-    assert commands == [
-        [
-            sys.executable,
-            "-m",
-            "uv",
-            "pip",
-            "install",
-            MODEL_WHEEL_URL,
-        ]
-    ]
+    assert commands == [[str(uv), "pip", "install", "--python", sys.executable, MODEL_WHEEL_URL]]
 
     class Failed:
         returncode = 1

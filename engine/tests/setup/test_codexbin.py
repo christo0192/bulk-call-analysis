@@ -32,7 +32,7 @@ def test_download_sha_signature_extract_replace_and_no_path_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     archive = _archive()
-    asset = "codex-app-server-package-" + ASSET_SUFFIX["win32-x64"]
+    asset = "codex-package-" + ASSET_SUFFIX["win32-x64"]
     calls: list[str] = []
 
     def http(url: str) -> bytes:
@@ -100,6 +100,20 @@ def test_signature_failure_and_spoofed_signer_are_rejected(
     )
     with pytest.raises(CodexVerificationError):
         CodexBinaryManager(tmp_path, "1", platform_name="win32-x64")._verify_signature(tmp_path / "codex.exe")
+
+
+def test_authenticode_accepts_real_powershell_shape_and_exact_signer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("bca.setup.codexbin.platform.system", lambda: "Windows")
+    monkeypatch.setattr("bca.setup.codexbin.os.environ", {"SYSTEMROOT": str(tmp_path)})
+    monkeypatch.setattr(
+        "bca.setup.codexbin.subprocess.run",
+        lambda *args, **kwargs: type(
+            "R", (), {"returncode": 0, "stdout": '{"Status":"Valid","Signer":"OpenAI OpCo, LLC"}'}
+        )(),
+    )
+    CodexBinaryManager(tmp_path, "1", platform_name="win32-x64")._verify_signature(tmp_path / "codex.exe")
 
 
 def test_rehash_detects_swapped_file_and_path_does_not_use_path_env(

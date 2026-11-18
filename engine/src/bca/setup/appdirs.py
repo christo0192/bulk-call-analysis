@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform as _platform
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,24 +46,31 @@ def is_cloud_synced(
     os_name = _platform.system() if system is None else system
     resolved = str(path.expanduser())
     if os_name == "Windows":
-        lower = resolved.casefold()
+        lower = resolved.replace("/", "\\").casefold()
 
         def under_root(root: str) -> bool:
-            normalized = root.rstrip("\\/")
+            normalized = root.replace("/", "\\").rstrip("\\/")
             folded = normalized.casefold()
-            return lower == folded or lower.startswith((folded + "\\", folded + "/"))
+            return lower == folded or lower.startswith(folded + "\\")
 
-        if (
-            any(
-                under_root(str(values[name]))
-                for name in ("OneDrive", "OneDriveCommercial")
-                if values.get(name)
-            )
-            or "\\onedrive" in lower
-            or "/onedrive" in lower
-        ):
+        if any(
+            under_root(str(values[name])) for name in ("OneDrive", "OneDriveCommercial") if values.get(name)
+        ) or any(part == "onedrive" or part.startswith("onedrive - ") for part in re.split(r"[\\/]+", lower)):
             return "OneDrive"
     if os_name == "Darwin":
+        cloud_docs = home_path / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
+        try:
+            if (cloud_docs / "Desktop").is_dir() and (cloud_docs / "Documents").is_dir():
+                path.expanduser().resolve().relative_to(home_path / "Desktop")
+                return "iCloud"
+        except ValueError:
+            pass
+        try:
+            if (cloud_docs / "Desktop").is_dir() and (cloud_docs / "Documents").is_dir():
+                path.expanduser().resolve().relative_to(home_path / "Documents")
+                return "iCloud"
+        except ValueError:
+            pass
         try:
             relative = (
                 path.expanduser()

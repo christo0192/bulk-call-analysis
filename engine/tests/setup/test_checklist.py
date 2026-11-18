@@ -39,3 +39,30 @@ def test_persistence_round_trip_is_atomic(tmp_path: Path) -> None:
     assert loaded.items[0].status == "failed"
     assert loaded.items[0].detail == "unavailable"
     assert json.loads(loaded.path.read_text(encoding="utf-8"))[0]["name"] == "uv_python"
+
+
+def test_corrupt_state_is_quarantined_and_missing_items_are_merged(tmp_path: Path) -> None:
+    path = tmp_path / "setup-checklist.json"
+    path.write_text('{"broken": true}', encoding="utf-8")
+    loaded = Checklist(tmp_path)
+    assert len(loaded.items) == len(NAMES)
+    assert list(tmp_path.glob("setup-checklist.json.corrupt"))
+
+    path.write_text(
+        json.dumps([{"name": "training_off", "status": "manual_done", "detail": "confirmed"}]),
+        encoding="utf-8",
+    )
+    loaded = Checklist(tmp_path)
+    assert loaded.items[0].status == "pending"
+    assert next(item for item in loaded.items if item.name == "training_off").status == "manual_done"
+
+
+def test_run_checks_preserves_newer_manual_decision(tmp_path: Path) -> None:
+    ui = Checklist(tmp_path)
+    job = Checklist(tmp_path)
+    ui.mark_manual("training_off")
+    job.run_checks({"uv_python": lambda: (True, "checked")})
+    ui.mark_manual("training_off", done=False, detail="revoked")
+    job.run_checks({"uv_python": lambda: (False, "failed")})
+    current = next(item for item in Checklist(tmp_path).items if item.name == "training_off")
+    assert current.status == "manual_pending"

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import platform
-import re
 import shutil
 import subprocess
 import tarfile
@@ -13,9 +11,11 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
+from bca.signing import verify_authenticode
+
 OFFICIAL_HOST = "github.com"
-SIGNER = "OpenAI"
-MAC_TEAM_REQUIREMENT = 'anchor apple generic and certificate leaf[subject.OU] = "2DC2775U2D"'
+SIGNER = "OpenAI OpCo, LLC"
+MAC_TEAM_REQUIREMENT = 'anchor apple generic and certificate leaf[subject.OU] = "2DC432GLL2"'
 ASSET_SUFFIX = {
     "win32-x64": "x86_64-pc-windows-msvc.tar.gz",
     "win32-arm64": "aarch64-pc-windows-msvc.tar.gz",
@@ -40,7 +40,7 @@ class CodexBinaryManager:
         self.app_dir, self.version = app_dir, version
         self.platform_name = platform_name or self._current_platform()
         self.http_get = http_get or self._get
-        self.destination = app_dir / "codex" / version
+        self.destination = app_dir / "bin" / "codex" / version
 
     @staticmethod
     def _get(url: str) -> bytes:
@@ -56,7 +56,7 @@ class CodexBinaryManager:
     def _asset(self) -> str:
         if self.platform_name not in ASSET_SUFFIX:
             raise CodexVerificationError("unsupported Codex platform")
-        return "codex-app-server-package-" + ASSET_SUFFIX[self.platform_name]
+        return "codex-package-" + ASSET_SUFFIX[self.platform_name]
 
     def path(self) -> Path:
         target = self.destination / self._filename()
@@ -74,29 +74,10 @@ class CodexBinaryManager:
 
     def _verify_signature(self, path: Path) -> None:
         if platform.system() == "Windows":
-            root = Path(os.environ.get("SYSTEMROOT", "C:\\Windows"))
-            command = [
-                str(root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"),
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "$s=Get-AuthenticodeSignature -LiteralPath $args[0]; $s | Select-Object Status,@{N='Subject';E={$_.SignerCertificate.Subject}} | ConvertTo-Json -Compress",  # noqa: E501
-                str(path.resolve()),
-            ]
-            result = subprocess.run(command, capture_output=True, text=True, check=False)
             try:
-                data = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                data = {}
-            subject = data.get("Subject", "")
-            signer_match = re.search(r"(?:^|,)\s*CN=([^,]+)", subject)
-            if (
-                result.returncode
-                or data.get("Status") != "Valid"
-                or not signer_match
-                or signer_match.group(1) != SIGNER
-            ):
-                raise CodexVerificationError("Codex binary signature is not valid")
+                verify_authenticode(path, SIGNER)
+            except Exception as exc:
+                raise CodexVerificationError("Codex binary signature is not valid") from exc
         elif platform.system() == "Darwin":
             signature_result = subprocess.run(
                 ["codesign", "--verify", "--strict", f"-R={MAC_TEAM_REQUIREMENT}", str(path)],
@@ -114,33 +95,70 @@ class CodexBinaryManager:
         expected = next((line.split()[0] for line in sums.splitlines() if line.strip().endswith(asset)), None)
         if expected is None or hashlib.sha256(archive).hexdigest().lower() != expected.lower():
             raise CodexVerificationError("Codex package SHA-256 mismatch")
-        self.destination.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=self.app_dir, suffix=".tar.gz", delete=False) as handle:
-            temp = Path(handle.name)
-            handle.write(archive)
+        temp: Path | None = None
         extraction_dir: Path | None = None
         try:
+            self.app_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=self.app_dir, suffix=".tar.gz", delete=False) as handle:
+                temp = Path(handle.name)
+                handle.write(archive)
             with tarfile.open(temp, "r:gz") as bundle:
-                member = next(
-                    (item for item in bundle.getmembers() if Path(item.name).name in {"codex", "codex.exe"}),
-                    None,
-                )
+                filename = self._filename()
+                member = next((item for item in bundle.getmembers() if item.name == f"bin/{filename}"), None)
                 if member is None or not member.isfile():
                     raise CodexVerificationError("Codex archive has no binary")
                 extraction_dir = Path(tempfile.mkdtemp(dir=self.app_dir))
-                extracted = extraction_dir / Path(member.name).name
-                source = bundle.extractfile(member)
-                if source is None:
-                    raise CodexVerificationError("Codex archive member cannot be read")
-                extracted.write_bytes(source.read())
-            self._verify_signature(extracted)
+                binary = b""
+                for item in bundle.getmembers():
+                    if not item.isfile() or not (
+                        item.name.startswith("bin/")
+                        or item.name.startswith("codex-resources/")
+                        or item.name.startswith("codex-path/")
+                    ):
+                        continue
+                    relative = Path(item.name)
+                    if relative.is_absolute() or ".." in relative.parts:
+                        raise CodexVerificationError("Codex archive contains an unsafe member")
+                    output = extraction_dir / relative
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    source_handle = bundle.extractfile(item)
+                    if source_handle is None:
+                        raise CodexVerificationError("Codex archive member cannot be read")
+                    contents = source_handle.read()
+                    output.write_bytes(contents)
+                    if item.name == member.name:
+                        binary = contents
+                if self.platform_name and not self.platform_name.startswith("win32-"):
+                    for candidate in extraction_dir.rglob("*"):
+                        if candidate.is_file():
+                            os.chmod(candidate, 0o755)
+            for candidate in extraction_dir.rglob("*"):
+                if candidate.is_file() and candidate.relative_to(extraction_dir).parts[0] in {
+                    "bin",
+                    "codex-path",
+                }:
+                    self._verify_signature(candidate)
+            self.destination.mkdir(parents=True, exist_ok=True)
             target = self.destination / self._filename()
-            os.replace(extracted, target)
-            target.with_suffix(target.suffix + ".sha256").write_text(
-                hashlib.sha256(target.read_bytes()).hexdigest() + "\n", encoding="utf-8"
-            )
+            for source_path in extraction_dir.rglob("*"):
+                if source_path.is_file():
+                    relative = source_path.relative_to(extraction_dir)
+                    output = self.destination / relative
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(source_path, output)
+            self._verify_signature(target)
+            final_digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            if final_digest != hashlib.sha256(binary).hexdigest():
+                raise CodexVerificationError("Codex binary changed during install")
+            with target.with_suffix(target.suffix + ".sha256").open(
+                "w", encoding="utf-8", newline="\n"
+            ) as digest_file:
+                digest_file.write(final_digest + "\n")
+                digest_file.flush()
+                os.fsync(digest_file.fileno())
             return target
         finally:
-            temp.unlink(missing_ok=True)
+            if temp is not None:
+                temp.unlink(missing_ok=True)
             if extraction_dir is not None:
                 shutil.rmtree(extraction_dir, ignore_errors=True)

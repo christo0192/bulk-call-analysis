@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-EXPECTED_SIGNER = "CN=Anthropic"
+from bca.signing import verify_authenticode
+
+EXPECTED_SIGNER = "Anthropic PBC"
+MAC_TEAM_ID = "Q6L2SF6YDW"
 OFFICIAL_HOST = "downloads.claude.ai"
 
 
@@ -50,36 +53,17 @@ class BinaryManager:
 
     def _verify_signature(self, path: Path) -> None:
         if platform.system() == "Windows":
-            command = [
-                str(
-                    Path(os.environ.get("SYSTEMROOT", r"C:\Windows"))
-                    / "System32"
-                    / "WindowsPowerShell"
-                    / "v1.0"
-                    / "powershell.exe"
-                ),
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "$s=Get-AuthenticodeSignature -LiteralPath $args[0]; "
-                "$s | Select-Object Status,@{N='Subject';E={$_.SignerCertificate.Subject}} "
-                "| ConvertTo-Json -Compress",
-                str(path.resolve()),
-            ]
-            result = subprocess.run(command, capture_output=True, text=True, check=False)
-            if (
-                result.returncode != 0
-                or json.loads(result.stdout).get("Status") != "Valid"
-                or json.loads(result.stdout).get("Subject") != EXPECTED_SIGNER
-            ):
-                raise BinaryVerificationError("Claude binary signature is not valid")
+            try:
+                verify_authenticode(path, EXPECTED_SIGNER)
+            except Exception as exc:
+                raise BinaryVerificationError("Claude binary signature is not valid") from exc
         else:
             result = subprocess.run(
                 [
                     "codesign",
                     "--verify",
                     "--strict",
-                    '-R=anchor apple generic and certificate leaf[subject.OU] = "TEAMID"',
+                    f'-R=anchor apple generic and certificate leaf[subject.OU] = "{MAC_TEAM_ID}"',
                     str(path),
                 ],
                 capture_output=True,
@@ -119,6 +103,8 @@ class BinaryManager:
         target = self.destination / self._filename()
         temp = target.with_name(target.name + ".tmp")
         shutil.copy2(source, temp)
+        if not (self._platform_name() or "").startswith("win32-"):
+            os.chmod(temp, 0o755)
         accepted = self._accept(temp)
         os.replace(accepted, target)
         os.replace(temp.with_suffix(temp.suffix + ".sha256"), target.with_suffix(target.suffix + ".sha256"))
@@ -141,6 +127,8 @@ class BinaryManager:
             temp = target.with_name(target.name + ".tmp")
             with urllib.request.urlopen(url) as response:
                 temp.write_bytes(response.read())
+            if not platform_name.startswith("win32-"):
+                os.chmod(temp, 0o755)
             with urllib.request.urlopen(manifest_url) as response:
                 manifest: Any = json.loads(response.read().decode("utf-8"))
             digest = self._find_digest(manifest, platform_name)

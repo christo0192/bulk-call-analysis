@@ -57,7 +57,7 @@ def test_desktop_classic_and_msix_paths_only_parse_matching_entry(tmp_path: Path
         if msix
         else "claude_desktop_config.json"
     )
-    command, key = tmp_path / "connector.exe", tmp_path / "key.json"
+    command, key = tmp_path / "wanted.exe", tmp_path / "key.json"
     command.touch()
     key.touch()
     _write_desktop_config(
@@ -72,6 +72,40 @@ def test_desktop_classic_and_msix_paths_only_parse_matching_entry(tmp_path: Path
     assert result.connector == command
     assert result.key == key
     assert result.config_path == config
+
+
+def test_desktop_config_rejects_bad_shape_and_derives_uv_directory_entry(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    config = home / "AppData/Roaming/Claude/claude_desktop_config.json"
+    server = tmp_path / "server"
+    connector = server / ".venv/Scripts/wanted.exe"
+    connector.parent.mkdir(parents=True)
+    connector.touch()
+    key = tmp_path / "key.json"
+    key.touch()
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\ufeff"
+        + json.dumps(
+            {
+                "mcpServers": {
+                    "wanted": {
+                        "command": str(tmp_path / "uv.exe"),
+                        "args": ["--directory", str(server), "run", "wanted"],
+                        "env": {"GOOGLE_APPLICATION_CREDENTIALS": str(key)},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = detect(BigQueryConfig("project"), connector_name="wanted", system="Windows", home=home, env={})
+    assert result.connector == connector
+    config.write_text(json.dumps({"mcpServers": []}), encoding="utf-8")
+    assert (
+        detect(BigQueryConfig("project"), connector_name="wanted", system="Windows", home=home, env={}).status
+        == "needs file picker"
+    )
 
 
 def test_key_is_checked_for_existence_but_never_opened(
