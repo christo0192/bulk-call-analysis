@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from jsonschema import ValidationError  # type: ignore[import-untyped]
 from jsonschema.validators import validator_for  # type: ignore[import-untyped]
@@ -66,6 +66,8 @@ class _Lead:
     done: bool = False
     outcome_delivered: bool = False
     pending_action: asyncio.Task[None] | None = None
+    server_generation: int = 0
+    completion_event: asyncio.Event | None = None
 
 
 class LunaPool:
@@ -108,12 +110,23 @@ class LunaPool:
         self._models: set[str] = set()
         self._needs_recycle = False
         self._pending_actions: set[asyncio.Task[None]] = set()
+        self._rate_result: dict[str, Any] | None = None
+        self._latched_decision: Decision | None = None
+        self._dispatch_closed = False
+        self._server_generation = 0
+        self._pending_pause: tuple[str, int | None] | None = None
 
     def set_concurrency(self, n: int) -> None:
         self.concurrency = max(1, n)
 
     async def run_until_idle(self) -> None:
         self._stopping = False
+        self._paused = False
+        self._latched_decision = None
+        self._dispatch_closed = False
+        self._consecutive_failures = 0
+        self._backoff = 0
+        self._needs_recycle = False
         await self._launch_and_prepare()
         running: set[asyncio.Task[None]] = set()
         try:
@@ -124,16 +137,21 @@ class LunaPool:
                 room = self.concurrency - len(running)
                 tasks: list[LeadTask] = []
                 if room > 0:
+                    if self._dispatch_closed:
+                        break
                     tasks = await self.callbacks.next_tasks(room)
-                    for task in tasks:
+                    for index, task in enumerate(tasks):
                         if len(running) >= self.concurrency:
+                            await asyncio.gather(*(self._fail_unstarted(item) for item in tasks[index:]))
                             break
-                        if not await self._before_dispatch():
+                        if not await self._before_dispatch(task.model):
+                            await asyncio.gather(*(self._fail_unstarted(item) for item in tasks[index:]))
                             break
                         if task.model not in self._models:
+                            await asyncio.gather(*(self._fail_unstarted(item) for item in tasks[index:]))
                             await self._pause("model_unavailable", None)
                             break
-                        lead = _Lead(task)
+                        lead = _Lead(task, server_generation=self._server_generation)
                         self._leads[task.attempt_id] = lead
                         running.add(asyncio.create_task(self._run_lead(lead)))
                 if not running and not tasks:
@@ -153,6 +171,10 @@ class LunaPool:
                     for running_task in running:
                         running_task.cancel()
                     await asyncio.gather(*running, return_exceptions=True)
+            if self._pending_pause is not None:
+                reason, resume_at = self._pending_pause
+                self._pending_pause = None
+                await self.callbacks.on_pause(reason, resume_at)
             if self._pending_actions:
                 await asyncio.gather(*self._pending_actions, return_exceptions=True)
             if self._server is not None:
@@ -161,26 +183,31 @@ class LunaPool:
 
     async def stop(self) -> None:
         self._stopping = True
+        self._dispatch_closed = True
+        for lead in list(self._leads.values()):
+            await self._fail(lead, "stopped", False, "pool stopped")
         server = self._server
         if server is not None:
-            for lead in list(self._leads.values()):
-                await self._interrupt(lead)
+            await asyncio.gather(*(self._interrupt(lead) for lead in list(self._leads.values())))
             await server.stop()
             self._server = None
 
     async def _launch_and_prepare(self) -> None:
         self._server = await self.launch_factory()
+        self._server_generation += 1
         client = self._client
         client.on_any_notification(self._notification)
         rate = await self._request("account/rateLimits/read")
+        self._rate_result = rate
+        models = await self._request("model/list", {"includeHidden": True})
+        self._models = self._model_names(models)
+        cursor = models.get("nextCursor")
+        while isinstance(cursor, str) and cursor:
+            models = await self._request("model/list", {"includeHidden": True, "cursor": cursor})
+            self._models.update(self._model_names(models))
+            cursor = models.get("nextCursor")
         model = self._model_for_setup(rate)
         self._snapshot = parse_rate_limits(rate, model)
-        models = await self._request("model/list")
-        self._models = self._model_names(models)
-        if not self._model_available(models, model):
-            await self.callbacks.on_pause("model_unavailable", None)
-            self._paused = True
-            return
         await self._report_quota()
 
     @property
@@ -194,7 +221,7 @@ class LunaPool:
 
     @staticmethod
     def _model_names(result: dict[str, Any]) -> set[str]:
-        models = result.get("models", [])
+        models = result.get("data", [])
         if not isinstance(models, list):
             return set()
         names: set[str] = set()
@@ -221,20 +248,20 @@ class LunaPool:
 
     @staticmethod
     def _model_available(result: dict[str, Any], model: str) -> bool:
-        models = result.get("models", [])
+        models = result.get("data", [])
         if not isinstance(models, list):
             return False
         for item in models:
             if isinstance(item, str) and item == model:
                 return True
-            if isinstance(item, dict) and item.get("slug", item.get("id")) == model:
+            if isinstance(item, dict) and model in {item.get("slug"), item.get("id"), item.get("model")}:
                 return True
         return False
 
     async def _report_quota(self) -> Decision:
         if self._snapshot is None:
             return Decision(ALLOW, "quota is unavailable", None)
-        decision = self.guard.decide(self._snapshot)
+        decision = self._latched_decision or self.guard.decide(self._snapshot)
         await self.callbacks.on_quota(self._snapshot, decision)
         return decision
 
@@ -243,10 +270,15 @@ class LunaPool:
         if decision.kind == STOP_DISPATCH:
             await self._pause("quota", decision.resume_at)
         elif decision.kind == INTERRUPT_ALL:
+            self._latched_decision = decision
             await self._interrupt_all("credit" if "credit" in decision.reason else "quota")
 
-    async def _before_dispatch(self) -> bool:
+    async def _before_dispatch(self, model: str) -> bool:
+        if self._rate_result is not None:
+            self._snapshot = parse_rate_limits(self._rate_result, model)
         decision = await self._report_quota()
+        if self._dispatch_closed or self._latched_decision is not None:
+            return False
         if decision.kind == ALLOW:
             if self._backoff:
                 await asyncio.sleep(self._backoff)
@@ -254,6 +286,7 @@ class LunaPool:
         if decision.kind == STOP_DISPATCH:
             await self._pause("quota", decision.resume_at)
         else:
+            self._latched_decision = decision
             await self._interrupt_all("credit" if "credit" in decision.reason else "quota")
         return False
 
@@ -264,21 +297,35 @@ class LunaPool:
             if self._server is not None and self._server.returncode is not None:
                 await self._crash_or_failure(lead, f"app-server exited with code {self._server.returncode}")
                 return
-            started = await self._request("thread/start", {"model": task.model, "ephemeral": True})
+            started = await self._request(
+                "thread/start",
+                {
+                    "model": task.model,
+                    "ephemeral": True,
+                    "approvalPolicy": "never",
+                    "sandbox": "read-only",
+                    "serviceTier": "default",
+                },
+            )
             thread = started.get("thread")
             lead.thread_id = str(thread.get("id")) if isinstance(thread, dict) else None
             if lead.thread_id is None:
                 raise ValueError("thread/start returned no thread id")
+            if self._dispatch_closed or lead.outcome_delivered:
+                return
             result = await asyncio.wait_for(
                 self._request(
                     "turn/start",
                     {
                         "threadId": lead.thread_id,
-                        "input": [{"type": "text", "text": f"LEAD_ID={task.lead_id} {task.prompt}"}],
+                        "input": [{"type": "text", "text": task.prompt}],
                         "outputSchema": task.output_schema,
                         "model": task.model,
                         "effort": task.effort,
                         "summary": "concise",
+                        "approvalPolicy": "never",
+                        "sandboxPolicy": {"type": "readOnly"},
+                        "serviceTierForTurn": "default",
                     },
                 ),
                 self.lead_timeout_s,
@@ -287,10 +334,15 @@ class LunaPool:
             if isinstance(turn, dict) and turn.get("id"):
                 lead.turn_id = str(turn["id"])
                 self._by_turn[lead.turn_id] = lead
+            if lead.outcome_delivered:
+                await self._interrupt(lead)
+                return
             await self._complete_from_events(lead)
+        except RpcTimeout as exc:
+            await self._crash_or_failure(lead, str(exc))
         except TimeoutError:
             await self._fail_timeout(lead)
-        except (RpcTimeout, ConnectionError, BrokenPipeError) as exc:
+        except (ConnectionError, BrokenPipeError) as exc:
             await self._crash_or_failure(lead, str(exc))
         except RpcError as exc:
             await self._handle_rpc_error(lead, exc)
@@ -301,7 +353,7 @@ class LunaPool:
         finally:
             if lead.pending_action is not None:
                 await asyncio.gather(lead.pending_action, return_exceptions=True)
-            if lead.thread_id is not None:
+            if lead.thread_id is not None and lead.server_generation == self._server_generation:
                 with contextlib.suppress(ConnectionError, BrokenPipeError, RpcError, RpcTimeout):
                     await self._request("thread/unsubscribe", {"threadId": lead.thread_id})
             self._leads.pop(task.attempt_id, None)
@@ -309,15 +361,13 @@ class LunaPool:
                 self._by_turn.pop(lead.turn_id, None)
 
     async def _complete_from_events(self, lead: _Lead) -> None:
-        deadline = self.lead_timeout_s
-        while not lead.done:
-            if self._server is not None and self._server.returncode is not None:
-                await self._crash_or_failure(lead, f"app-server exited with code {self._server.returncode}")
-                return
-            await asyncio.sleep(min(0.01, deadline))
-            deadline -= 0.01
-            if deadline <= 0:
-                await self._fail_timeout(lead)
+        lead.completion_event = asyncio.Event()
+        if not lead.done:
+            try:
+                await asyncio.wait_for(lead.completion_event.wait(), self.lead_timeout_s)
+            except TimeoutError:
+                if not lead.done:
+                    await self._fail_timeout(lead)
                 return
         if lead.outcome_delivered:
             return
@@ -351,13 +401,27 @@ class LunaPool:
         if method == "account/rateLimits/updated":
             if self._snapshot is not None:
                 self._snapshot = merge_update(self._snapshot, params)
-                self._schedule_action(self._check_quota())
+                decision = self.guard.decide(self._snapshot)
+                if decision.kind != ALLOW:
+                    self._latched_decision = decision
+                    self._dispatch_closed = True
+                    self._schedule_action(self._check_quota())
             return
         if method == "model/rerouted" and lead is not None:
             from_model = str(params.get("fromModel", lead.model_used or lead.task.model))
             to_model = str(params.get("toModel", params.get("model", lead.task.model)))
             lead.model_used = to_model
             await self.callbacks.on_reroute(lead.task, from_model, to_model, str(params.get("reason", "")))
+        if method == "thread/tokenUsage/updated" and lead is not None:
+            usage = params.get("tokenUsage")
+            if isinstance(usage, dict):
+                lead.usage = usage
+            return
+        if method.endswith("requestApproval"):
+            if lead is not None:
+                await self._interrupt(lead)
+                await self._fail(lead, "tool_call_forbidden", True, "approval request forbidden")
+            return
         if method == "error":
             if params.get("willRetry") is True:
                 return
@@ -380,17 +444,25 @@ class LunaPool:
             lead.text = item["text"]
         if lead is not None and method == "turn/completed":
             turn = params.get("turn")
-            if isinstance(turn, dict) and isinstance(turn.get("usage"), dict):
-                lead.usage = turn["usage"]
-            lead.done = True
+            if isinstance(turn, dict):
+                status = turn.get("status")
+                if status == "failed":
+                    error = (
+                        cast(dict[str, Any], turn.get("error")) if isinstance(turn.get("error"), dict) else {}
+                    )
+                    code = self._error_code(error.get("codexErrorInfo", error))
+                    await self._handle_error_code(lead, code, str(error))
+                elif status == "completed":
+                    lead.done = True
+                else:
+                    lead.done = True
+            if lead.completion_event is not None:
+                lead.completion_event.set()
 
     @staticmethod
     def _forbidden_item(item: dict[str, Any]) -> bool:
         item_type = str(item.get("type", "")).lower()
-        return item_type not in {"", "agentmessage", "reasoning", "userinput"} and any(
-            word in item_type
-            for word in ("command", "file", "mcp", "web", "image", "tool", "computer", "shell")
-        )
+        return item_type not in {"agentmessage", "reasoning", "usermessage"}
 
     async def _handle_error_notification(self, lead: _Lead, params: dict[str, Any]) -> None:
         error = params.get("error")
@@ -410,6 +482,8 @@ class LunaPool:
             for key in ("code", "type", "name", "codexErrorInfo"):
                 if isinstance(value.get(key), str):
                     return str(value[key])
+            if len(value) == 1:
+                return str(next(iter(value)))
         return str(value)
 
     async def _handle_error_code(self, lead: _Lead, code: str, detail: str) -> None:
@@ -417,6 +491,7 @@ class LunaPool:
             "rateLimitExceeded",
             "serverOverloaded",
             "httpConnectionFailed",
+            "responseStreamConnectionFailed",
             "responseStreamDisconnected",
             "responseTooManyFailedAttempts",
             "-32001",
@@ -426,11 +501,17 @@ class LunaPool:
             self.set_concurrency(self.concurrency - 1)
             await self._fail(lead, code, False, detail)
         elif code == "usageLimitExceeded":
+            self._dispatch_closed = True
+            self._latched_decision = Decision(INTERRUPT_ALL, "usage limit exceeded", None)
             await self._fail(lead, code, False, detail)
-            lead.pending_action = asyncio.create_task(self._refresh_quota_after_usage_limit(lead.task.model))
+            lead.pending_action = self._schedule_action(
+                self._refresh_quota_after_usage_limit(lead.task.model)
+            )
         elif code == "unauthorized":
+            await self._fail(lead, code, False, detail)
             await self._pause("auth", None)
         elif code == "modelNotFound":
+            await self._fail(lead, code, False, detail)
             await self._pause("model_unavailable", None)
         elif code in {"contextWindowExceeded", "badRequest"}:
             await self._fail(lead, code, True, detail)
@@ -460,6 +541,7 @@ class LunaPool:
                 await self._request("turn/interrupt", {"threadId": lead.thread_id, "turnId": lead.turn_id})
 
     async def _interrupt_all(self, reason: str) -> None:
+        self._dispatch_closed = True
         leads = list(self._leads.values())
         interrupted: list[_Lead] = []
         for lead in leads:
@@ -467,11 +549,11 @@ class LunaPool:
                 lead.outcome_delivered = True
                 lead.done = True
                 interrupted.append(lead)
-        for lead in interrupted:
-            await self.callbacks.on_failure(lead.task, "quota_interrupt", False, reason)
-        for lead in leads:
-            await self._interrupt(lead)
-        resume_at = self._snapshot.primary.resets_at if self._snapshot and self._snapshot.primary else None
+        await asyncio.gather(*(self._interrupt(lead) for lead in leads))
+        await asyncio.gather(
+            *(self.callbacks.on_failure(lead.task, "quota_interrupt", False, reason) for lead in interrupted)
+        )
+        resume_at = self._latched_decision.resume_at if self._latched_decision else None
         await self._pause(reason, resume_at)
 
     async def _fail(self, lead: _Lead, code: str, counted: bool, detail: str) -> None:
@@ -488,13 +570,27 @@ class LunaPool:
     async def _pause(self, reason: str, resume_at: int | None) -> None:
         if not self._paused:
             self._paused = True
-            await self.callbacks.on_pause(reason, resume_at)
+            self._dispatch_closed = True
+            if self._leads:
+                self._pending_pause = (reason, resume_at)
+            else:
+                await self.callbacks.on_pause(reason, resume_at)
 
     async def _refresh_quota_after_usage_limit(self, model: str) -> None:
-        rate = await self._request("account/rateLimits/read")
-        self._snapshot = parse_rate_limits(rate, model)
-        resume_at = self._snapshot.primary.resets_at if self._snapshot.primary else None
-        await self._pause("quota", resume_at)
+        try:
+            rate = await self._request("account/rateLimits/read")
+            self._rate_result = rate
+            self._snapshot = parse_rate_limits(rate, model)
+        except Exception:
+            pass
+        decision = (
+            self.guard.decide(self._snapshot) if self._snapshot else Decision(INTERRUPT_ALL, "quota", None)
+        )
+        self._latched_decision = decision
+        await self._pause("quota", decision.resume_at)
+
+    async def _fail_unstarted(self, task: LeadTask) -> None:
+        await self.callbacks.on_failure(task, "not_dispatched", False, "dispatch closed before start")
 
     def _schedule_action(self, action: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = asyncio.create_task(action)

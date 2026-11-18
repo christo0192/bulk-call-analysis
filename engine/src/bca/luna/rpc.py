@@ -94,7 +94,10 @@ class AppServerClient:
                     self.malformed_lines += 1
                     log.warning("malformed app-server line: %s", exc)
                     continue
-                await self._dispatch(message)
+                try:
+                    await self._dispatch(message)
+                except Exception:
+                    log.exception("app-server notification callback failed")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -116,17 +119,23 @@ class AppServerClient:
         if "id" in message:
             log.warning("declining server request %s", method)
             response: JsonObject
-            if (
-                method == "execCommandApproval"
-                or method == "applyPatchApproval"
-                or method.endswith("commandExecution/requestApproval")
+            if method.endswith("commandExecution/requestApproval") or method.endswith(
+                "fileChange/requestApproval"
             ):
-                response = {"decision": {"denied": {"rejection": "declined by policy"}}}
-            elif method.endswith("requestApproval"):
-                response = {"decision": "decline"}
+                response = {"result": {"decision": "cancel"}}
+            elif method.endswith("permissions/requestApproval"):
+                response = {"result": {"permissions": {}}}
+            elif method == "execCommandApproval" or method == "applyPatchApproval":
+                response = {"result": {"denied": {"reason": "declined by policy"}}}
             else:
                 response = {"error": {"code": -32601, "message": "server request not supported"}}
             self._write({"id": message["id"], **response})
+            for prefix, callback in [*self._subscriptions, *[("", cb) for cb in self._any]]:
+                if prefix and not method.startswith(prefix):
+                    continue
+                result = callback(message)
+                if inspect.isawaitable(result):
+                    await result
             return
         for prefix, callback in [*self._subscriptions, *[("", cb) for cb in self._any]]:
             if prefix and not method.startswith(prefix):

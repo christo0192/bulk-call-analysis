@@ -77,35 +77,51 @@ def merge_update(snapshot: QuotaSnapshot, notification_params: dict[str, Any]) -
     update = notification_params.get("rateLimits", notification_params)
     if not isinstance(update, dict):
         return snapshot
+    limit_id = update.get("limitId")
+    if isinstance(limit_id, str) and snapshot.limit_id is not None and limit_id != snapshot.limit_id:
+        return snapshot
     primary = update.get("primary")
-    if primary is None and snapshot.primary is not None:
+    if not isinstance(primary, dict) and snapshot.primary is not None:
         primary = {
             "usedPercent": snapshot.primary.used_percent,
             "windowDurationMins": snapshot.primary.window_minutes,
             "resetsAt": snapshot.primary.resets_at,
         }
     secondary = update.get("secondary")
-    if secondary is None and snapshot.secondary is not None:
+    if not isinstance(secondary, dict) and snapshot.secondary is not None:
         secondary = {
             "usedPercent": snapshot.secondary.used_percent,
             "windowDurationMins": snapshot.secondary.window_minutes,
             "resetsAt": snapshot.secondary.resets_at,
         }
     credits = update.get("credits")
-    if credits is None:
+    if not isinstance(credits, dict):
         credits = {
             "balance": str(snapshot.credits_balance) if snapshot.credits_balance is not None else None,
             "hasCredits": snapshot.has_credits,
         }
+    else:
+        credits = {
+            "balance": credits.get("balance")
+            if credits.get("balance") is not None
+            else (str(snapshot.credits_balance) if snapshot.credits_balance is not None else None),
+            "hasCredits": credits.get("hasCredits")
+            if credits.get("hasCredits") is not None
+            else snapshot.has_credits,
+        }
     top = {"ordinaryUsageAllowed": update.get("ordinaryUsageAllowed", snapshot.ordinary_usage_allowed)}
     merged = {
-        "limitId": snapshot.limit_id,
+        "limitId": limit_id if isinstance(limit_id, str) else snapshot.limit_id,
         "primary": primary,
         "secondary": secondary,
         "credits": credits,
-        "spendControlReached": update.get("spendControlReached", snapshot.spend_control_reached),
-        "rateLimitReachedType": update.get("rateLimitReachedType", snapshot.rate_limit_reached_type),
-        "planType": update.get("planType", snapshot.plan_type),
+        "spendControlReached": update.get("spendControlReached")
+        if update.get("spendControlReached") is not None
+        else snapshot.spend_control_reached,
+        "rateLimitReachedType": update.get("rateLimitReachedType")
+        if update.get("rateLimitReachedType") is not None
+        else snapshot.rate_limit_reached_type,
+        "planType": update.get("planType") if update.get("planType") is not None else snapshot.plan_type,
     }
     result = _snapshot(merged, top, int(datetime.now(UTC).timestamp()))
     return result

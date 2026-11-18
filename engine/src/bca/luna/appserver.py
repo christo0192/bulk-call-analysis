@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import signal
 import sys
@@ -20,6 +21,7 @@ LOCKDOWN_OVERRIDES: tuple[tuple[str, str], ...] = (
     ("cli_auth_credentials_store", "keyring"),
     ("web_search", "disabled"),
     ("model_reasoning_summary", "concise"),
+    ("thread_unload_delay_secs", "0"),
 )
 DISABLED_FEATURES: tuple[str, ...] = (
     "shell_tool",
@@ -41,6 +43,12 @@ DISABLED_FEATURES: tuple[str, ...] = (
     "ultrafast_mode",
     "multi_agent",
     "memories",
+    "image_generation",
+    "plugins",
+    "remote_plugin",
+    "skill_search",
+    "in_app_browser",
+    "tool_call_mcp_elicitation",
 )
 
 
@@ -56,7 +64,8 @@ def build_command(launch: CodexLaunch) -> list[str]:
         [str(part) for part in launch.exe] if isinstance(launch.exe, (tuple, list)) else [str(launch.exe)]
     )
     command = [*prefix, "app-server"]
-    for key, value in (*LOCKDOWN_OVERRIDES, ("sandbox.readableRoots", str(launch.work_dir))):
+    command.extend(["--strict-config"])
+    for key, value in LOCKDOWN_OVERRIDES:
         command.extend(["-c", f"{key}={value}"])
     for feature in DISABLED_FEATURES:
         command.extend(["--disable", feature])
@@ -87,13 +96,20 @@ class AppServer:
                 )
                 await killer.wait()
             else:
-                os.killpg(self.process.pid, signal.SIGTERM)
+                try:
+                    os.killpg(self.process.pid, signal.SIGTERM)  # type: ignore[attr-defined]
+                except ProcessLookupError:
+                    return
         else:
             self.process.terminate()
         try:
             await asyncio.wait_for(self.process.wait(), 5)
         except TimeoutError:
-            self.process.kill()
+            with contextlib.suppress(ProcessLookupError):
+                if sys.platform != "win32":
+                    os.killpg(self.process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
+                else:
+                    self.process.kill()
             await self.process.wait()
 
 
@@ -107,6 +123,7 @@ async def start(
         "stdin": asyncio.subprocess.PIPE,
         "stdout": asyncio.subprocess.PIPE,
         "stderr": stderr,
+        "limit": 16 * 1024 * 1024,
         "cwd": str(launch.work_dir),
         "env": childenv.build_child_env({"CODEX_HOME": str(launch.codex_home)}),
     }
@@ -126,10 +143,20 @@ async def start(
             "initialize",
             {"clientInfo": {"name": client_name, "title": "Bulk Call Analysis", "version": version}},
         )
-    except ConnectionError as exc:
-        if process.returncode is None:
-            await process.wait()
+    except BaseException as exc:
         await client.close()
+        if process.returncode is None:
+            if os.name == "nt" and process.pid is not None:
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill", "/PID", str(process.pid), "/T", "/F"
+                )
+                await killer.wait()
+            elif process.pid is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
+            await process.wait()
+        if not isinstance(exc, ConnectionError):
+            raise
         try:
             stderr_tail = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
         except OSError as read_error:

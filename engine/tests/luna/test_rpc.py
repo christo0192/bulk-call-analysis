@@ -63,7 +63,7 @@ async def _test_timeout_notifications_and_server_requests() -> None:
     reader.feed_data(b'{"id":7,"method":"item/commandExecution/requestApproval"}\n')
     await asyncio.sleep(0.01)
     assert len(seen) == 2 and client.malformed_lines == 1
-    assert writer.messages[-1] == {"id": 7, "decision": {"denied": {"rejection": "declined by policy"}}}
+    assert writer.messages[-1] == {"id": 7, "result": {"decision": "cancel"}}
     await client.close()
 
 

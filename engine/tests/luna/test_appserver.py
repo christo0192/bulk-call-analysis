@@ -64,7 +64,9 @@ async def _test_launch_strips_api_keys_and_cleanly_stops(
         )
     )
     assert await server.client.request("account/rateLimits/read")
-    assert await server.client.request("model/list") == {"models": ["codex"]}
+    model_list = await server.client.request("model/list")
+    assert model_list["nextCursor"] is None
+    assert model_list["data"][0]["id"] == "codex"
     await server.stop()
     assert server.returncode is not None
     child_env = json.loads(env_report.read_text(encoding="utf-8"))

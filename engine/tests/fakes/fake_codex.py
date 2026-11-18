@@ -63,7 +63,22 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                 "rateLimitsByLimitId": {},
             }
         elif method == "model/list":
-            result = {"models": scenario.get("models", ["codex"])}
+            result = {
+                "data": [
+                    {
+                        "id": model_name,
+                        "model": model_name,
+                        "defaultReasoningEffort": "low",
+                        "description": "synthetic model",
+                        "displayName": str(model_name),
+                        "hidden": False,
+                        "isDefault": True,
+                        "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "low"}],
+                    }
+                    for model_name in scenario.get("models", ["codex"])
+                ],
+                "nextCursor": None,
+            }
         elif method == "thread/start":
             thread_id = f"thread-{len(threads) + 1}"
             threads[thread_id] = thread_id
@@ -93,6 +108,7 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                             "startedAtMs": 1,
                             "threadId": thread_id,
                             "turnId": turn_id,
+                            "kind": "command",
                         },
                     }
                 )
@@ -117,7 +133,13 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                     }
                 )
                 await send(
-                    {"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id}}}
+                    {
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": thread_id,
+                            "turn": {"id": turn_id, "status": "completed"},
+                        },
+                    }
                 )
                 result = {"turn": {"id": turn_id}}
                 if request_id is not None:
@@ -137,6 +159,7 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                     }
                 )
             if lead in errors:
+                info = {str(errors[lead]): {}}
                 await send(
                     {
                         "method": "error",
@@ -144,7 +167,20 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                             "threadId": thread_id,
                             "turnId": turn_id,
                             "willRetry": False,
-                            "error": {"message": "fake error", "codexErrorInfo": errors[lead]},
+                            "error": {"message": "fake error", "codexErrorInfo": info},
+                        },
+                    }
+                )
+                await send(
+                    {
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": thread_id,
+                            "turn": {
+                                "id": turn_id,
+                                "status": "failed",
+                                "error": {"codexErrorInfo": info},
+                            },
                         },
                     }
                 )
@@ -175,6 +211,7 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                             "method": "account/rateLimits/updated",
                             "params": {
                                 "rateLimits": {
+                                    "limitId": "codex",
                                     "primary": {
                                         "usedPercent": quota,
                                         "windowDurationMins": 300,
@@ -190,7 +227,17 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                         "method": "turn/completed",
                         "params": {
                             "threadId": thread_id,
-                            "turn": {"id": turn_id, "status": "completed", "items": [], "usage": {}},
+                            "turn": {"id": turn_id, "status": "completed", "items": []},
+                        },
+                    }
+                )
+                await send(
+                    {
+                        "method": "thread/tokenUsage/updated",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "tokenUsage": {"inputTokens": 1, "outputTokens": 1},
                         },
                     }
                 )
