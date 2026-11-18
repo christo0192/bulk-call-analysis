@@ -31,7 +31,12 @@ def test_counts_reconcile_synthetic_store() -> None:
     assert result.held_back == 1 and result.no_transcript == 1 and result.capped == 1
     assert result.in_flight == 1 and result.remaining == 2
     assert len(result.checklist) == 12
-    assert reconcile(store, "job").ok
+    reconciliation = reconcile(store, "job")
+    assert reconciliation.ok
+    assert reconciliation.counts[LeadStatus.done.value] == result.done
+    assert reconciliation.counts[LeadStatus.held_back.value] == result.held_back
+    assert reconciliation.counts[LeadStatus.no_transcript.value] == result.no_transcript
+    assert sum(reconciliation.counts.values()) == 5
     store.close()
 
 
@@ -87,4 +92,17 @@ def test_counts_expose_each_terminal_status_and_retry_only_failed_attempts() -> 
         == 5
     )
     assert all(item.status == "done" for item in result.checklist)
+    store.close()
+
+
+def test_retrying_excludes_a_lead_with_only_a_successful_attempt() -> None:
+    store = open_store(Path(":memory:"))
+    store.create_project("project", "Project")
+    store.create_job("job", "project", 1)
+    store.add_lead("job", "succeeded", LeadStatus.queued)
+    attempt = store.start_attempt("job", "succeeded", "model")
+    assert store.record_result("job", "succeeded", attempt, {}, True, [])
+    store.connection.execute("UPDATE leads SET status='queued' WHERE lead_id='succeeded'")
+    store.connection.commit()
+    assert counts(store, "job").retrying == 0
     store.close()

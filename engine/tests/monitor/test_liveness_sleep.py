@@ -1,3 +1,5 @@
+import threading
+
 from bca.monitor.liveness import Liveness
 from bca.monitor.sleep import SleepDetector
 
@@ -67,6 +69,26 @@ def test_no_stall_at_low_concurrency_or_across_sleep() -> None:
     assert not live2.check(20)
 
 
+def test_liveness_check_is_safe_during_lead_changes() -> None:
+    live = Liveness(lambda: 4, slow_p95_s=5, pool_silence_s=10)
+    errors: list[BaseException] = []
+
+    def mutate() -> None:
+        try:
+            for index in range(200):
+                live.lead_started(str(index), float(index))
+                live.lead_ended(str(index), float(index) + 0.5)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=mutate)
+    thread.start()
+    for index in range(200):
+        live.check(float(index))
+    thread.join()
+    assert errors == []
+
+
 def test_sleep_gap_wake_order_and_grace() -> None:
     detector = SleepDetector(heartbeat_s=5, gap_factor=3)
     assert detector.heartbeat(0) == []
@@ -113,7 +135,12 @@ def test_post_wake_connectivity_error_grace_is_120_seconds() -> None:
 
 def test_resume_hint_reports_interval_once_and_probes_network() -> None:
     calls: list[int] = []
-    detector = SleepDetector(network_probe=lambda: (calls.append(1), True)[1])
+
+    def probe() -> bool:
+        calls.append(1)
+        return True
+
+    detector = SleepDetector(network_probe=probe)
     detector.heartbeat(10)
     detector.os_suspend_hint(12)
     events = detector.os_resume_hint(3612)

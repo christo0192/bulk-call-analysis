@@ -46,6 +46,39 @@ def test_steady_throughput_gives_expected_remaining_time() -> None:
     assert eta.low < eta.high
 
 
+def test_real_eta_is_pool_rate_and_does_not_depend_on_concurrency() -> None:
+    estimator = EtaEstimator()
+    for ts in range(0, 100, 10):
+        estimator.completed(float(ts))
+    one_worker = estimator.estimate(90, remaining=4, concurrency=1)
+    many_workers = estimator.estimate(90, remaining=4, concurrency=8)
+    assert many_workers == one_worker
+
+
+def test_unknown_real_window_is_not_reported_as_done_now() -> None:
+    estimator = EtaEstimator()
+    for _ in range(10):
+        estimator.completed(5)
+    eta = estimator.estimate(5, remaining=500)
+    assert not eta.seeded and eta.low == eta.high == float("inf")
+
+
+def test_slow_completions_leave_seeded_mode() -> None:
+    estimator = EtaEstimator()
+    for ts in range(0, 200 * 150, 150):
+        estimator.completed(float(ts))
+    eta = estimator.estimate(199 * 150, remaining=100)
+    assert not eta.seeded and eta.high < float("inf")
+
+
+def test_out_of_order_completions_are_sorted_before_rate_calculation() -> None:
+    estimator = EtaEstimator()
+    for ts in (0, 2, 1, 4, 3, 6, 5, 8, 7, 10):
+        estimator.completed(float(ts))
+    eta = estimator.estimate(10, remaining=10)
+    assert not eta.seeded and eta.low > 0
+
+
 def test_seed_uses_sample_durations_until_ten_completions() -> None:
     estimator = EtaEstimator()
     for ts in range(9):
@@ -108,6 +141,19 @@ def test_quota_uses_completed_leads_and_latest_post_reset_snapshot() -> None:
     projected = estimator.with_quota(eta, points, 100, 10, now=180)
     assert projected.will_pause_at_fraction is None
     assert projected == eta
+
+
+def test_quota_rate_is_per_completed_lead_and_skips_reset_before_limit() -> None:
+    estimator = EtaEstimator()
+    for ts in range(0, 100, 10):
+        estimator.completed(float(ts))
+    eta = EtaEstimator().estimate(0, 10, sample_durations=(10,))
+    points = [Point(80, 1000, 0), Point(85, 1000, 50), Point(90, 1000, 100)]
+    projected = estimator.with_quota(eta, points, 10, 95, now=100)
+    assert projected.low == projected.high == 950
+
+    before_reset = [Point(80, 120, 0), Point(85, 120, 50), Point(90, 120, 100)]
+    assert estimator.with_quota(eta, before_reset, 10, 95, now=100) == eta
 
 
 def test_quota_unknown_reset_marks_high_unknown() -> None:
