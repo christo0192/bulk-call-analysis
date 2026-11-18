@@ -1,6 +1,7 @@
 use serde_json::json;
 use tokio::sync::mpsc;
 
+#[allow(dead_code)]
 pub async fn start(notifications: mpsc::Sender<serde_json::Value>) {
     // Platform notification integration is intentionally isolated here. The engine heartbeat
     // gap remains authoritative until the native notification adapters are enabled.

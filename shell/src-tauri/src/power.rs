@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::Mutex;
 use thiserror::Error;
 
@@ -33,13 +35,18 @@ struct PlatformPower;
 impl PowerOs for PlatformPower {
     fn hold(&self) -> Result<(), PowerError> {
         use windows::Win32::System::Power::{
-            PowerCreateRequest, PowerSetRequest, POWER_REQUEST_CONTEXT, POWER_REQUEST_TYPE,
+            PowerCreateRequest, PowerSetRequest, POWER_REQUEST_TYPE,
+        };
+        use windows::Win32::System::Threading::{
+            POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0,
         };
         unsafe {
-            let context = POWER_REQUEST_CONTEXT {
+            let context = REASON_CONTEXT {
                 Version: 0,
-                Flags: 0,
-                Reason: windows::core::PCWSTR::null(),
+                Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING,
+                Reason: REASON_CONTEXT_0 {
+                    SimpleReasonString: windows::core::PWSTR::null(),
+                },
             };
             let h = PowerCreateRequest(&context).map_err(|e| PowerError::Failed(e.to_string()))?;
             PowerSetRequest(h, POWER_REQUEST_TYPE(0))

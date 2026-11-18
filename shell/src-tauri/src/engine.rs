@@ -115,9 +115,9 @@ impl Engine {
             .stdin(std::process::Stdio::piped())
             .spawn()?;
         let _guard = procguard::attach(child.id().ok_or(RpcError::Closed)?)?;
-        let stdout = child.stdout.take().ok_or_else(|| RpcError::Closed)?;
-        let stderr = child.stderr.take().ok_or_else(|| RpcError::Closed)?;
-        let stdin = child.stdin.take().ok_or_else(|| RpcError::Closed)?;
+        let stdout = child.stdout.take().ok_or(RpcError::Closed)?;
+        let stderr = child.stderr.take().ok_or(RpcError::Closed)?;
+        let stdin = child.stdin.take().ok_or(RpcError::Closed)?;
         let client = Client::new(stdin);
         *self.inner.rpc.lock().await = Some(client.clone());
         *self.inner.status.lock().await = "ready".into();
@@ -137,7 +137,7 @@ impl Engine {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                if let Some(path) = app.path().app_log_dir().ok() {
+                if let Ok(path) = app.path().app_log_dir() {
                     let _ = std::fs::create_dir_all(&path);
                     let _ = std::fs::OpenOptions::new()
                         .create(true)
@@ -239,8 +239,29 @@ pub fn minimal_environment() -> std::collections::HashMap<String, String> {
         .filter(|(k, _)| allow.iter().any(|a| a.eq_ignore_ascii_case(k)))
         .collect()
 }
+#[allow(dead_code)]
 pub fn format_tooltip(done: u64, total: u64, remaining: String) -> String {
-    format!("{done:,} / {total:,} · {remaining}")
+    format!(
+        "{} / {} · {remaining}",
+        format_number(done),
+        format_number(total)
+    )
+}
+
+#[allow(dead_code)]
+fn format_number(value: u64) -> String {
+    let digits = value.to_string();
+    let first = digits.len() % 3;
+    if first == 0 {
+        return digits;
+    }
+    let mut result = String::with_capacity(digits.len() + (digits.len() - first) / 3);
+    result.push_str(&digits[..first]);
+    for chunk in digits.as_bytes()[first..].chunks(3) {
+        result.push(',');
+        result.push_str(std::str::from_utf8(chunk).expect("numeric string is UTF-8"));
+    }
+    result
 }
 
 #[cfg(test)]

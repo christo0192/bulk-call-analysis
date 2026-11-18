@@ -21,12 +21,18 @@
       "csp": "default-src 'self'; connect-src 'self'; img-src 'self' asset: data:; style-src 'self'; script-src 'self'"
     },
     "trayIcon": {
-      "iconPath": "icons/tray.svg",
+      "iconPath": "icons/tray.png",
       "tooltip": "Bulk Call Analysis"
     }
   },
   "bundle": {
     "active": true,
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png",
+      "icons/icon-32.png",
+      "icons/icon.icns"
+    ],
     "targets": ["app", "dmg", "nsis"],
     "createUpdaterArtifacts": false,
     "windows": { "nsis": { "installMode": "currentUser" } },

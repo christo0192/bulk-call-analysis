@@ -22,7 +22,7 @@ pub enum RpcError {
 }
 
 pub fn encode(message: &Value) -> Result<Vec<u8>, RpcError> {
-    let mut bytes = serde_json::to_vec(message).map_err(|e| RpcError::Malformed(e))?;
+    let mut bytes = serde_json::to_vec(message).map_err(RpcError::Malformed)?;
     bytes.push(b'\n');
     Ok(bytes)
 }
@@ -31,7 +31,7 @@ pub fn decode(line: &[u8]) -> Result<Value, RpcError> {
     let value: Value = serde_json::from_slice(line)?;
     if !value.is_object() {
         return Err(RpcError::Malformed(
-            serde_json::from_str("null").unwrap_err(),
+            serde_json::from_str::<Value>("not-json").unwrap_err(),
         ));
     }
     Ok(value)
@@ -81,6 +81,7 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn notify(self: &Arc<Self>, method: &str, params: Value) -> Result<(), RpcError> {
         let message = json!({"jsonrpc":"2.0", "method": method, "params": params});
         self.writer

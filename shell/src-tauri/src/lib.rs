@@ -41,7 +41,7 @@ pub fn run() {
         .setup(|app| {
             let engine = Engine::new(app.handle().clone());
             app.manage(engine.clone());
-            tray::setup(&app.handle(), engine.clone())?;
+            tray::setup(app.handle(), engine.clone())?;
             let autostart = std::env::args().any(|arg| arg == "--autostart");
             if !autostart {
                 if let Some(w) = app.get_webview_window("main") {
@@ -50,7 +50,8 @@ pub fn run() {
             } else if let Some(w) = app.get_webview_window("main") {
                 let _ = w.destroy();
             }
-            engine.start();
+            let start_engine = engine.clone();
+            tokio::spawn(async move { start_engine.start().await });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![engine_call, engine_status])

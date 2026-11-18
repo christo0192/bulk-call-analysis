@@ -9,7 +9,7 @@ build = "build.rs"
 
 [lib]
 name = "bulk_call_analysis_lib"
-crate-type = ["lib", "cdylib", "staticlib"]
+crate-type = ["lib", "staticlib"]
 
 [dependencies]
 log = "0.4.22"
