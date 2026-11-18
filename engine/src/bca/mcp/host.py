@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 from bca.bq.guard import validate_select
 from bca.bq.leads import resolve_lead_source
@@ -106,6 +107,9 @@ class ToolHost:
         self.bq_config = bq_config
         self.mask_context = mask_context or MaskingContext()
         self.recipe = recipe
+        self._ipc_stop = threading.Event()
+        self._ipc_listener: object | None = None
+        self._ipc_thread: threading.Thread | None = None
 
     def call(self, name: str, arguments: Mapping[str, object] | None = None) -> object:
         args = {} if arguments is None else dict(arguments)
@@ -290,14 +294,54 @@ class ToolHost:
         self._project_file(name).write_text(text, encoding="utf-8", newline="\n")
         return "written"
 
+    def close(self) -> None:
+        """Stop a listener started with :func:`start_ipc_thread`."""
+        self._ipc_stop.set()
+        listener = self._ipc_listener
+        if listener is not None:
+            cast(Any, listener).close()
+        thread = self._ipc_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5)
+            if thread.is_alive():
+                raise RuntimeError("IPC listener did not stop")
 
-def serve_ipc(host: ToolHost, address: str, authkey: bytes) -> None:
+
+def _remove_ipc_socket(address: str, family: str) -> None:
+    if family != "AF_UNIX":
+        return
+    path = Path(address)
+    try:
+        path.unlink(missing_ok=True)
+        if path.parent.name.startswith("bca-ipc-"):
+            path.parent.rmdir()
+    except OSError:
+        _LOG.warning("could not clean up IPC socket", exc_info=True)
+
+
+def serve_ipc(
+    host: ToolHost,
+    address: str,
+    authkey: bytes,
+    family: str | None = None,
+    stop_event: threading.Event | None = None,
+) -> None:
     from multiprocessing.connection import Listener
 
-    listener = Listener(address, authkey=authkey)
+    selected_family = family or ("AF_PIPE" if sys.platform == "win32" else "AF_UNIX")
+    stopping = stop_event or host._ipc_stop
+    if host._ipc_thread is None:
+        host._ipc_thread = threading.current_thread()
+    listener = Listener(address, family=selected_family, authkey=authkey)
+    host._ipc_listener = listener
     try:
-        while True:
-            connection = listener.accept()
+        while not stopping.is_set():
+            try:
+                connection = listener.accept()
+            except (OSError, EOFError):
+                if stopping.is_set():
+                    break
+                raise
             try:
                 request = connection.recv()
                 if not isinstance(request, dict):
@@ -307,14 +351,21 @@ def serve_ipc(host: ToolHost, address: str, authkey: bytes) -> None:
                 )
                 connection.send({"ok": True, "result": result})
             except BaseException as exc:
-                connection.send({"ok": False, "error": str(_safe_error(exc))})
+                try:
+                    connection.send({"ok": False, "error": str(_safe_error(exc))})
+                except (OSError, EOFError):
+                    if not stopping.is_set():
+                        raise
             finally:
                 connection.close()
     finally:
         listener.close()
+        host._ipc_listener = None
+        _remove_ipc_socket(address, selected_family)
 
 
 def start_ipc_thread(host: ToolHost, address: str, authkey: bytes) -> threading.Thread:
     thread = threading.Thread(target=serve_ipc, args=(host, address, authkey), daemon=True)
+    host._ipc_thread = thread
     thread.start()
     return thread

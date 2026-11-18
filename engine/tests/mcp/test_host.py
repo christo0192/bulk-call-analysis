@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import threading
 from pathlib import Path
 
 import pytest
@@ -9,8 +8,8 @@ import pytest
 from bca.bq.runner import DryRun
 from bca.config import BigQueryConfig
 from bca.mask.masker import MaskingContext
-from bca.mcp.host import MAX_RESULT_CHARS, ToolHost, ToolHostError, serve_ipc
-from bca.mcp.ipc import call_engine
+from bca.mcp.host import MAX_RESULT_CHARS, ToolHost, ToolHostError, start_ipc_thread
+from bca.mcp.ipc import call_engine, new_ipc_address
 from bca.store import LeadStatus, open_store
 from tests.fakes.fake_bq import FakeBqRunner
 
@@ -64,10 +63,24 @@ def test_lead_transcript_rejects_non_sample_lead(tmp_path: Path) -> None:
 
 def test_ipc_forwards_call_and_does_not_log_authkey(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     host = make_host(tmp_path)
-    address = str(tmp_path / "engine.sock")
+    address, family = new_ipc_address()
     authkey = b"a" * 32
-    thread = threading.Thread(target=serve_ipc, args=(host, address, authkey), daemon=True)
-    thread.start()
-    result = call_engine(address, authkey, "data_notes", {})
-    assert result == "no notes yet"
-    assert authkey.hex() not in caplog.text
+    thread = start_ipc_thread(host, address, authkey)
+    try:
+        result = call_engine(address, authkey, "data_notes", {}, family)
+        assert result == "no notes yet"
+        assert authkey.hex() not in caplog.text
+    finally:
+        host.close()
+    assert not thread.is_alive()
+
+
+def test_new_ipc_address_is_private_and_uses_posix_socket_on_posix() -> None:
+    address, family = new_ipc_address()
+    if family == "AF_UNIX":
+        socket_dir = Path(address).parent
+        assert socket_dir.stat().st_mode & 0o777 == 0o700
+        socket_dir.rmdir()
+    else:
+        assert address.startswith(r"\\.\pipe\bca-")
+        assert len(address.rsplit("-", 1)[1]) == 32
