@@ -36,6 +36,8 @@ def test_preflight_uses_calls_for_found_and_window_duration_and_rules() -> None:
     assert "FROM `calls` c LEFT JOIN `transcripts` t" in sql
     assert "DATE(c.`started`)" in sql
     assert "SAFE_DIVIDE(c.`duration`, 1000) >= 300" in sql
+    assert "SAFE_DIVIDE(c.`duration`, 1000) >= 180" in sql
+    assert "chars IS NOT NULL AND chars > 0" in sql
     assert "transcript_status IN ('completed')" in sql
     assert "COUNTIF(transcript_status IS NOT NULL" in sql
 

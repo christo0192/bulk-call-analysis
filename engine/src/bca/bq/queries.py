@@ -67,12 +67,21 @@ def preflight_sql(
         if usable_rule.min_call_seconds is not None
         else ""
     )
+    # A usable call must also survive the configured short-call filter.  The
+    # duration expression is normalized above, so this remains correct for
+    # both millisecond and second source columns; chars > 0 already requires
+    # non-empty transcript text.
+    drop_short_rule = f" AND {duration} >= {recipe.drop_calls_shorter_than_s}"
     over_rule = ", NULL AS over_calls"
     over_select = "usable_calls AS usable_calls"
     if usable_rule.min_calls_over is not None:
         count, seconds = usable_rule.min_calls_over
         over_rule = f", COUNTIF(duration >= {seconds}) AS over_calls"
         over_select = f"IF(over_calls >= {count}, usable_calls, 0) AS usable_calls"
+    usable_count = (
+        f"COUNTIF(chars >= {usable_rule.min_chars}{status_rule}{duration_rule}{drop_short_rule}) "
+        f"AS usable_calls{status_count}{over_rule}"
+    )
     sql = f"""WITH selected AS (SELECT lead_id FROM UNNEST(@lead_ids) AS lead_id),
 calls AS (SELECT CAST(c.`{recipe.lead_id_column}` AS STRING) AS lead_id,
 LENGTH(t.`{recipe.transcript_text_column}`) AS chars{status}, {duration} AS duration,
@@ -84,7 +93,7 @@ WHERE CAST(c.`{recipe.lead_id_column}` AS STRING) IN UNNEST(@lead_ids)
 agg_base AS (SELECT lead_id, COUNT(DISTINCT call_id) AS calls,
 SUM(COALESCE(chars, 0)) AS transcript_chars,
 COUNTIF(chars IS NOT NULL AND chars > 0) AS transcript_calls,
-COUNTIF(chars >= {usable_rule.min_chars}{status_rule}{duration_rule}) AS usable_calls{status_count}{over_rule}
+{usable_count}
 FROM calls GROUP BY lead_id),
 agg AS (SELECT lead_id, calls, transcript_calls, {over_select}, transcription_failed FROM agg_base)
 SELECT selected.lead_id, COALESCE(agg.calls, 0) AS calls,

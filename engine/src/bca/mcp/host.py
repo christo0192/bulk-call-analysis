@@ -4,17 +4,13 @@ import gzip
 import hmac
 import json
 import logging
-import os
 import re
-import socket
-import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import replace
-from multiprocessing import AuthenticationError
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -30,6 +26,18 @@ from bca.outputs.aggregates import aggregates
 from bca.outputs.rules import validate_rules
 from bca.store import JobSpec, LeadStatus, Store, load_latest_spec, save_spec
 from bca.store.lifecycle import JobState, edit_spec, transition
+
+from .wire import (
+    HANDSHAKE_TIMEOUT,
+    MAX_REQUEST_BYTES,
+    OK,
+    REQUEST_TIMEOUT,
+    decode_json,
+    encode_json,
+    expected_mac,
+    ipc_family,
+    make_hello,
+)
 
 MAX_RESULT_CHARS = 40_000
 _LOG = logging.getLogger("bca.mcp")
@@ -556,27 +564,12 @@ class ToolHost:
 
 
 def _wake_ipc_listener(address: str, family: str) -> None:
-    """Wake a raw accept without starting the multiprocessing auth handshake."""
+    """Wake the raw accept with a connection that does not authenticate."""
     try:
-        if family == "AF_PIPE" and sys.platform == "win32":
-            import _winapi
+        from multiprocessing.connection import Client
 
-            _winapi.WaitNamedPipe(address, 500)
-            handle = _winapi.CreateFile(
-                address,
-                _winapi.GENERIC_READ | _winapi.GENERIC_WRITE,
-                0,
-                0,
-                _winapi.OPEN_EXISTING,
-                0,
-                0,
-            )
-            _winapi.CloseHandle(handle)
-        elif family == "AF_UNIX":
-            unix_family = cast(int, socket.__dict__["AF_UNIX"])
-            with socket.socket(unix_family, socket.SOCK_STREAM) as wake:
-                wake.settimeout(1)
-                wake.connect(address)
+        connection = Client(address, family=family, authkey=None)
+        connection.close()
     except OSError:
         pass
 
@@ -602,7 +595,7 @@ def serve_ipc(
 ) -> None:
     from multiprocessing.connection import Listener
 
-    selected_family = family or ("AF_PIPE" if sys.platform == "win32" else "AF_UNIX")
+    selected_family = family or ipc_family()
     stopping = stop_event or host._ipc_stop
     host._ipc_address = address
     host._ipc_family = selected_family
@@ -610,11 +603,6 @@ def serve_ipc(
     if host._ipc_thread is None:
         host._ipc_thread = threading.current_thread()
     listener: Any
-    # Authentication is performed in a worker.  Listener.accept performs it
-    # inline when given an authkey, which lets a peer that never answers the
-    # challenge block every subsequent client.  The standard listener still
-    # supplies the platform-specific endpoint, including the default Windows
-    # named-pipe DACL; only its raw accept is used here.
     listener = Listener(address, family=selected_family, authkey=None)
     host._ipc_listener = listener
     host._ipc_ready.set()
@@ -626,19 +614,17 @@ def serve_ipc(
 
     def handle(connection: Any) -> None:
         try:
-            challenge = b"{sha256}" + os.urandom(32)
-            connection.send_bytes(b"#CHALLENGE#" + challenge)
-            if not connection.poll(1.0):
-                raise TimeoutError("IPC authentication timed out")
-            response = connection.recv_bytes(256)
-            expected = b"{sha256}" + hmac.new(authkey, challenge, "sha256").digest()
-            if not hmac.compare_digest(response, expected):
-                connection.send_bytes(b"#FAILURE#")
-                raise AuthenticationError("digest sent was wrong")
-            connection.send_bytes(b"#WELCOME#")
-            if stopping.is_set() or not connection.poll(1.0):
+            hello, _ = make_hello(authkey)
+            connection.send_bytes(hello)
+            if not connection.poll(HANDSHAKE_TIMEOUT):
                 return
-            request = connection.recv()
+            mac = connection.recv_bytes(64)
+            if not hmac.compare_digest(mac, expected_mac(authkey, hello)):
+                return
+            connection.send_bytes(OK)
+            if stopping.is_set() or not connection.poll(REQUEST_TIMEOUT):
+                return
+            request = decode_json(connection.recv_bytes(MAX_REQUEST_BYTES))
             if not isinstance(request, dict):
                 raise ToolHostError("invalid IPC request")
             requested_project = request.get("project_id")
@@ -648,17 +634,19 @@ def serve_ipc(
                 str(request.get("tool", "")), cast(Mapping[str, object], request.get("arguments", {}))
             )
             try:
-                connection.send({"ok": True, "result": result})
-            except (OSError, EOFError, AuthenticationError) as exc:
+                connection.send_bytes(encode_json({"ok": True, "result": result}))
+            except (OSError, EOFError) as exc:
                 _LOG.warning("MCP IPC send failed: %s", type(exc).__name__)
-        except (OSError, EOFError, AuthenticationError) as exc:
+        except (OSError, EOFError, ValueError, UnicodeError) as exc:
             _LOG.warning("MCP IPC connection failed: %s", type(exc).__name__)
         except TimeoutError:
             _LOG.warning("MCP IPC connection timed out")
         except BaseException as exc:
             try:
-                connection.send({"ok": False, "error": str(_safe_error(exc, host.mask_context))})
-            except (OSError, EOFError, AuthenticationError) as send_exc:
+                connection.send_bytes(
+                    encode_json({"ok": False, "error": str(_safe_error(exc, host.mask_context))})
+                )
+            except (OSError, EOFError) as send_exc:
                 _LOG.warning("MCP IPC error reply failed: %s", type(send_exc).__name__)
         finally:
             with suppress(OSError, EOFError):
@@ -670,18 +658,8 @@ def serve_ipc(
             if not worker_slots.acquire(timeout=0.1):
                 continue
             try:
-                if selected_family in {"AF_UNIX", "AF_PIPE"}:
-                    raw_listener = cast(Any, listener)._listener
-                    if selected_family == "AF_UNIX":
-                        sock, _ = raw_listener._socket.accept()
-                        from multiprocessing.connection import Connection
-
-                        connection = Connection(sock.detach())
-                    else:
-                        connection = raw_listener.accept()
-                else:
-                    raise ValueError(f"unsupported IPC family: {selected_family}")
-            except (OSError, EOFError, AuthenticationError) as exc:
+                connection = listener.accept()
+            except (OSError, EOFError) as exc:
                 worker_slots.release()
                 if stopping.is_set():
                     break

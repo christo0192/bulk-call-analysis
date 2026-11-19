@@ -17,6 +17,7 @@ from bca.mask.masker import MaskingContext
 from bca.mask.names import Span
 from bca.mcp.host import MAX_RESULT_CHARS, ToolHost, ToolHostError, start_ipc_thread
 from bca.mcp.ipc import call_engine, new_ipc_address
+from bca.mcp.wire import OK, expected_mac
 from bca.store import LeadStatus, open_store
 from tests.fakes.fake_bq import FakeBqRunner
 
@@ -160,6 +161,18 @@ def test_ipc_close_without_client_stops_thread(tmp_path: Path) -> None:
     assert not thread.is_alive()
 
 
+def test_ipc_close_twice_is_safe(tmp_path: Path) -> None:
+    host = make_host(tmp_path)
+    address, _family = new_ipc_address()
+    thread = start_ipc_thread(host, address, b"d" * 32)
+    try:
+        host.close()
+        host.close()
+    finally:
+        host.close()
+    assert not thread.is_alive()
+
+
 def test_ipc_client_disconnect_does_not_kill_listener(tmp_path: Path) -> None:
     host = make_host(tmp_path)
     address, family = new_ipc_address()
@@ -168,8 +181,13 @@ def test_ipc_client_disconnect_does_not_kill_listener(tmp_path: Path) -> None:
     try:
         from multiprocessing.connection import Client
 
-        connection = Client(address, family=family, authkey=authkey)
-        connection.send({"tool": "data_notes", "arguments": {}})
+        connection = Client(address, family=family, authkey=None)
+        assert connection.poll(5)
+        hello = connection.recv_bytes(64)
+        connection.send_bytes(expected_mac(authkey, hello))
+        assert connection.poll(5)
+        assert connection.recv_bytes(8) == OK
+        connection.send_bytes(b'{"tool":"data_notes","arguments":{}}')
         connection.close()
         time.sleep(0.1)
         assert call_engine(address, authkey, "data_notes", {}, family) == "no notes yet"
@@ -184,11 +202,8 @@ def test_wrong_authkey_is_rejected_and_listener_survives(tmp_path: Path) -> None
     authkey = b"w" * 32
     thread = start_ipc_thread(host, address, authkey)
     try:
-        from multiprocessing import AuthenticationError
-        from multiprocessing.connection import Client
-
-        with pytest.raises(AuthenticationError):
-            Client(address, family=family, authkey=b"wrong")
+        with pytest.raises(ToolHostError, match="rejected"):
+            call_engine(address, b"wrong", "data_notes", {}, family)
         assert call_engine(address, authkey, "data_notes", {}, family) == "no notes yet"
     finally:
         host.close()

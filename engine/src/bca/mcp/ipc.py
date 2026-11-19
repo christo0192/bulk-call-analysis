@@ -1,10 +1,8 @@
 """Local IPC helpers.
 
 IPC security: D-PIPE deliberately uses the standard Windows named-pipe
-listener.  Its default DACL grants Everyone read access, but not write
-access, so another user cannot open the pipe for a useful connection or
-complete the HMAC handshake.  Handshake deadlines also prevent a read-only
-opener from wedging the listener.
+listener.  The explicit BCA1 HMAC handshake and deadlines prevent a peer from
+using multiprocessing's pickled authentication protocol to wedge the listener.
 """
 
 from __future__ import annotations
@@ -17,10 +15,16 @@ from multiprocessing.connection import Client
 from pathlib import Path
 
 from .host import ToolHostError
-
-
-def ipc_family() -> str:
-    return "AF_PIPE" if sys.platform == "win32" else "AF_UNIX"
+from .wire import (
+    CALL_TIMEOUT,
+    HELLO_PREFIX,
+    MAX_REPLY_BYTES,
+    OK,
+    decode_json,
+    encode_json,
+    expected_mac,
+    ipc_family,
+)
 
 
 def new_ipc_address() -> tuple[str, str]:
@@ -40,13 +44,26 @@ def call_engine(
     family: str | None = None,
     project_id: str | None = None,
 ) -> object:
-    connection = Client(address, family=family or ipc_family(), authkey=authkey)
+    try:
+        connection = Client(address, family=family or ipc_family(), authkey=None)
+    except OSError as exc:
+        raise ToolHostError("engine is unavailable") from exc
     try:
         request: dict[str, object] = {"tool": tool, "arguments": dict(arguments)}
         if project_id is not None:
             request["project_id"] = project_id
-        connection.send(request)
-        response = connection.recv()
+        if not connection.poll(5.0):
+            raise ToolHostError("engine did not answer")
+        hello = connection.recv_bytes(64)
+        if len(hello) != 36 or hello[:4] != HELLO_PREFIX:
+            raise ToolHostError("engine rejected the connection")
+        connection.send_bytes(expected_mac(authkey, hello))
+        if not connection.poll(5.0) or connection.recv_bytes(8) != OK:
+            raise ToolHostError("engine rejected the connection")
+        connection.send_bytes(encode_json(request))
+        if not connection.poll(CALL_TIMEOUT):
+            raise ToolHostError("engine timed out")
+        response = decode_json(connection.recv_bytes(MAX_REPLY_BYTES))
         if not isinstance(response, dict) or not response.get("ok"):
             reason = (
                 response.get("error", "engine tool failed")
@@ -55,5 +72,7 @@ def call_engine(
             )
             raise ToolHostError(str(reason))
         return response.get("result")
+    except (OSError, EOFError, ValueError, UnicodeError) as exc:
+        raise ToolHostError("engine rejected the connection") from exc
     finally:
         connection.close()
