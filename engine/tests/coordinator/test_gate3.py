@@ -34,6 +34,32 @@ def test_phase_stops_when_store_state_changes(coordinator: Any) -> None:
     assert coordinator.runner._state() is JobState.plan_proposed
 
 
+def test_no_claim_leaks_when_pool_takes_fewer_tasks_than_claimed(
+    coordinator: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FewerTasksPool(ScriptedPool):
+        async def run_until_idle(self) -> None:
+            self.callbacks._dispatch_limit = 1
+            tasks = await self.callbacks.next_tasks(4)
+            self.concurrency = 1
+            if tasks:
+                task = tasks[0]
+                await self.callbacks.on_started(task)
+                await self.callbacks.on_result(task, {"ok": True}, task.model, None)
+            await self.callbacks.on_pause("user", None)
+
+    monkeypatch.setattr(runner_module, "LunaPool", partial(FewerTasksPool, control=Script()))
+    coordinator.runner.on_plan_approved(1)
+    asyncio.run(asyncio.wait_for(coordinator.runner.run_sample(), timeout=15))
+
+    leaked = coordinator.store.rows(
+        "SELECT lead_id FROM leads WHERE job_id='job' AND status='in_flight' "
+        "AND NOT EXISTS (SELECT 1 FROM attempts WHERE attempts.job_id=leads.job_id "
+        "AND attempts.lead_id=leads.lead_id AND attempts.ended_at IS NULL)"
+    )
+    assert leaked == []
+
+
 def test_host_refuses_plan_edit_while_phase_running(tmp_path: Any) -> None:
     host = proposal_host(tmp_path, [])
     # The job already exists with its sample running; no BigQuery is needed to reach the refusal.

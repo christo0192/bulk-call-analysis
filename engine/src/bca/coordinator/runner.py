@@ -97,6 +97,7 @@ class _Callbacks(PoolCallbacks):
         self.runner = runner
         self.sample = sample
         self._tasks: list[LeadTask] = []
+        self._claimed: set[str] = set()
         self._uncounted: dict[str, int] = {}
         self._dispatch_limit = dispatch_limit
         self.attempt_ended = False
@@ -108,6 +109,10 @@ class _Callbacks(PoolCallbacks):
         self._tasks.extend(tasks)
         self._tasks.sort(key=lambda task: task.lead_id)
 
+    @property
+    def claimed_lead_ids(self) -> frozenset[str]:
+        return frozenset(self._claimed)
+
     async def next_tasks(self, n: int) -> list[LeadTask]:
         while True:
             if self.runner._state() is not self.runner._phase_state(self.sample):
@@ -116,40 +121,36 @@ class _Callbacks(PoolCallbacks):
                 return []
             if not self._tasks:
                 lead_ids = self.runner.deps.store.next_queued(self.runner.job_id, n, self.sample)
-                tasks = await self.runner._task_list(self.sample, lead_ids)
+                self._tasks = await self.runner._task_list(self.sample, lead_ids)
                 if self.runner._state() is not self.runner._phase_state(self.sample):
                     return []
-                claimed = self.runner.deps.store.claim_queued(
-                    self.runner.job_id,
-                    [task.lead_id for task in tasks],
-                    self.sample,
-                    self.runner._bundle_metadata,
-                )
-                self._tasks = [task for task in tasks if task.lead_id in claimed]
             if self._tasks:
                 queued_ids = [task.lead_id for task in self._tasks]
-                self.runner.deps.store.claim_queued(
-                    self.runner.job_id,
-                    queued_ids,
-                    self.sample,
-                    self.runner._bundle_metadata,
-                )
-                active = {
+                queued = {
                     str(row[0])
                     for row in self.runner.deps.store.rows(
-                        "SELECT lead_id FROM leads WHERE job_id=? AND status='in_flight' "
+                        "SELECT lead_id FROM leads WHERE job_id=? AND status='queued' "
                         "AND lead_id IN ({})".format(",".join("?" for _ in queued_ids)),
                         (self.runner.job_id, *queued_ids),
                     )
                 }
-                self._tasks = [task for task in self._tasks if task.lead_id in active]
+                self._tasks = [task for task in self._tasks if task.lead_id in queued]
             if self._tasks:
                 self._tasks.sort(key=lambda task: task.lead_id)
                 limit = n if self._dispatch_limit is None else min(n, self._dispatch_limit)
-                tasks, self._tasks = self._tasks[:limit], self._tasks[limit:]
+                candidates, self._tasks = self._tasks[:limit], self._tasks[limit:]
+                claimed = self.runner.deps.store.claim_queued(
+                    self.runner.job_id,
+                    [task.lead_id for task in candidates],
+                    self.sample,
+                    self.runner._bundle_metadata,
+                )
+                tasks = [task for task in candidates if task.lead_id in claimed]
+                self._claimed.update(claimed)
                 if self._dispatch_limit is not None:
                     self._dispatch_limit -= len(tasks)
-                return tasks
+                if tasks:
+                    return tasks
             if self.runner._phase_finished(self.sample):
                 return []
             phase_event = self.runner._get_phase_event()
@@ -158,6 +159,7 @@ class _Callbacks(PoolCallbacks):
                 await asyncio.wait_for(phase_event.wait(), 1.0)
 
     async def on_started(self, task: LeadTask) -> bool:
+        self._claimed.discard(task.lead_id)
         if self.runner._state() is not self.runner._phase_state(self.sample):
             self.runner.deps.store.release_claim(self.runner.job_id, task.lead_id)
             self.runner._closed_attempts.add(task.attempt_id)
@@ -242,13 +244,7 @@ class _Callbacks(PoolCallbacks):
             )
             self.runner._quote_failures[task.lead_id] = (answer, [item for item in failures if not item.ok])
             repair_tasks = await self.runner._task_list(self.sample, [task.lead_id])
-            claimed = self.runner.deps.store.claim_queued(
-                self.runner.job_id,
-                [item.lead_id for item in repair_tasks],
-                self.sample,
-                self.runner._bundle_metadata,
-            )
-            self._queue_tasks([item for item in repair_tasks if item.lead_id in claimed])
+            self._queue_tasks(repair_tasks)
         elif is_repair:
             self.runner.deps.store.set_lead_status(self.runner.job_id, task.lead_id, LeadStatus.done)
             self.runner._drop_lead_state(task.lead_id)
@@ -258,6 +254,7 @@ class _Callbacks(PoolCallbacks):
         self.runner._eta.completed(self.runner._ts())
 
     async def on_failure(self, task: LeadTask, error_code: str, counted: bool, detail: str) -> None:
+        self._claimed.discard(task.lead_id)
         self.attempt_ended = True
         self.runner._get_phase_event().set()
         attempt = self.runner._attempts.get(task.attempt_id)
@@ -690,6 +687,27 @@ class JobRunner:
     def _phase_finished(self, sample: bool) -> bool:
         if not sample and self._masking_task is not None and not self._masking_task.done():
             return False
+        rows = self.deps.store.rows(
+            "SELECT lead_id, status, reason FROM leads WHERE job_id=? AND in_sample=?",
+            (self.job_id, int(sample)),
+        )
+        held: set[str] = set()
+        pool = self._phase_pool
+        if pool is not None:
+            callbacks = getattr(pool, "callbacks", None)
+            held.update(getattr(callbacks, "claimed_lead_ids", ()))
+            held.update(getattr(pool, "claimed_lead_ids", ()))
+        open_attempts = {
+            str(row[0])
+            for row in self.deps.store.rows(
+                "SELECT lead_id FROM attempts WHERE job_id=? AND ended_at IS NULL", (self.job_id,)
+            )
+        }
+        for lead_id, status, _reason in rows:
+            lead_key = str(lead_id)
+            if str(status) == LeadStatus.in_flight and lead_key not in open_attempts and lead_key not in held:
+                LOGGER.warning("releasing orphaned claim for lead %s", lead_key)
+                self.deps.store.release_claim(self.job_id, lead_key)
         rows = self.deps.store.rows(
             "SELECT status, reason FROM leads WHERE job_id=? AND in_sample=?",
             (self.job_id, int(sample)),

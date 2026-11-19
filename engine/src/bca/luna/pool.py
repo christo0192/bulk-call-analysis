@@ -131,6 +131,11 @@ class LunaPool:
     def set_concurrency(self, n: int) -> None:
         self.concurrency = max(1, n)
 
+    @property
+    def claimed_lead_ids(self) -> frozenset[str]:
+        """Lead claims currently owned by dispatched pool workers."""
+        return frozenset(lead.task.lead_id for lead in self._leads.values())
+
     async def pause(self, reason: str) -> None:
         """Stop dispatching and, for interrupting reasons, stop active turns."""
         if self._paused:
