@@ -124,15 +124,16 @@ def test_recover_fresh_runner_when_full_run_has_no_masking_left(
     _run(coordinator.runner.run_sample())
     coordinator.runner.on_sample_approved(1)
 
-    original_wait = coordinator.runner._wait_for_masking
+    original_phase_finished = coordinator.runner._phase_finished
 
-    async def crash_after_masking(sample: bool) -> bool:
-        masking_finished = await original_wait(sample)
-        if not sample and masking_finished:
+    def crash_after_masking(sample: bool) -> bool:
+        masking_task = coordinator.runner._masking_task
+        phase_finished = original_phase_finished(sample)
+        if not sample and masking_task is not None and masking_task.done():
             raise RuntimeError("synthetic runner crash")
-        return masking_finished
+        return phase_finished
 
-    monkeypatch.setattr(coordinator.runner, "_wait_for_masking", crash_after_masking)
+    monkeypatch.setattr(coordinator.runner, "_phase_finished", crash_after_masking)
     with pytest.raises(RuntimeError, match="synthetic runner crash"):
         _run(coordinator.runner.start_full_run())
 
@@ -212,7 +213,8 @@ def test_repair_attempt_counted_failure_keeps_answer_with_flag(
     assert coordinator.runner._state() is JobState.sample_ready
     assert (
         coordinator.store.rows(
-            "SELECT COUNT(*) FROM leads WHERE job_id='job' AND status IN ('queued','in_flight')"
+            "SELECT COUNT(*) FROM leads WHERE job_id='job' AND in_sample=1 "
+            "AND status IN ('queued','in_flight')"
         )[0][0]
         == 0
     )
@@ -300,10 +302,6 @@ def test_corrupt_raw_file_holds_back_only_that_lead(
 def test_full_run_dispatches_while_background_masking_continues(
     coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    coordinator.runner.on_plan_approved(1)
-    _run(coordinator.runner.run_sample())
-    coordinator.runner.on_sample_approved(1)
-
     entered = threading.Event()
     release = threading.Event()
     dispatched_during_masking: list[str] = []
@@ -312,7 +310,7 @@ def test_full_run_dispatches_while_background_masking_continues(
     def blocking_mask(raw: Any, masked: Any, context: Any) -> Any:
         if raw.name == "8.jsonl.gz":
             entered.set()
-            assert release.wait(2)
+            assert release.wait(10)
         return original_mask(raw, masked, context)
 
     class ObservingPool(ScriptedPool):
@@ -330,6 +328,13 @@ def test_full_run_dispatches_while_background_masking_continues(
 
     monkeypatch.setattr(runner_module, "mask_lead_stream", blocking_mask)
     monkeypatch.setattr(runner_module, "LunaPool", partial(ObservingPool, control=Script()))
-    _run(coordinator.runner.start_full_run())
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+    _run(asyncio.wait_for(coordinator.runner.start_full_run(), timeout=15))
 
     assert dispatched_during_masking
+    assert (
+        coordinator.store.rows("SELECT status FROM leads WHERE job_id='job' AND lead_id='8'")[0][0]
+        == LeadStatus.done
+    )

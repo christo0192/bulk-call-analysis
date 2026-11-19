@@ -51,6 +51,7 @@ class ScriptedPool:
         self.callbacks = callbacks
         self.concurrency = concurrency
         self.control: Script = control
+        self.paused = False
 
     def set_concurrency(self, n: int) -> None:
         self.concurrency = max(1, n)
@@ -58,8 +59,14 @@ class ScriptedPool:
     async def stop(self) -> None:
         return
 
+    async def pause(self, reason: str) -> None:
+        del reason
+        self.paused = True
+
     async def run_until_idle(self) -> None:
         while True:
+            if self.paused:
+                return
             tasks = await self.callbacks.next_tasks(self.concurrency)
             if not tasks:
                 return
