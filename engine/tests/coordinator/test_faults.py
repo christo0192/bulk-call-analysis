@@ -149,9 +149,12 @@ def test_pause_is_idempotent_and_late_result_is_ignored(coordinator: Coordinator
         )[0][0]
         == "queued"
     )
-    assert coordinator.store.rows(
-        "SELECT counted, outcome FROM attempts WHERE job_id=? AND attempt_id=?", ("job", store_attempt_id)
-    ) == [(0, "interrupted")]
+    assert [
+        tuple(row)
+        for row in coordinator.store.rows(
+            "SELECT counted, outcome FROM attempts WHERE job_id=? AND attempt_id=?", ("job", store_attempt_id)
+        )
+    ] == [(0, "interrupted")]
     assert (
         coordinator.store.rows(
             "SELECT COUNT(*) FROM results WHERE job_id=? AND lead_id=?", ("job", task.lead_id)

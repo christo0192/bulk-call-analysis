@@ -64,6 +64,70 @@ def test_empty_harvest_is_valid(coordinator: CoordinatorFixture, monkeypatch: py
     assert coordinator.runner._state() is JobState.sample_ready
 
 
+def test_recover_after_crash_during_pull(
+    coordinator: CoordinatorFixture, make_runner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_pull = runner_module.pull_transcripts  # type: ignore[attr-defined]
+    crashed = False
+
+    def crash_once(*args: Any, **kwargs: Any) -> Any:
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            raise RuntimeError("synthetic pull crash")
+        return original_pull(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "pull_transcripts", crash_once)
+    with pytest.raises(RuntimeError, match="synthetic pull crash"):
+        coordinator.runner.on_plan_approved(1)
+
+    recovered = make_runner()
+    recovered.recover()
+    asyncio.run(asyncio.wait_for(recovered.run_sample(), timeout=15))
+    assert recovered._state() is JobState.sample_ready
+    assert coordinator.store.rows("SELECT COUNT(*) FROM results WHERE job_id='job'")[0][0] == 4
+
+
+def test_recover_after_crash_masking_second_sample_lead(
+    coordinator: CoordinatorFixture, make_runner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator.runner.on_plan_approved(1)
+    original_on_result = runner_module._Callbacks.on_result
+    sample_results = 0
+
+    async def crash_on_second_sample_result(callbacks: Any, task: Any, *args: Any, **kwargs: Any) -> None:
+        nonlocal sample_results
+        if callbacks.sample:
+            sample_results += 1
+            if sample_results == 2:
+                raise RuntimeError("synthetic masking_sample crash")
+        await original_on_result(callbacks, task, *args, **kwargs)
+
+    monkeypatch.setattr(runner_module._Callbacks, "on_result", crash_on_second_sample_result)
+    with pytest.raises(RuntimeError, match="synthetic masking_sample crash"):
+        asyncio.run(asyncio.wait_for(coordinator.runner.run_sample(), timeout=15))
+
+    recovered = make_runner()
+    recovered.recover()
+    asyncio.run(asyncio.wait_for(recovered.run_sample(), timeout=15))
+    assert recovered._state() is JobState.sample_ready
+    assert (
+        coordinator.store.rows(
+            "SELECT COUNT(*) FROM results WHERE job_id='job' AND lead_id IN ('10', '11', '12', '13')"
+        )[0][0]
+        == 4
+    )
+    assert (
+        coordinator.store.rows(
+            "SELECT COUNT(*) FROM leads WHERE job_id='job' AND in_sample=1 AND status='done'"
+        )[0][0]
+        == 4
+    )
+    assert not any(
+        (coordinator.job_dir / "raw" / f"{lead_id}.jsonl.gz").exists() for lead_id in ("10", "11", "12", "13")
+    )
+
+
 def test_harvest_receives_a_streaming_iterator(
     coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -132,7 +132,13 @@ class Store:
             )
         return attempt_id
 
-    def claim_queued(self, job_id: str, lead_ids: list[str], sample: bool) -> set[str]:
+    def claim_queued(
+        self,
+        job_id: str,
+        lead_ids: list[str],
+        sample: bool,
+        bundle_metadata: dict[str, tuple[int, int, int]] | None = None,
+    ) -> set[str]:
         claimed: set[str] = set()
         with self.transaction() as cur:
             for lead_id in lead_ids:
@@ -143,6 +149,13 @@ class Store:
                 )
                 if updated.rowcount == 1:
                     claimed.add(lead_id)
+                    if bundle_metadata is not None and lead_id in bundle_metadata:
+                        calls_sent, calls_dropped_cap, chars = bundle_metadata[lead_id]
+                        cur.execute(
+                            "UPDATE leads SET calls_sent=?, calls_dropped_cap=?, chars=? "
+                            "WHERE job_id=? AND lead_id=?",
+                            (calls_sent, calls_dropped_cap, chars, job_id, lead_id),
+                        )
         return claimed
 
     def release_claim(self, job_id: str, lead_id: str) -> bool:
@@ -248,7 +261,8 @@ class Store:
 
     def count_uncounted_failures(self, job_id: str, lead_id: str) -> int:
         rows = self.rows(
-            "SELECT COUNT(*) FROM attempts WHERE job_id=? AND lead_id=? AND outcome='failed' AND counted=0",
+            "SELECT COUNT(*) FROM attempts WHERE job_id=? AND lead_id=? AND outcome='failed' "
+            "AND counted=0 AND COALESCE(error_code, '') NOT IN ('quota_interrupt', 'interrupted')",
             (job_id, lead_id),
         )
         return int(rows[0][0]) if rows else 0

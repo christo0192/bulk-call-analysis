@@ -114,7 +114,10 @@ class _Callbacks(PoolCallbacks):
                 limit = n if self._dispatch_limit is None else min(n, self._dispatch_limit)
                 tasks, self._tasks = self._tasks[:limit], self._tasks[limit:]
                 claimed = self.runner.deps.store.claim_queued(
-                    self.runner.job_id, [task.lead_id for task in tasks], self.sample
+                    self.runner.job_id,
+                    [task.lead_id for task in tasks],
+                    self.sample,
+                    self.runner._bundle_metadata,
                 )
                 tasks = [task for task in tasks if task.lead_id in claimed]
                 if self._dispatch_limit is not None:
@@ -147,7 +150,7 @@ class _Callbacks(PoolCallbacks):
         failures = check_answer(
             answer,
             self.runner.spec.quote_fields,
-            self.runner._bundles.get(task.lead_id, ""),
+            self.runner._bundles.get(task.lead_id, (self.runner.spec.spec_version, ""))[1],
             self.runner.deps.config.recipe.speaker_labels,
         )
         ok = all(item.ok for item in failures)
@@ -238,7 +241,20 @@ class _Callbacks(PoolCallbacks):
             elif not counted:
                 retries = self.runner.deps.store.count_uncounted_failures(self.runner.job_id, task.lead_id)
                 self._uncounted[task.lead_id] = retries
-                if retries >= MAX_UNCOUNTED_FAILURES:
+                if task.lead_id in self.runner._quote_failures:
+                    if error_code not in {"quota_interrupt", "interrupted"}:
+                        retries = self.runner.deps.store.count_uncounted_failures(
+                            self.runner.job_id, task.lead_id
+                        )
+                        self._uncounted[task.lead_id] = retries
+                    if retries >= MAX_UNCOUNTED_FAILURES:
+                        self.runner.deps.store.set_lead_status(
+                            self.runner.job_id, task.lead_id, LeadStatus.queued, "quote_repair_pending"
+                        )
+                        await self.on_pause("network", None)
+                    else:
+                        self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
+                elif retries >= MAX_UNCOUNTED_FAILURES:
                     await self.on_pause("network", None)
                 else:
                     self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
@@ -348,7 +364,8 @@ class JobRunner:
         self.spec, _ = load_latest_spec(deps.job_dir)
         self._attempts: dict[str, str] = {}
         self._closed_attempts: set[str] = set()
-        self._bundles: dict[str, str] = {}
+        self._bundles: dict[str, tuple[int, str]] = {}
+        self._bundle_metadata: dict[str, tuple[int, int, int]] = {}
         self._answers: dict[str, dict[str, object]] = {}
         self._quote_failures: dict[str, tuple[dict[str, Any], list[QuoteCheck]]] = {}
         self._eta = EtaEstimator()
@@ -478,23 +495,37 @@ class JobRunner:
                 reason = stats.error or "leak scan hold-back"
                 self.deps.store.set_lead_status(self.job_id, lead_id, LeadStatus.held_back, reason)
                 continue
-            calls = self._lead_calls(lead_id)
-            bundle = build_bundle(lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit)
-            self._bundles[lead_id] = bundle.text
-            with self.deps.store.transaction() as cur:
-                cur.execute(
-                    "UPDATE leads SET status='queued', calls_sent=?, calls_dropped_cap=?, chars=?, "
-                    "in_sample=? WHERE job_id=? AND lead_id=?",
-                    (
-                        bundle.calls_sent,
-                        len(bundle.calls_dropped),
-                        bundle.chars,
-                        int(sample),
-                        self.job_id,
-                        lead_id,
-                    ),
+            try:
+                calls = self._lead_calls(lead_id)
+                bundle = build_bundle(lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit)
+                self._bundles[lead_id] = (self.spec.spec_version, bundle.text)
+                self._bundle_metadata[lead_id] = (
+                    bundle.calls_sent,
+                    len(bundle.calls_dropped),
+                    bundle.chars,
                 )
-            raw.unlink(missing_ok=True)
+                with self.deps.store.transaction() as cur:
+                    cur.execute(
+                        "UPDATE leads SET status='queued', calls_sent=?, calls_dropped_cap=?, chars=?, "
+                        "in_sample=? WHERE job_id=? AND lead_id=?",
+                        (
+                            bundle.calls_sent,
+                            len(bundle.calls_dropped),
+                            bundle.chars,
+                            int(sample),
+                            self.job_id,
+                            lead_id,
+                        ),
+                    )
+                raw.unlink(missing_ok=True)
+            except Exception as exc:
+                self.deps.store.set_lead_status(
+                    self.job_id,
+                    lead_id,
+                    LeadStatus.held_back,
+                    f"masking failed: {type(exc).__name__}: {exc}",
+                )
+                continue
             if self._phase_loop is not None:
                 phase_event = self._phase_event
                 if phase_event is not None:
@@ -511,12 +542,19 @@ class JobRunner:
         lead_ids = [str(row[0]) for row in rows]
         result: list[LeadTask] = []
         for lead_id in lead_ids:
-            if lead_id not in self._bundles:
+            cached = self._bundles.get(lead_id)
+            if cached is None or cached[0] != self.spec.spec_version:
                 try:
                     calls = self._lead_calls(lead_id)
-                    self._bundles[lead_id] = build_bundle(
+                    bundle = build_bundle(
                         lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit
-                    ).text
+                    )
+                    self._bundles[lead_id] = (self.spec.spec_version, bundle.text)
+                    self._bundle_metadata[lead_id] = (
+                        bundle.calls_sent,
+                        len(bundle.calls_dropped),
+                        bundle.chars,
+                    )
                 except Exception as exc:
                     self.deps.store.set_lead_status(
                         self.job_id,
@@ -525,14 +563,14 @@ class JobRunner:
                         f"masked bundle unavailable: {type(exc).__name__}: {exc}",
                     )
                     continue
-            prompt = self.spec.instructions + "\n" + self._bundles[lead_id]
+            prompt = self.spec.instructions + "\n" + self._bundles[lead_id][1]
             is_repair = str(next(row[1] for row in rows if str(row[0]) == lead_id)) == "quote_repair_pending"
             if is_repair:
                 answer, failures = self._quote_failures[lead_id]
                 prompt = (
                     self.spec.instructions
                     + "\n"
-                    + self._bundles[lead_id]
+                    + self._bundles[lead_id][1]
                     + "\n"
                     + repair_prompt(answer, failures, self.spec.instructions)
                 )
@@ -557,7 +595,7 @@ class JobRunner:
             (self.job_id, int(sample)),
         )
         return not any(
-            str(status) in {"pulled", "masked", "queued", "in_flight"}
+            str(status) in {"pending", "pulled", "not_started", "masked", "queued", "in_flight"}
             or str(reason) == "quote_repair_pending"
             for status, reason in rows
         )
@@ -843,7 +881,7 @@ class JobRunner:
             path = self.deps.job_dir / "raw" / f"{lead_id}.jsonl.gz"
             if not path.is_file():
                 continue
-            self._bundles[lead_id] = ""
+            self._bundles[lead_id] = (self.spec.spec_version, "")
 
     def _mask_sample(self) -> None:
         all_usable = [
@@ -858,7 +896,7 @@ class JobRunner:
             str(row[0])
             for row in self.deps.store.rows(
                 "SELECT lead_id FROM leads WHERE job_id=? AND in_sample=1 "
-                "AND status IN ('queued', 'in_flight', 'done', 'masked') ORDER BY lead_id",
+                "AND status NOT IN ('held_back', 'failed') ORDER BY lead_id",
                 (self.job_id,),
             )
         ]
@@ -907,7 +945,12 @@ class JobRunner:
             try:
                 calls = self._lead_calls(lead_id)
                 bundle = build_bundle(lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit)
-                self._bundles[lead_id] = bundle.text
+                self._bundles[lead_id] = (self.spec.spec_version, bundle.text)
+                self._bundle_metadata[lead_id] = (
+                    bundle.calls_sent,
+                    len(bundle.calls_dropped),
+                    bundle.chars,
+                )
                 with self.deps.store.transaction() as cur:
                     cur.execute(
                         "UPDATE leads SET status='queued', calls_sent=?, calls_dropped_cap=?, chars=?, "
@@ -923,10 +966,12 @@ class JobRunner:
                 )
         sample_set = set(sample)
         for lead_id in usable:
-            if lead_id not in sample_set and self.deps.store.rows(
-                "SELECT status FROM leads WHERE job_id=? AND lead_id=?", (self.job_id, lead_id)
-            )[0][0] in {LeadStatus.pulled, LeadStatus.masked}:
-                self.deps.store.set_lead_status(self.job_id, lead_id, LeadStatus.not_started)
+            if lead_id not in sample_set:
+                status = self.deps.store.rows(
+                    "SELECT status FROM leads WHERE job_id=? AND lead_id=?", (self.job_id, lead_id)
+                )[0][0]
+                if status in {LeadStatus.pulled, LeadStatus.masked}:
+                    self.deps.store.set_lead_status(self.job_id, lead_id, LeadStatus.not_started)
         transition(self.deps.store, self.job_id, JobState.sample_running)
 
     async def run_sample(self) -> None:
