@@ -161,9 +161,11 @@ def test_repair_always_failing_uncounted_pauses_network_after_four(
     )
     _run(coordinator.runner.resume("operator"))
     assert coordinator.runner._state() is JobState.done
-    assert coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='10'")[
-        0
-    ] == ("done", None)
+    # Lead 20's repair now succeeds; a sqlite3.Row never equals a tuple, so compare tuple(row).
+    lead_row = coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='20'")[0]
+    assert tuple(lead_row) == ("done", None)
+    repaired = coordinator.store.rows("SELECT quotes_ok FROM results WHERE job_id='job' AND lead_id='20'")[0][0]
+    assert repaired == 1
 
 
 def test_credit_drop_with_real_pool_pauses_and_fresh_runner_refuses_automatic_resume(

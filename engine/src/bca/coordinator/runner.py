@@ -232,29 +232,25 @@ class _Callbacks(PoolCallbacks):
             if task.lead_id in self.runner._quote_failures:
                 if counted:
                     self.runner._quote_failures.pop(task.lead_id, None)
-                self.runner.deps.store.set_lead_status(
-                    self.runner.job_id,
-                    task.lead_id,
-                    LeadStatus.done if counted else LeadStatus.queued,
-                    "quote repair failed; kept answer" if counted else "quote_repair_pending",
-                )
-            elif not counted:
-                retries = self.runner.deps.store.count_uncounted_failures(self.runner.job_id, task.lead_id)
-                self._uncounted[task.lead_id] = retries
-                if task.lead_id in self.runner._quote_failures:
-                    if error_code not in {"quota_interrupt", "interrupted"}:
-                        retries = self.runner.deps.store.count_uncounted_failures(
-                            self.runner.job_id, task.lead_id
-                        )
-                        self._uncounted[task.lead_id] = retries
+                    self.runner.deps.store.set_lead_status(
+                        self.runner.job_id, task.lead_id, LeadStatus.done, "quote repair failed; kept answer"
+                    )
+                else:
+                    self.runner.deps.store.set_lead_status(
+                        self.runner.job_id, task.lead_id, LeadStatus.queued, "quote_repair_pending"
+                    )
+                    retries = self.runner.deps.store.count_uncounted_failures(
+                        self.runner.job_id, task.lead_id
+                    )
+                    self._uncounted[task.lead_id] = retries
                     if retries >= MAX_UNCOUNTED_FAILURES:
-                        self.runner.deps.store.set_lead_status(
-                            self.runner.job_id, task.lead_id, LeadStatus.queued, "quote_repair_pending"
-                        )
                         await self.on_pause("network", None)
                     else:
                         self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
-                elif retries >= MAX_UNCOUNTED_FAILURES:
+            elif not counted:
+                retries = self.runner.deps.store.count_uncounted_failures(self.runner.job_id, task.lead_id)
+                self._uncounted[task.lead_id] = retries
+                if retries >= MAX_UNCOUNTED_FAILURES:
                     await self.on_pause("network", None)
                 else:
                     self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
@@ -475,6 +471,22 @@ class JobRunner:
         with gzip.open(path, "rt", encoding="utf-8") as source:
             return [_as_dict(json.loads(line)) for line in source if line.strip()]
 
+    def _hold_empty_bundle(self, lead_id: str, bundle: Any) -> None:
+        dropped = len(bundle.calls_dropped)
+        self._bundle_metadata[lead_id] = (0, dropped, bundle.chars)
+        with self.deps.store.transaction() as cur:
+            cur.execute(
+                "UPDATE leads SET status='held_back', reason=?, calls_sent=0, calls_dropped_cap=?, chars=? "
+                "WHERE job_id=? AND lead_id=?",
+                (
+                    "every call exceeds the per-lead cap",
+                    dropped,
+                    bundle.chars,
+                    self.job_id,
+                    lead_id,
+                ),
+            )
+
     def _prepare_leads(self, lead_ids: Iterable[str], sample: bool) -> None:
         raw_dir, masked_dir = self.deps.job_dir / "raw", self.deps.job_dir / "masked"
         for lead_id in lead_ids:
@@ -498,6 +510,9 @@ class JobRunner:
             try:
                 calls = self._lead_calls(lead_id)
                 bundle = build_bundle(lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit)
+                if bundle.calls_sent == 0:
+                    self._hold_empty_bundle(lead_id, bundle)
+                    continue
                 self._bundles[lead_id] = (self.spec.spec_version, bundle.text)
                 self._bundle_metadata[lead_id] = (
                     bundle.calls_sent,
@@ -549,6 +564,9 @@ class JobRunner:
                     bundle = build_bundle(
                         lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit
                     )
+                    if bundle.calls_sent == 0:
+                        self._hold_empty_bundle(lead_id, bundle)
+                        continue
                     self._bundles[lead_id] = (self.spec.spec_version, bundle.text)
                     self._bundle_metadata[lead_id] = (
                         bundle.calls_sent,
@@ -951,6 +969,9 @@ class JobRunner:
             try:
                 calls = self._lead_calls(lead_id)
                 bundle = build_bundle(lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit)
+                if bundle.calls_sent == 0:
+                    self._hold_empty_bundle(lead_id, bundle)
+                    continue
                 self._bundles[lead_id] = (self.spec.spec_version, bundle.text)
                 self._bundle_metadata[lead_id] = (
                     bundle.calls_sent,
