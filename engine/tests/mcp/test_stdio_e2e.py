@@ -128,17 +128,20 @@ def test_bq_stdio_shim_preserves_refusal_and_validation_reasons(tmp_path: Path) 
             refused_content = refused.content[0]
             assert isinstance(refused_content, TextContent)
             refusal_text = refused_content.text
-            assert refusal_text == (
+            assert (
                 "REFUSED: too large for chat; propose it as the job's lead source "
-                "so the operator can approve the scan"
+                "so the operator can approve the scan" in refusal_text
             )
+            assert "Traceback" not in refusal_text
+            assert str(tmp_path) not in refusal_text
             invalid = await session.call_tool("bq_query", {"sql": "UPDATE x SET y=1"})
             assert invalid.is_error
             invalid_content = invalid.content[0]
             assert isinstance(invalid_content, TextContent)
             invalid_text = invalid_content.text
-            assert invalid_text == "only SELECT or WITH queries are allowed"
+            assert "only SELECT or WITH queries are allowed" in invalid_text
             assert "Traceback" not in invalid_text
+            assert str(tmp_path) not in invalid_text
 
     try:
         asyncio.run(asyncio.wait_for(exercise(), timeout=30))

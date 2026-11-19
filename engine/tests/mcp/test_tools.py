@@ -223,7 +223,7 @@ def proposal_json(title: str = "title", *, model: str = "gpt-5.6-luna") -> str:
             "project_id": "project",
             "title": title,
             "question": "question",
-            "lead_source": {"kind": "ids", "ids_file": "ids.txt"},
+            "lead_source": {"kind": "ids", "ids_file": "ids.txt", "count": 1},
             "calls_scope": "all",
             "usable": {},
             "cap": {},

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -45,6 +46,7 @@ def make_host(
     models: ModelsConfig | None = None,
     notes_path: Path | None = None,
 ) -> ToolHost:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     store = open_store(tmp_path / "store.sqlite")
     store.create_project("project", "Project")
     return ToolHost(
@@ -191,7 +193,7 @@ def test_silent_client_does_not_block_others_or_shutdown(tmp_path: Path) -> None
     silent: Any
     if family == "AF_UNIX":
         silent = socket.socket(cast(int, socket.__dict__["AF_UNIX"]), socket.SOCK_STREAM)
-    else:
+    elif sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
 
@@ -210,6 +212,8 @@ def test_silent_client_does_not_block_others_or_shutdown(tmp_path: Path) -> None
         if handle == wintypes.HANDLE(-1).value:
             raise ctypes.WinError(ctypes.get_last_error())
         silent = (kernel32, handle)
+    else:
+        raise RuntimeError(f"unsupported IPC family: {family}")
     try:
         if family == "AF_UNIX":
             silent.connect(address)
