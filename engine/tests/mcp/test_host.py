@@ -12,6 +12,7 @@ import pytest
 
 from bca.bq.runner import DryRun
 from bca.config import BigQueryConfig, ModelsConfig, RecipeConfig
+from bca.logsetup import setup_logging
 from bca.mask.masker import MaskingContext
 from bca.mask.names import Span
 from bca.mcp.host import MAX_RESULT_CHARS, ToolHost, ToolHostError, start_ipc_thread
@@ -126,17 +127,23 @@ def test_lead_transcript_rejects_non_sample_lead(tmp_path: Path) -> None:
         host.call("lead_transcript", {"job_id": "job", "lead_id": "lead"})
 
 
-def test_ipc_forwards_call_and_does_not_log_authkey(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_ipc_forwards_call_and_does_not_log_authkey(tmp_path: Path) -> None:
     host = make_host(tmp_path)
+    logger = setup_logging(tmp_path)
     address, family = new_ipc_address()
     authkey = b"a" * 32
     thread = start_ipc_thread(host, address, authkey)
     try:
         result = call_engine(address, authkey, "data_notes", {}, family)
         assert result == "no notes yet"
-        assert authkey.hex() not in caplog.text
     finally:
         host.close()
+        for handler in logger.handlers:
+            handler.flush()
+            handler.close()
+    log_file = tmp_path / "engine.log"
+    log_text = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+    assert authkey.hex() not in log_text
     assert not thread.is_alive()
 
 

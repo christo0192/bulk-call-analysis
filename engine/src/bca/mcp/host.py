@@ -186,6 +186,7 @@ class ToolHost:
         self.models = models or ModelsConfig()
         self.notes_path = notes_path or (project_dir / "notes.md")
         self._ipc_stop = threading.Event()
+        self._ipc_ready = threading.Event()
         self._ipc_listener: object | None = None
         self._ipc_thread: threading.Thread | None = None
         self._ipc_address: str | None = None
@@ -592,6 +593,7 @@ def serve_ipc(
     # named-pipe DACL; only its raw accept is used here.
     listener = Listener(address, family=selected_family, authkey=None)
     host._ipc_listener = listener
+    host._ipc_ready.set()
     if selected_family == "AF_UNIX":
         with suppress(OSError):
             Path(address).chmod(0o600)
@@ -683,7 +685,10 @@ def serve_ipc(
 
 
 def start_ipc_thread(host: ToolHost, address: str, authkey: bytes) -> threading.Thread:
+    host._ipc_ready.clear()
     thread = threading.Thread(target=serve_ipc, args=(host, address, authkey), name="bca-ipc-listener")
     host._ipc_thread = thread
     thread.start()
+    if not host._ipc_ready.wait(timeout=5):
+        raise RuntimeError("IPC listener did not become ready")
     return thread

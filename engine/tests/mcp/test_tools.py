@@ -279,6 +279,9 @@ def test_propose_job_runs_preflight_before_plan_state_and_returns_card(tmp_path:
                     "lead_id": "lead-1",
                     "found": True,
                     "calls": 1,
+                    "call_id": "call-1",
+                    "transcript_text": "synthetic transcript",
+                    "duration": 600_000,
                     "transcript_calls": 1,
                     "usable_calls": 1,
                     "transcription_failed": 0,
@@ -302,6 +305,9 @@ def test_propose_job_reproposal_versions_and_running_job_is_refused(tmp_path: Pa
                     "lead_id": "lead-1",
                     "found": True,
                     "calls": 1,
+                    "call_id": "call-1",
+                    "transcript_text": "synthetic transcript",
+                    "duration": 600_000,
                     "transcript_calls": 1,
                     "usable_calls": 1,
                     "transcription_failed": 0,
@@ -312,7 +318,8 @@ def test_propose_job_reproposal_versions_and_running_job_is_refused(tmp_path: Pa
     host.call("propose_job", {"spec_json": proposal_json()})
     result = host.call("propose_job", {"spec_json": proposal_json("revised")})
     assert result["spec"] == "spec.v2.json"  # type: ignore[index]
-    assert host.store.rows("SELECT state, spec_version FROM jobs WHERE id='job'") == [("plan_proposed", 2)]
+    rows = host.store.rows("SELECT state, spec_version FROM jobs WHERE id='job'")
+    assert [tuple(row) for row in rows] == [("plan_proposed", 2)]
     with host.store.transaction() as cur:
         cur.execute("UPDATE jobs SET state='full_running' WHERE id='job'")
     with pytest.raises(ToolHostError, match="full run starts"):
