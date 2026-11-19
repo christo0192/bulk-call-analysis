@@ -120,6 +120,10 @@ class ToolHostError(RuntimeError):
     """A short, safe error intended for an MCP client."""
 
 
+class ToolRefusalError(ToolHostError):
+    """A safe refusal whose operator-facing message must be preserved."""
+
+
 class ListableRunner(Protocol):
     def list_datasets(self) -> list[dict[str, object]]: ...
     def list_tables(self, dataset: str) -> list[dict[str, object]]: ...
@@ -470,6 +474,8 @@ def _pages_until_deadline(runner: BqRunner, sql: str, deadline: float) -> Any:
 
 
 def _safe_error(exc: BaseException, context: MaskingContext) -> ToolHostError:
+    if isinstance(exc, ToolRefusalError):
+        return ToolHostError(str(exc))
     if isinstance(exc, ToolHostError):
         reason = str(exc)
     elif isinstance(exc, (ValueError, TypeError, KeyError)):
@@ -688,6 +694,11 @@ class ToolHost:
             raise ToolHostError("luna model and effort must match configured models")
         validate_rules(spec.rules, spec.output_schema)
         job_dir = self._job_dir(spec.job_id)
+        existing = self.store.rows(
+            "SELECT state FROM jobs WHERE id=? AND project_id=?", (spec.job_id, self.project_id)
+        )
+        if existing and str(existing[0][0]) in {"sample_running", "full_running"}:
+            raise ToolRefusalError("Pause the job before editing its plan.")
         if hasattr(spec.lead_source, "ids_file"):
             ids_file = Path(str(cast(Any, spec.lead_source).ids_file))
             if ids_file.is_absolute() or ids_file.name != str(ids_file) or ".." in ids_file.parts:
@@ -695,11 +706,6 @@ class ToolHost:
         lead_source_dry_run_bytes = 0
         if hasattr(spec.lead_source, "sql"):
             lead_source_dry_run_bytes = self.runner.dry_run(str(cast(Any, spec.lead_source).sql)).bytes
-        existing = self.store.rows(
-            "SELECT state FROM jobs WHERE id=? AND project_id=?", (spec.job_id, self.project_id)
-        )
-        if existing and str(existing[0][0]) in {"sample_running", "full_running"}:
-            raise ToolHostError("Pause the job before editing its plan.")
         owner = self.store.rows("SELECT project_id FROM jobs WHERE id=?", (spec.job_id,))
         if owner and str(owner[0][0]) != self.project_id:
             raise ToolHostError("job id already in use")

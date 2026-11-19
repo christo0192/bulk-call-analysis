@@ -102,7 +102,11 @@ class _Callbacks(PoolCallbacks):
         self.attempt_ended = False
 
     def set_tasks(self, tasks: list[LeadTask]) -> None:
-        self._tasks = tasks
+        self._tasks = sorted(tasks, key=lambda task: task.lead_id)
+
+    def _queue_tasks(self, tasks: list[LeadTask]) -> None:
+        self._tasks.extend(tasks)
+        self._tasks.sort(key=lambda task: task.lead_id)
 
     async def next_tasks(self, n: int) -> list[LeadTask]:
         while True:
@@ -140,6 +144,7 @@ class _Callbacks(PoolCallbacks):
                 }
                 self._tasks = [task for task in self._tasks if task.lead_id in active]
             if self._tasks:
+                self._tasks.sort(key=lambda task: task.lead_id)
                 limit = n if self._dispatch_limit is None else min(n, self._dispatch_limit)
                 tasks, self._tasks = self._tasks[:limit], self._tasks[limit:]
                 if self._dispatch_limit is not None:
@@ -176,7 +181,7 @@ class _Callbacks(PoolCallbacks):
     ) -> None:
         attempt = self.runner._attempts.get(task.attempt_id)
         if attempt is None:
-            LOGGER.warning("ignoring result for closed attempt %s", task.attempt_id)
+            LOGGER.debug("ignoring result for closed attempt %s", task.attempt_id)
             return
         status = self.runner.deps.store.rows(
             "SELECT status FROM leads WHERE job_id=? AND lead_id=?",
@@ -185,7 +190,6 @@ class _Callbacks(PoolCallbacks):
         if not status or str(status[0][0]) != LeadStatus.in_flight:
             self.runner._close_attempt(task.attempt_id)
             return
-        self.runner._close_attempt(task.attempt_id)
         self.runner._refresh_spec()
         bundle_text = await asyncio.to_thread(self.runner._bundle_text, task.lead_id)
         failures = check_answer(
@@ -204,6 +208,9 @@ class _Callbacks(PoolCallbacks):
             # evidence remains attached to the answer that was reviewed.
             stored_answer, original_failures = self.runner._quote_failures[task.lead_id]
             stored_flags = [f"quote:{item.field}:{item.reason}" for item in original_failures]
+        if self.runner._is_closed_attempt(task.attempt_id):
+            LOGGER.debug("ignoring result for closed attempt %s", task.attempt_id)
+            return
         accepted = self.runner.deps.store.record_result(
             self.runner.job_id,
             task.lead_id,
@@ -216,6 +223,7 @@ class _Callbacks(PoolCallbacks):
             usage,
             clear_repair_pending=is_repair,
         )
+        self.runner._close_attempt(task.attempt_id)
         self.attempt_ended = True
         self.runner._get_phase_event().set()
         if not accepted:
@@ -226,7 +234,7 @@ class _Callbacks(PoolCallbacks):
             except ValueError:
                 LOGGER.warning("ignoring stale-spec result for closed attempt %s", task.attempt_id)
             self.runner.deps.store.set_lead_status(self.runner.job_id, task.lead_id, LeadStatus.queued, None)
-            self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
+            self._queue_tasks([replace(task, attempt_id=str(uuid.uuid4()))])
             return
         if not ok and not is_repair:
             self.runner.deps.store.set_lead_status(
@@ -240,7 +248,7 @@ class _Callbacks(PoolCallbacks):
                 self.sample,
                 self.runner._bundle_metadata,
             )
-            self._tasks[0:0] = [item for item in repair_tasks if item.lead_id in claimed]
+            self._queue_tasks([item for item in repair_tasks if item.lead_id in claimed])
         elif is_repair:
             self.runner.deps.store.set_lead_status(self.runner.job_id, task.lead_id, LeadStatus.done)
             self.runner._drop_lead_state(task.lead_id)
@@ -255,14 +263,17 @@ class _Callbacks(PoolCallbacks):
         attempt = self.runner._attempts.get(task.attempt_id)
         if attempt is None:
             if self.runner._is_closed_attempt(task.attempt_id):
-                LOGGER.warning("ignoring failure for closed attempt %s", task.attempt_id)
+                LOGGER.debug("ignoring failure for closed attempt %s", task.attempt_id)
                 return
             # claim_queued() runs before on_started().  A pool dispatch decision,
             # cancellation, or startup exception can therefore report a task
             # with no attempt row to close.
             if self.runner.deps.store.release_claim(self.runner.job_id, task.lead_id):
-                self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
+                self._queue_tasks([replace(task, attempt_id=str(uuid.uuid4()))])
         else:
+            if self.runner._is_closed_attempt(task.attempt_id):
+                LOGGER.debug("ignoring failure for closed attempt %s", task.attempt_id)
+                return
             self.runner._close_attempt(task.attempt_id)
             try:
                 self.runner.deps.store.fail_attempt(
@@ -275,7 +286,7 @@ class _Callbacks(PoolCallbacks):
             except ValueError:
                 LOGGER.warning("ignoring failure for closed attempt %s", task.attempt_id)
                 if self.runner.deps.store.release_claim(self.runner.job_id, task.lead_id):
-                    self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
+                    self._queue_tasks([replace(task, attempt_id=str(uuid.uuid4()))])
             if task.lead_id in self.runner._quote_failures:
                 if counted:
                     self.runner.deps.store.set_lead_status(
@@ -293,21 +304,21 @@ class _Callbacks(PoolCallbacks):
                     if retries >= MAX_UNCOUNTED_FAILURES:
                         await self.on_pause("network", None)
                     else:
-                        self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
+                        self._queue_tasks([replace(task, attempt_id=str(uuid.uuid4()))])
             elif not counted:
                 retries = self.runner.deps.store.count_uncounted_failures(self.runner.job_id, task.lead_id)
                 self._uncounted[task.lead_id] = retries
                 if retries >= MAX_UNCOUNTED_FAILURES:
                     await self.on_pause("network", None)
                 else:
-                    self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
+                    self._queue_tasks([replace(task, attempt_id=str(uuid.uuid4()))])
             else:
                 status = self.runner.deps.store.rows(
                     "SELECT status FROM leads WHERE job_id=? AND lead_id=?",
                     (self.runner.job_id, task.lead_id),
                 )
                 if status and str(status[0][0]) == LeadStatus.queued:
-                    self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
+                    self._queue_tasks([replace(task, attempt_id=str(uuid.uuid4()))])
         self.runner._publish(
             "lead_failed", {"lead_id": task.lead_id, "error": error_code, "counted": counted}
         )
@@ -730,9 +741,9 @@ class JobRunner:
         now = self._ts()
         pause_started = self._pause_started or now
         if reason != PauseReason.model_unavailable.value:
-            self.deps.store.requeue_in_flight(self.job_id, reason, outcome="interrupted")
             self._closed_attempts.update(self._attempts)
             self._attempts.clear()
+            self.deps.store.requeue_in_flight(self.job_id, reason, outcome="interrupted")
         else:
             for (lead_id,) in self.deps.store.rows(
                 "SELECT lead_id FROM leads WHERE job_id=? AND status='in_flight'",
@@ -1203,9 +1214,9 @@ class JobRunner:
         # Requeue while the job is still paused so an interrupted repair stays
         # marked as an uncounted, reusable repair attempt before dispatch resumes.
         async with self._get_phase_lock():
-            self.deps.store.requeue_in_flight(self.job_id, "resume")
             self._closed_attempts.update(self._attempts)
             self._attempts.clear()
+            self.deps.store.requeue_in_flight(self.job_id, "resume")
             resume_job(self.deps.store, self.job_id)
             self._pause_started = None
             self._pause_reason = None
