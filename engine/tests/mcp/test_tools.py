@@ -134,7 +134,7 @@ def test_propose_job_plan_card_formats_both_byte_fields(
                 ]
             ],
         },
-        dry=DryRun(bytes_used, [], []),
+        dry=DryRun(bytes_used, [], [("lead_id", "STRING")]),
     )
     host = proposal_host(tmp_path, [], runner=runner)
     host.bq_config = host.bq_config.__class__("project", reject_bytes=3 * 1024**4)
@@ -147,27 +147,35 @@ def test_propose_job_plan_card_formats_both_byte_fields(
 
 
 def test_sample_reference_round_trip_keeps_the_same_masked_lead(tmp_path: Path) -> None:
-    host = make_host(tmp_path)
+    host = make_host(tmp_path, FakeBqRunner(dry=DryRun(0, [], [("lead_id", "STRING")])))
     host.store.create_job("job", "project", 1)
     save_spec(
-        JobSpec(1, "job", "project", "title", "question", LeadSourceSql("SELECT 1"), output_schema={}),
+        JobSpec(
+            1,
+            "job",
+            "project",
+            "title",
+            "question",
+            LeadSourceSql("SELECT '1001' AS lead_id"),
+            output_schema={},
+        ),
         tmp_path / "jobs" / "job",
     )
     for lead_id, status in (
-        ("a", LeadStatus.masked),
-        ("b", LeadStatus.masked),
-        ("held", LeadStatus.held_back),
+        ("1001", LeadStatus.masked),
+        ("1002", LeadStatus.masked),
+        ("1003", LeadStatus.held_back),
     ):
         host.store.add_lead("job", lead_id, status, in_sample=1)
     with host.store.transaction() as cur:
-        for lead_id in ("a", "b"):
+        for lead_id in ("1001", "1002"):
             cur.execute(
                 "INSERT INTO results VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 ("job", lead_id, "attempt", "{}", 1, "{}", "now", 1),
             )
     transcript_dir = tmp_path / "jobs" / "job" / "cache" / "transcripts"
     transcript_dir.mkdir(parents=True)
-    for lead_id in ("a", "b"):
+    for lead_id in ("1001", "1002"):
         with gzip.open(transcript_dir / f"{lead_id}.jsonl.gz", "wt", encoding="utf-8") as handle:
             handle.write(
                 json.dumps({"call_id": lead_id, "call_start": "2026-01-01", "transcript_text": lead_id})
@@ -179,9 +187,9 @@ def test_sample_reference_round_trip_keeps_the_same_masked_lead(tmp_path: Path) 
     )
     assert rows[0]["ref"] == "S1"
     before = host.call("lead_transcript", {"job_id": "job", "ref": "S1"})
-    host.store.set_lead_status("job", "a", LeadStatus.in_flight)
+    host.store.set_lead_status("job", "1001", LeadStatus.in_flight)
     during = host.call("lead_transcript", {"job_id": "job", "ref": "S1"})
-    host.store.set_lead_status("job", "a", LeadStatus.done)
+    host.store.set_lead_status("job", "1001", LeadStatus.done)
     after = host.call("lead_transcript", {"job_id": "job", "ref": "S1"})
     assert before == during == after
     page_two = cast(

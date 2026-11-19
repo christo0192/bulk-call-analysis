@@ -511,6 +511,7 @@ class ToolHost:
         rows: list[dict[str, object]] = []
         omitted_rows = 0
         omitted_chars = 0
+        more_rows = False
         deadline = time.monotonic() + BQ_QUERY_DEADLINE_S
         for page in _pages_until_deadline(self.runner, sql, deadline):
             if time.monotonic() >= deadline:
@@ -521,6 +522,7 @@ class ToolHost:
                 if len(rows) >= max_rows:
                     omitted_rows += 1
                     omitted_chars += len(json.dumps(row, ensure_ascii=False, default=str))
+                    more_rows = True
                     break
                 raw_size = len(json.dumps(row, ensure_ascii=False, default=str))
                 if (
@@ -544,7 +546,7 @@ class ToolHost:
                     omitted_chars = raw_size
                     break
                 rows.append(masked)
-            if len(rows) >= max_rows or omitted_rows:
+            if omitted_rows:
                 break
         result: dict[str, object] = {
             "bytes": _format_bytes(dry.bytes),
@@ -553,6 +555,9 @@ class ToolHost:
         }
         if omitted_rows:
             result["omitted"] = f"{omitted_rows} rows omitted; {omitted_chars} characters omitted"
+        if more_rows:
+            result["more_rows"] = True
+            result["hint"] = "Aggregate in SQL or narrow the query."
         return result
 
     def bq_information_schema(self, dataset: str, view: str) -> object:
