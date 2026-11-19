@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -40,6 +41,7 @@ from .wire import (
 )
 
 MAX_RESULT_CHARS = 40_000
+BQ_QUERY_DEADLINE_S = 90.0
 _LOG = logging.getLogger("bca.mcp")
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PATH_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$", re.ASCII)
@@ -141,9 +143,9 @@ def _masked(
     context: MaskingContext,
 ) -> object:
     if isinstance(value, str):
-        if _is_sensitive_number(value):
+        if _is_pure_numeric(value) and _is_sensitive_number(value):
             return "[NUMBER]"
-        return mask_text(value[:MAX_RESULT_CHARS], context).text
+        return mask_text(value, context).text
     if isinstance(value, list):
         return [_masked(item, context) for item in value]
     if isinstance(value, tuple):
@@ -167,7 +169,7 @@ def _masked(
             return "[NUMBER]"
         return value
     if isinstance(value, float):
-        if _is_sensitive_number(str(value)):
+        if value.is_integer() and _is_sensitive_number(str(int(value))):
             return "[NUMBER]"
         return value
     if value is None or isinstance(value, bool):
@@ -181,6 +183,17 @@ def _cap(
     *,
     unit: str = "characters",
 ) -> object:
+    if isinstance(value, str):
+        masked_text = mask_text(value, context).text
+        if len(value) <= MAX_RESULT_CHARS and len(masked_text) <= MAX_RESULT_CHARS:
+            return masked_text
+        marker_template = "\n[... {} {} omitted ...]"
+        omitted = max(0, len(value) - MAX_RESULT_CHARS)
+        marker = marker_template.format(omitted, unit)
+        string_kept = max(0, MAX_RESULT_CHARS - len(marker))
+        omitted = len(value) - string_kept
+        marker = marker_template.format(omitted, unit)
+        return masked_text[:string_kept] + marker
     masked = _masked(value, context)
     if isinstance(masked, str) and len(masked) > MAX_RESULT_CHARS:
         omitted = len(masked) - MAX_RESULT_CHARS
@@ -211,12 +224,14 @@ def _cap(
             kept.append(item)
         omitted = len(masked) - len(kept)
         return {"items": kept, "truncated": f"{omitted} rows omitted; aggregate in SQL or page the result"}
+    if isinstance(masked, dict):
+        return {"value": masked, "truncated": "optional fields omitted; use a narrower request"}
     omitted = len(encoded) - MAX_RESULT_CHARS
-    return encoded[: MAX_RESULT_CHARS - 80] + f"\n[truncated: {omitted} {unit} omitted]"
+    return {"items": [], "truncated": f"{omitted} {unit} omitted"}
 
 
 def _normalized_number_digits(value: str) -> str:
-    digits = value.lstrip("+-")
+    digits = re.sub(r"\D", "", value)
     if digits.startswith("91"):
         return digits[2:]
     if digits.startswith("0"):
@@ -225,8 +240,12 @@ def _normalized_number_digits(value: str) -> str:
 
 
 def _is_sensitive_number(value: str) -> bool:
-    match = re.fullmatch(r"[+-]?(\d+)(?:\.\d+)?", value)
-    return match is not None and 10 <= len(_normalized_number_digits(match.group(1))) <= 13
+    match = re.fullmatch(r"[+-]?[\d][\d\s,._-]*(?:\.\d+)?", value)
+    return match is not None and 10 <= len(_normalized_number_digits(match.group(0))) <= 13
+
+
+def _is_pure_numeric(value: str) -> bool:
+    return re.fullmatch(r"[+-]?[\d][\d\s,._-]*(?:\.\d+)?", value) is not None
 
 
 def _safe_error(exc: BaseException, context: MaskingContext) -> ToolHostError:
@@ -356,10 +375,13 @@ class ToolHost:
         rows: list[dict[str, object]] = []
         omitted_rows = 0
         omitted_chars = 0
-        # Fetch one row at a time so a large text row cannot fill an unbounded
-        # driver page before the result budget is checked.
-        for page in self.runner.iter_pages(sql, page_size=1):
+        deadline = time.monotonic() + BQ_QUERY_DEADLINE_S
+        for page in self.runner.iter_pages(sql, page_size=500):
+            if time.monotonic() >= deadline:
+                raise ToolHostError("BigQuery query timed out")
             for row in page:
+                if time.monotonic() >= deadline:
+                    raise ToolHostError("BigQuery query timed out")
                 if len(rows) >= max_rows:
                     omitted_rows += 1
                     omitted_chars += len(json.dumps(row, ensure_ascii=False, default=str))
@@ -434,6 +456,9 @@ class ToolHost:
         existing = self.store.rows(
             "SELECT state FROM jobs WHERE id=? AND project_id=?", (spec.job_id, self.project_id)
         )
+        owner = self.store.rows("SELECT project_id FROM jobs WHERE id=?", (spec.job_id,))
+        if owner and str(owner[0][0]) != self.project_id:
+            raise ToolHostError("job id already in use")
         created = not existing
         if existing and str(existing[0][0]) in {
             "full_running",
@@ -480,7 +505,7 @@ class ToolHost:
                 transition(self.store, spec.job_id, JobState.plan_proposed, "plan proposed")
             else:
                 edit_spec(self.store, spec.job_id, version)
-                record_lead_intake(self.store, spec.job_id, intake)
+                record_lead_intake(self.store, spec.job_id, intake, replace_existing=True)
                 for lead_id, bucket in preflight.per_lead.items():
                     if bucket != "usable":
                         self.store.set_lead_status(spec.job_id, lead_id, LeadStatus(bucket))
@@ -491,10 +516,13 @@ class ToolHost:
                 with self.store.transaction() as cur:
                     cur.execute("DELETE FROM leads WHERE job_id=?", (spec.job_id,))
                     cur.execute("DELETE FROM id_intake WHERE job_id=?", (spec.job_id,))
-                    cur.execute("DELETE FROM jobs WHERE id=?", (spec.job_id,))
+                    cur.execute(
+                        "DELETE FROM jobs WHERE id=? AND project_id=?", (spec.job_id, self.project_id)
+                    )
             raise
         summary: dict[str, object] = {
             "job_id": spec.job_id,
+            "spec_version": version,
             "spec": saved_path.name if saved_path is not None else "",
             "state": "plan_proposed",
             "lead_counts": {
@@ -523,19 +551,41 @@ class ToolHost:
             raise ToolHostError("job not found")
         progress = progress_counts(self.store, job_id)
         errors = self.store.rows(
-            "SELECT e.kind, e.data_json FROM job_events e JOIN jobs j ON j.id=e.job_id "
-            "WHERE e.job_id=? AND j.project_id=? AND e.kind IN "
-            "('error','lead_error','lead_failed','tool_error') ORDER BY e.id DESC LIMIT 10",
+            "SELECT a.error_code, a.ended_at FROM attempts a JOIN jobs j ON j.id=a.job_id "
+            "WHERE a.job_id=? AND j.project_id=? AND a.outcome='failed' "
+            "ORDER BY a.ended_at DESC LIMIT 10",
             (job_id, self.project_id),
         )
         quota_rows = self.store.rows(
             "SELECT data_json FROM job_events WHERE job_id=? AND kind='quota' ORDER BY id DESC LIMIT 1",
             (job_id,),
         )
-        quota: object = {"state": "unknown"}
+        quota: object = None
+        quota_reason = "no quota event has been recorded"
         if quota_rows:
             with suppress(TypeError, json.JSONDecodeError):
                 quota = json.loads(str(quota_rows[0][0]))
+                quota_reason = ""
+        attempt_rows = self.store.rows(
+            "SELECT started_at, ended_at FROM attempts WHERE job_id=? AND outcome='ok' "
+            "AND ended_at IS NOT NULL ORDER BY ended_at",
+            (job_id,),
+        )
+        estimator = EtaEstimator()
+        durations: list[float] = []
+        for started, ended in attempt_rows:
+            try:
+                start_ts = datetime.fromisoformat(str(started)).timestamp()
+                end_ts = datetime.fromisoformat(str(ended)).timestamp()
+            except ValueError:
+                continue
+            durations.append(end_ts - start_ts)
+            estimator.completed(end_ts)
+        eta = (
+            estimator.estimate(time.time(), progress.remaining, sample_durations=durations)
+            if durations
+            else None
+        )
         counts = {
             "done": progress.done,
             "in_flight": progress.in_flight,
@@ -556,9 +606,11 @@ class ToolHost:
             "spec_version": rows[0][1],
             "counts": counts,
             "checklist": [{"name": item.name, "status": item.status} for item in progress.checklist],
-            "eta": EtaEstimator().estimate(time.time(), progress.remaining).__dict__,
+            "eta": eta.__dict__ if eta is not None else None,
+            "eta_reason": "no completed attempts with timing data" if eta is None else "",
             "quota": quota,
-            "recent_errors": [dict(r) for r in errors],
+            "quota_reason": quota_reason,
+            "recent_errors": [{"error_code": r[0], "ended_at": r[1]} for r in errors],
         }
 
     def sample_results(self, job_id: str, offset: int = 0, limit: int = 20) -> object:
@@ -640,7 +692,7 @@ class ToolHost:
         if address is not None and family is not None:
             _remove_ipc_socket(address, family)
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
-            raise RuntimeError("IPC listener did not stop")
+            _LOG.warning("IPC listener is still stopping after the shutdown deadline")
 
 
 def _wake_ipc_listener(address: str, family: str) -> None:
@@ -652,6 +704,17 @@ def _wake_ipc_listener(address: str, family: str) -> None:
         connection.close()
     except OSError:
         pass
+
+
+def _recv_bytes_with_deadline(connection: Any, timeout: float, maxsize: int) -> bytes:
+    """Bound a complete frame, including peers that send only its prefix."""
+    timer = threading.Timer(timeout, connection.close)
+    timer.daemon = True
+    timer.start()
+    try:
+        return cast(bytes, connection.recv_bytes(maxsize))
+    finally:
+        timer.cancel()
 
 
 def _remove_ipc_socket(address: str, family: str) -> None:
@@ -698,13 +761,13 @@ def serve_ipc(
             connection.send_bytes(hello)
             if not connection.poll(HANDSHAKE_TIMEOUT):
                 return
-            mac = connection.recv_bytes(64)
+            mac = _recv_bytes_with_deadline(connection, HANDSHAKE_TIMEOUT, 64)
             if not hmac.compare_digest(mac, expected_mac(authkey, hello)):
                 return
             connection.send_bytes(OK)
             if stopping.is_set() or not connection.poll(REQUEST_TIMEOUT):
                 return
-            request = decode_json(connection.recv_bytes(MAX_REQUEST_BYTES))
+            request = decode_json(_recv_bytes_with_deadline(connection, REQUEST_TIMEOUT, MAX_REQUEST_BYTES))
             if not isinstance(request, dict):
                 raise ToolHostError("invalid IPC request")
             requested_project = request.get("project_id")

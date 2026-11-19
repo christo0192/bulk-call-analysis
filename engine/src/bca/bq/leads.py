@@ -159,9 +159,17 @@ def resolve_lead_source(
     return intake
 
 
-def record_lead_intake(store: Store, job_id: str, intake: IdIntake) -> None:
+def record_lead_intake(
+    store: Store, job_id: str, intake: IdIntake, *, replace_existing: bool = False
+) -> None:
     """Persist an already validated intake after its job row exists."""
     with store.transaction() as cur:
+        if replace_existing:
+            # The intake is the authoritative set on a pre-run re-proposal.
+            # Remove attempts before leads because attempts reference the lead pair.
+            cur.execute("DELETE FROM results WHERE job_id=?", (job_id,))
+            cur.execute("DELETE FROM attempts WHERE job_id=?", (job_id,))
+            cur.execute("DELETE FROM leads WHERE job_id=?", (job_id,))
         cur.execute(
             "INSERT OR REPLACE INTO id_intake(job_id, raw_count, distinct_count, duplicates, malformed) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -172,3 +180,8 @@ def record_lead_intake(store: Store, job_id: str, intake: IdIntake) -> None:
                 "INSERT OR IGNORE INTO leads(job_id, lead_id, status) VALUES (?, ?, ?)",
                 (job_id, lead_id, str(LeadStatus.pending)),
             )
+            if replace_existing:
+                cur.execute(
+                    "UPDATE leads SET status=?, reason=NULL, in_sample=0 WHERE job_id=? AND lead_id=?",
+                    (str(LeadStatus.pending), job_id, lead_id),
+                )

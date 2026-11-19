@@ -4,6 +4,7 @@ import gzip
 import json
 import logging
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -138,8 +139,9 @@ def test_sample_results_uses_opaque_stable_references(tmp_path: Path) -> None:
                 ("job", lead_id, "attempt", "{}", 1, "{}", "now", 1),
             )
     result = host.call("sample_results", {"job_id": "job"})
-    assert [item["ref"] for item in result] == ["S1", "S2"]  # type: ignore[index]
-    assert all("lead_id" not in item for item in result)  # type: ignore[union-attr]
+    sample_rows = cast(list[dict[str, object]], result)
+    assert [item["ref"] for item in sample_rows] == ["S1", "S2"]
+    assert all("lead_id" not in item for item in sample_rows)
 
 
 def test_lead_transcript_is_masked_and_capped(tmp_path: Path) -> None:
@@ -182,7 +184,7 @@ def test_lead_transcript_is_masked_and_capped(tmp_path: Path) -> None:
     assert isinstance(result, str)
     assert "raw-only-secret" not in result
     assert "[PHONE]" in result
-    assert "[truncated:" in result
+    assert "[..." in result
 
 
 def test_write_file_allows_plan_and_summary_only(tmp_path: Path) -> None:
@@ -200,7 +202,8 @@ def test_write_file_enforces_200k_cap(tmp_path: Path) -> None:
 def test_tool_errors_are_short_and_phone_like_numbers_are_masked(tmp_path: Path) -> None:
     host = make_host(tmp_path, FakeBqRunner(pages=[[{"number": 9876543210, "text": "9876543210"}]]))
     result = host.call("bq_query", {"sql": "SELECT 1"})
-    assert result["rows"][0] == {"number": "[NUMBER]", "text": "[PHONE]"}  # type: ignore[index]
+    rows = cast(list[dict[str, object]], cast(dict[str, object], result)["rows"])
+    assert rows[0] == {"number": "[NUMBER]", "text": "[NUMBER]"}
     with pytest.raises(ToolHostError) as error:
         host.call("not_a_tool")
     assert "Traceback" not in str(error.value)
@@ -355,39 +358,74 @@ def test_propose_job_runs_preflight_before_plan_state_and_returns_card(tmp_path:
         runner=runner,
     )
     result = host.call("propose_job", {"spec_json": json.dumps(spec)})
-    assert result["state"] == "plan_proposed"  # type: ignore[index]
-    assert result["preflight"]["buckets"]["usable"] == 1  # type: ignore[index]
-    assert "per_lead" not in result["preflight"]  # type: ignore[operator]
-    assert result["lead_source_dry_run_bytes"] == 0  # type: ignore[index]
+    card = cast(dict[str, object], result)
+    preflight = cast(dict[str, object], card["preflight"])
+    buckets = cast(dict[str, object], preflight["buckets"])
+    assert card["state"] == "plan_proposed"
+    assert buckets["usable"] == 1
+    assert "per_lead" not in preflight
+    assert card["lead_source_dry_run_bytes"] == 0
     assert [tuple(row) for row in host.store.rows("SELECT state, spec_version FROM jobs WHERE id='job'")] == [
         ("plan_proposed", 1)
     ]
 
 
+def test_propose_job_plan_card_stays_structured_for_thousands_of_leads(tmp_path: Path) -> None:
+    lead_ids = [str(index) for index in range(1, 3001)]
+    rows: list[dict[str, object]] = [
+        {
+            "lead_id": lead_id,
+            "found": True,
+            "calls": 1,
+            "call_id": f"call-{lead_id}",
+            "transcript_text": "synthetic transcript",
+            "duration": 600_000,
+            "transcript_calls": 1,
+            "usable_calls": 1,
+            "transcription_failed": 0,
+        }
+        for lead_id in lead_ids
+    ]
+    runner = FakeBqRunner(pages=[rows], dry=DryRun(0, [], [("lead_id", "STRING")]))
+    host = proposal_host(tmp_path, [], runner=runner)
+    (tmp_path / "jobs" / "job" / "ids.txt").write_text("\n".join(lead_ids), encoding="utf-8")
+    card = cast(dict[str, object], host.call("propose_job", {"spec_json": proposal_json()}))
+    assert isinstance(card["lead_counts"], dict)
+    assert isinstance(card["preflight"], dict)
+    assert card["lead_source_dry_run_bytes"] == 0
+    assert card["spec_version"] == 1
+
+
 def test_propose_job_reproposal_versions_and_running_job_is_refused(tmp_path: Path) -> None:
+    pages: list[list[dict[str, object]]] = [
+        [
+            {
+                "lead_id": lead_id,
+                "found": True,
+                "calls": 1,
+                "call_id": f"call-{lead_id}",
+                "transcript_text": "synthetic transcript",
+                "duration": 600_000,
+                "transcript_calls": 1,
+                "usable_calls": 1,
+                "transcription_failed": 0,
+            }
+            for lead_id in ("1001", "2001")
+        ]
+    ]
     host = proposal_host(
         tmp_path,
-        [
-            [
-                {
-                    "lead_id": "1001",
-                    "found": True,
-                    "calls": 1,
-                    "call_id": "call-1",
-                    "transcript_text": "synthetic transcript",
-                    "duration": 600_000,
-                    "transcript_calls": 1,
-                    "usable_calls": 1,
-                    "transcription_failed": 0,
-                }
-            ]
-        ],
+        pages,
     )
     host.call("propose_job", {"spec_json": proposal_json()})
+    (tmp_path / "jobs" / "job" / "ids.txt").write_text("2001\n", encoding="utf-8")
     result = host.call("propose_job", {"spec_json": proposal_json("revised")})
     assert result["spec"] == "spec.v2.json"  # type: ignore[index]
     rows = host.store.rows("SELECT state, spec_version FROM jobs WHERE id='job'")
     assert [tuple(row) for row in rows] == [("plan_proposed", 2)]
+    assert [tuple(row) for row in host.store.rows("SELECT lead_id FROM leads WHERE job_id='job'")] == [
+        ("2001",)
+    ]
     with host.store.transaction() as cur:
         cur.execute("UPDATE jobs SET state='full_running' WHERE id='job'")
     with pytest.raises(ToolHostError, match="full run starts"):

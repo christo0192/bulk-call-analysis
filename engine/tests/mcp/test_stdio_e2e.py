@@ -94,7 +94,7 @@ def test_app_stdio_shim_returns_short_errors_and_caps_large_strings(tmp_path: Pa
             large_content = large.content[0]
             assert isinstance(large_content, TextContent)
             large_text = large_content.text
-            assert "[truncated:" in large_text
+            assert "[..." in large_text
             assert len(large_text) <= 40_000
 
     try:

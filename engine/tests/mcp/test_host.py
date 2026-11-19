@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import sys
 import threading
@@ -68,6 +69,25 @@ def test_bq_query_masks_phone_numbers(tmp_path: Path) -> None:
     runner = FakeBqRunner(pages=[[{"phone": "Call 9876543210"}]])
     result = make_host(tmp_path, runner).call("bq_query", {"sql": "SELECT 1"})
     assert result == {"bytes": 0, "rows": [{"phone": "Call [PHONE]"}], "truncated": False}
+    assert runner.calls[-1][2] == 500
+
+
+def test_string_results_are_plain_text_with_original_character_count(tmp_path: Path) -> None:
+    notes = tmp_path / "notes.md"
+    short = "line one\nline two"
+    notes.write_text(short, encoding="utf-8")
+    host = make_host(tmp_path, notes_path=notes)
+    assert host.call("data_notes") == short
+
+    original = "a\n" * (MAX_RESULT_CHARS // 2 + 10)
+    notes.write_text(original, encoding="utf-8")
+    result = host.call("data_notes")
+    assert isinstance(result, str)
+    assert "\\n" not in result
+    match = re.search(r"\[\.\.\. (\d+) characters omitted \.\.\.\]$", result)
+    assert match is not None
+    prefix = result[: match.start()]
+    assert int(match.group(1)) == len(original) - (len(prefix) - 1)
 
 
 def test_result_cap_has_marker(tmp_path: Path) -> None:
