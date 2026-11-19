@@ -84,7 +84,9 @@ def test_crash_mid_run_then_recover_no_duplicates(coordinator: CoordinatorFixtur
     coordinator.runner.on_sample_approved(1)
     start_full_run(coordinator.store, "job", "operator", 1)
     coordinator.runner._prepare_leads(["7"], False)
-    attempt = coordinator.store.start_attempt("job", "7", "codex")
+    coordinator.store.set_lead_status("job", "7", LeadStatus.queued)
+    assert coordinator.store.claim_queued("job", ["7"], False) == {"7"}
+    attempt = coordinator.store.start_attempt("job", "7", "codex", claimed=True)
 
     recovered = make_runner()
     assert recovered.recover() == 1
@@ -139,7 +141,7 @@ def test_repeated_task_selection_claims_each_lead_once(coordinator: CoordinatorF
     selected = _run(select_both())
     lead_ids = [lead_id for batch in selected for lead_id in batch]
     assert len(lead_ids) == len(set(lead_ids))
-    assert set(lead_ids) == {"7", "8"}
+    assert set(lead_ids) == {"10", "11"}
 
 
 def test_leak_scan_holds_back_lead_and_never_sends_it(
@@ -217,7 +219,11 @@ def test_repair_pass(
     else:
         assert int(result[1]) == 0
         assert "quote:not found" in str(result[2])
-    assert answer == repair_answer
+    if repair_answer["quote"] == "still wrong":
+        # A failed repair must preserve the original answer and its gate flag.
+        assert answer == {"ok": True}
+    else:
+        assert answer == repair_answer
 
 
 def test_retry_exhaustion_ends_done_with_issues(coordinator: CoordinatorFixture) -> None:

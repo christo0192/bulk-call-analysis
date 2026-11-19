@@ -301,7 +301,15 @@ class Store:
                     "UPDATE leads SET status='queued', reason=? WHERE job_id=? AND lead_id=?",
                     (reason_value, job_id, lead_id),
                 )
-            return len(rows)
+            # Selection claims a batch before callbacks create attempts. If a
+            # pause interrupts that batch, return those unstarted claims too.
+            cur.execute(
+                "UPDATE leads SET status='queued', reason=? WHERE job_id=? AND status='in_flight' "
+                "AND NOT EXISTS (SELECT 1 FROM attempts WHERE attempts.job_id=leads.job_id "
+                "AND attempts.lead_id=leads.lead_id AND attempts.ended_at IS NULL)",
+                (reason, job_id),
+            )
+            return len(rows) + cur.rowcount
 
     def next_queued(self, job_id: str, limit: int, sample_only: bool) -> list[str]:
         with self.lock:

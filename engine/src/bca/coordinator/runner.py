@@ -93,6 +93,8 @@ class _Callbacks(PoolCallbacks):
         while True:
             if self.runner._state() is JobState.paused:
                 return []
+            if self._dispatch_limit == 0:
+                return []
             if not self._tasks:
                 self._tasks = self.runner._task_list(self.sample)
             if self._tasks:
@@ -139,6 +141,8 @@ class _Callbacks(PoolCallbacks):
         stored_answer = answer
         stored_flags: list[str] = flags
         if is_repair and not ok:
+            # A failed repair keeps the original answer so the quote gate's
+            # evidence remains attached to the answer that was reviewed.
             stored_answer, original_failures = self.runner._quote_failures[task.lead_id]
             stored_flags = [f"quote:{item.field}:{item.reason}" for item in original_failures]
         accepted = self.runner.deps.store.record_result(
