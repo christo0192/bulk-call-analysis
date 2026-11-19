@@ -42,7 +42,7 @@ class FakeBqRunner:
         kind = self._query_kind(sql)
         if kind in self.pages_by_query_kind:
             pages = self.pages_by_query_kind[kind]
-        elif kind == "preflight" and self.preflight_pages is not None:
+        elif self.preflight_pages is not None and (kind == "preflight" or "WITH selected AS" in sql):
             pages = self.preflight_pages
         else:
             pages = self.pages
