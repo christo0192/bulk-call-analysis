@@ -305,7 +305,9 @@ def test_propose_job_runs_preflight_before_plan_state_and_returns_card(tmp_path:
     assert result["preflight"]["buckets"]["usable"] == 1  # type: ignore[index]
     assert result["preflight"]["per_lead"]["1001"] == "usable"  # type: ignore[index]
     assert result["lead_source_dry_run_bytes"] == 0  # type: ignore[index]
-    assert host.store.rows("SELECT state, spec_version FROM jobs WHERE id='job'") == [("plan_proposed", 1)]
+    assert [tuple(row) for row in host.store.rows("SELECT state, spec_version FROM jobs WHERE id='job'")] == [
+        ("plan_proposed", 1)
+    ]
 
 
 def test_propose_job_reproposal_versions_and_running_job_is_refused(tmp_path: Path) -> None:
