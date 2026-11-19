@@ -4,20 +4,13 @@ use std::time::{Duration, SystemTime};
 
 const SLEEP_GAP: Duration = Duration::from_secs(2);
 
+#[cfg(windows)]
 pub fn power_message_hint(message: u32) -> Option<&'static str> {
-    #[cfg(windows)]
-    {
-        use windows::Win32::UI::WindowsAndMessaging::{PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND};
-        match message {
-            PBT_APMSUSPEND => Some("os/suspendHint"),
-            PBT_APMRESUMEAUTOMATIC => Some("os/resumeHint"),
-            _ => None,
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = message;
-        None
+    use windows::Win32::UI::WindowsAndMessaging::{PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND};
+    match message {
+        PBT_APMSUSPEND => Some("os/suspendHint"),
+        PBT_APMRESUMEAUTOMATIC => Some("os/resumeHint"),
+        _ => None,
     }
 }
 

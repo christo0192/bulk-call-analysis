@@ -10,6 +10,9 @@ use std::{path::PathBuf, sync::Mutex};
 use tauri::RunEvent;
 use tauri::{Manager, State};
 
+#[doc(hidden)]
+pub use engine::{spawn_for_test, TestEngine};
+
 struct AppLogger(Mutex<PathBuf>);
 impl log::Log for AppLogger {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {

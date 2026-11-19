@@ -133,14 +133,16 @@ impl PowerOs for PlatformPower {
 #[cfg(target_os = "macos")]
 struct PlatformPower {
     assertion: Mutex<Option<u32>>,
-    app_nap_activity: Mutex<
-        Option<
-            objc2::rc::Retained<
-                objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>,
-            >,
-        >,
-    >,
+    app_nap_activity: Mutex<Option<objc2::rc::Retained<objc2_foundation::NSObject>>>,
 }
+
+// SAFETY: NSProcessInfo activity tokens are Objective-C objects whose lifetime
+// is retained here, and Apple documents that an activity may be ended from any
+// thread. Access to the token and IOKit assertion is serialized by the mutexes.
+#[cfg(target_os = "macos")]
+unsafe impl Send for PlatformPower {}
+#[cfg(target_os = "macos")]
+unsafe impl Sync for PlatformPower {}
 
 #[cfg(target_os = "macos")]
 fn mac_status(kind: Option<&str>, percent: Option<u8>) -> PowerStatus {
@@ -173,7 +175,7 @@ impl PowerOs for PlatformPower {
         }
         let nap = unsafe {
             NSProcessInfo::processInfo().beginActivityWithOptions_reason(
-                NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+                NSActivityOptions::NSActivityUserInitiatedAllowingIdleSystemSleep,
                 &NSString::from_str("Processing activity"),
             )
         };
@@ -262,7 +264,6 @@ type CFTypeRef = *const std::ffi::c_void;
 type CFStringRef = CFTypeRef;
 #[cfg(target_os = "macos")]
 #[link(name = "IOKit", kind = "framework")]
-#[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn IOPMAssertionCreateWithName(
         assertion_type: CFStringRef,
@@ -275,6 +276,10 @@ unsafe extern "C" {
     fn IOPSGetProvidingPowerSourceType(info: CFTypeRef) -> CFStringRef;
     fn IOPSCopyPowerSourcesList(info: CFTypeRef, count: *mut i64) -> *const CFTypeRef;
     fn IOPSGetPowerSourceDescription(info: CFTypeRef, source: CFTypeRef) -> CFTypeRef;
+}
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
     fn CFRelease(value: CFTypeRef);
     fn CFStringCreateWithCString(
         allocator: *const std::ffi::c_void,

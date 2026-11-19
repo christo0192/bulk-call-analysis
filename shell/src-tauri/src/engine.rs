@@ -16,7 +16,6 @@ use tokio::{
     time::sleep,
 };
 
-#[derive(Clone)]
 pub struct Engine {
     inner: Arc<Inner>,
 }
@@ -59,6 +58,14 @@ impl RestartTracker {
             2u64.saturating_pow(self.attempts.len().saturating_sub(1) as u32)
                 .min(60),
         )
+    }
+}
+
+impl Clone for Engine {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -113,13 +120,7 @@ impl Engine {
     }
     async fn spawn_once(&self) -> Result<(), RpcError> {
         let (program, args) = command_line(&self.inner.app);
-        let mut command = Command::new(program);
-        command.args(args).env_clear().envs(minimal_environment());
-        #[cfg(unix)]
-        command.process_group(0);
-        #[cfg(windows)]
-        command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
-        command.kill_on_drop(true);
+        let mut command = configured_command(program, args);
         let mut child = command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -282,6 +283,91 @@ impl Engine {
         let _ = self.inner.app.emit(event, payload);
     }
 }
+
+#[doc(hidden)]
+pub struct TestEngine {
+    client: Arc<Client<tokio::process::ChildStdin>>,
+    child: tokio::process::Child,
+    guard: Arc<procguard::Guard>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+#[doc(hidden)]
+pub async fn spawn_for_test(program: String, args: Vec<String>) -> Result<TestEngine, RpcError> {
+    let mut child = configured_command(program, args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    let pid = child.id().ok_or(RpcError::Closed)?;
+    let guard = Arc::new(procguard::attach(pid)?);
+    let stdout = child.stdout.take().ok_or(RpcError::Closed)?;
+    let stdin = child.stdin.take().ok_or(RpcError::Closed)?;
+    let client = Client::new(stdin);
+    let reader_client = client.clone();
+    let reader = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout);
+        let mut line = Vec::new();
+        let notifications = mpsc::channel(1).0;
+        while let Ok(size) = reader.read_until(b'\n', &mut line).await {
+            if size == 0 {
+                break;
+            }
+            if let Ok(value) = rpc::decode(&line) {
+                reader_client.dispatch(value, &notifications).await;
+            }
+            line.clear();
+        }
+        reader_client.close().await;
+    });
+    Ok(TestEngine {
+        client,
+        child,
+        guard,
+        reader,
+    })
+}
+
+impl TestEngine {
+    pub fn pid(&self) -> u32 {
+        self.child.id().unwrap_or_default()
+    }
+
+    pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        self.client
+            .request(method, params, Duration::from_secs(20))
+            .await
+    }
+
+    pub async fn shutdown(mut self) {
+        let _ = self
+            .client
+            .request("shutdown", json!({}), Duration::from_secs(20))
+            .await;
+        if tokio::time::timeout(Duration::from_secs(10), self.child.wait())
+            .await
+            .is_err()
+        {
+            self.guard.terminate();
+            let _ = self.child.wait().await;
+        } else {
+            self.guard.terminate();
+        }
+        let _ = self.reader.await;
+    }
+}
+
+fn configured_command(program: String, args: Vec<String>) -> Command {
+    let mut command = Command::new(program);
+    command.args(args).env_clear().envs(minimal_environment());
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+    command.kill_on_drop(true);
+    command
+}
+
 pub fn command_line(app: &AppHandle) -> (String, Vec<String>) {
     if let Ok(program) = std::env::var("BCA_ENGINE_PROGRAM") {
         let args = std::env::var("BCA_ENGINE_ARGS")
