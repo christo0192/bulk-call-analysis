@@ -147,8 +147,13 @@ def build_server(name: str, address: str, tools: tuple[str, ...], project_id: st
         "bq_list_datasets": "List datasets; read-only and masked.",
         "bq_list_tables": "List tables in a dataset; dataset must be an identifier.",
         "bq_describe_table": "Describe schema and row count; read-only.",
-        "bq_dry_run": "Validate a SELECT and return estimated bytes without executing it.",
-        "bq_query": "Run a masked SELECT of at most 1000 rows; scans above reject_bytes are refused.",
+        "bq_dry_run": (
+            "Validate a SELECT and return its estimated scan size as a readable string without executing it."
+        ),
+        "bq_query": (
+            "Run a masked SELECT of at most 1000 rows; report scan size as a readable string "
+            "and refuse scans above reject_bytes."
+        ),
         "bq_information_schema": "Read an allowlisted INFORMATION_SCHEMA view.",
         "data_notes": "Read operator notes from the configured app-data notes file.",
         "brief_read": "Read the project brief.",

@@ -54,7 +54,7 @@ def test_bq_dry_run_through_host(tmp_path: Path) -> None:
     result = make_host(tmp_path, FakeBqRunner(dry=DryRun(12, ["events"], [("id", "INT64")]))).call(
         "bq_dry_run", {"sql": "SELECT 1"}
     )
-    assert result == {"bytes": 12, "referenced_tables": ["events"], "schema": [["id", "INT64"]]}
+    assert result == {"bytes": "12 B", "referenced_tables": ["events"], "schema": [["id", "INT64"]]}
 
 
 def test_bq_query_rejects_more_than_1000_rows(tmp_path: Path) -> None:
@@ -364,7 +364,7 @@ def test_propose_job_runs_preflight_before_plan_state_and_returns_card(tmp_path:
     assert card["state"] == "plan_proposed"
     assert buckets["usable"] == 1
     assert "per_lead" not in preflight
-    assert card["lead_source_dry_run_bytes"] == 0
+    assert card["lead_source_dry_run_bytes"] == "0 B"
     assert [tuple(row) for row in host.store.rows("SELECT state, spec_version FROM jobs WHERE id='job'")] == [
         ("plan_proposed", 1)
     ]
@@ -392,7 +392,7 @@ def test_propose_job_plan_card_stays_structured_for_thousands_of_leads(tmp_path:
     card = cast(dict[str, object], host.call("propose_job", {"spec_json": proposal_json()}))
     assert isinstance(card["lead_counts"], dict)
     assert isinstance(card["preflight"], dict)
-    assert card["lead_source_dry_run_bytes"] == 0
+    assert card["lead_source_dry_run_bytes"] == "0 B"
     assert card["spec_version"] == 1
 
 

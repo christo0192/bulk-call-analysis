@@ -68,7 +68,7 @@ def make_host(
 def test_bq_query_masks_phone_numbers(tmp_path: Path) -> None:
     runner = FakeBqRunner(pages=[[{"phone": "Call 9876543210"}]])
     result = make_host(tmp_path, runner).call("bq_query", {"sql": "SELECT 1"})
-    assert result == {"bytes": 0, "rows": [{"phone": "Call [PHONE]"}], "truncated": False}
+    assert result == {"bytes": "0 B", "rows": [{"phone": "Call [PHONE]"}], "truncated": False}
     assert runner.calls[-1][2] == 500
 
 
