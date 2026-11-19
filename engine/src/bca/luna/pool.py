@@ -128,6 +128,7 @@ class LunaPool:
         self._pending_pause: tuple[str, int | None] | None = None
         self._next_tasks: asyncio.Task[list[LeadTask]] | None = None
         self._interrupt_task: asyncio.Task[None] | None = None
+        self._isolation_leads: set[str] = set()
 
     def set_concurrency(self, n: int) -> None:
         self.concurrency = max(1, n)
@@ -185,7 +186,8 @@ class LunaPool:
                 await self._check_quota()
                 if self._paused:
                     break
-                room = self.concurrency - len(running)
+                effective_concurrency = 1 if self._isolation_leads else self.concurrency
+                room = effective_concurrency - len(running)
                 tasks: list[LeadTask] = []
                 if room > 0:
                     if self._dispatch_closed:
@@ -202,7 +204,7 @@ class LunaPool:
                         if self._next_tasks is next_tasks:
                             self._next_tasks = None
                     for index, task in enumerate(tasks):
-                        if len(running) >= self.concurrency:
+                        if len(running) >= effective_concurrency:
                             await asyncio.gather(*(self._fail_unstarted(item) for item in tasks[index:]))
                             break
                         if not await self._before_dispatch(task.model):
@@ -475,6 +477,7 @@ class LunaPool:
             self._leads.pop(task.attempt_id, None)
             if lead.turn_id:
                 self._by_turn.pop(lead.turn_id, None)
+            self._refresh_isolation()
 
     async def _complete_from_events(self, lead: _Lead) -> None:
         lead.completion_event = asyncio.Event()
@@ -696,13 +699,18 @@ class LunaPool:
                 await self._pause("error_storm", None)
 
     async def _pause(self, reason: str, resume_at: int | None) -> None:
-        if not self._paused:
-            self._paused = True
-            self._dispatch_closed = True
-            if self._leads:
-                self._pending_pause = (reason, resume_at)
-            else:
+        if self._paused:
+            if self._pending_pause is None and not self._leads:
                 await self.callbacks.on_pause(reason, resume_at)
+            return
+        self._paused = True
+        self._dispatch_closed = True
+        self._pending_pause = (reason, resume_at)
+        if not self._leads:
+            pending = self._pending_pause
+            self._pending_pause = None
+            if pending is not None:
+                await self.callbacks.on_pause(*pending)
 
     async def _deliver_failure(self, lead: _Lead, code: str, counted: bool, detail: str) -> None:
         try:
@@ -763,10 +771,17 @@ class LunaPool:
         return task
 
     async def _crash_or_failure(self, lead: _Lead, detail: str) -> None:
-        await self._fail(lead, "appserver_crash", False, detail)
-        await self._restart("appserver_crash", crash=True, server_generation=lead.server_generation)
+        await self._restart(
+            "appserver_crash", crash=True, server_generation=lead.server_generation, crash_detail=detail
+        )
 
-    async def _restart(self, reason: str, crash: bool = False, server_generation: int | None = None) -> None:
+    async def _restart(
+        self,
+        reason: str,
+        crash: bool = False,
+        server_generation: int | None = None,
+        crash_detail: str | None = None,
+    ) -> None:
         async with self._restart_lock:
             if server_generation is not None and server_generation != self._server_generation:
                 return
@@ -776,6 +791,10 @@ class LunaPool:
                 return
             if crash and server_generation is not None:
                 self._restarted_crash_generations.add(server_generation)
+            active = list(self._leads.values()) if crash else []
+            if crash:
+                self._isolation_leads.update(lead.task.lead_id for lead in active)
+                self._refresh_isolation()
             if crash:
                 self._crashes.append(time.monotonic())
             if len(self._crashes) >= 4:
@@ -784,8 +803,11 @@ class LunaPool:
             if self._server is not None:
                 await self._server.stop()
             self._server = None
-            for lead in list(self._leads.values()):
-                await self._fail(lead, reason, False, "app-server restarted")
+            for active_lead in active or list(self._leads.values()):
+                if crash and len(active) == 1:
+                    await self._fail(active_lead, "appserver_crash", False, crash_detail or reason)
+                else:
+                    await self._fail(active_lead, reason, False, "app-server restarted")
             if self.restart_backoff_s:
                 await asyncio.sleep(self.restart_backoff_s)
             try:
@@ -796,3 +818,12 @@ class LunaPool:
                 if server is not None:
                     await server.stop()
                 await self._pause("error_storm", None)
+
+    def _refresh_isolation(self) -> None:
+        setter = getattr(self.callbacks, "set_isolation_leads", None)
+        if setter is None:
+            return
+        result = setter(frozenset(self._isolation_leads))
+        if not isinstance(result, frozenset):
+            raise TypeError("set_isolation_leads must return a frozenset")
+        self._isolation_leads = set(result)

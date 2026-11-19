@@ -117,6 +117,21 @@ class _Callbacks(PoolCallbacks):
     def claimed_lead_ids(self) -> frozenset[str]:
         return frozenset(self._claimed)
 
+    def set_isolation_leads(self, lead_ids: frozenset[str]) -> frozenset[str]:
+        """Keep queued or active suspects; a counted repeat is no longer runnable."""
+        if not lead_ids:
+            self._isolation_leads = set()
+            return frozenset()
+        placeholders = ",".join("?" for _ in lead_ids)
+        rows = self.runner.deps.store.rows(
+            "SELECT lead_id FROM leads WHERE job_id=? AND status IN ('queued', 'in_flight') AND lead_id IN ("
+            + placeholders
+            + ")",
+            (self.runner.job_id, *sorted(lead_ids)),
+        )
+        self._isolation_leads = {str(row[0]) for row in rows}
+        return frozenset(self._isolation_leads)
+
     async def next_tasks(self, n: int) -> list[LeadTask]:
         while True:
             current_version = self.runner._job_spec_version()
@@ -126,7 +141,23 @@ class _Callbacks(PoolCallbacks):
             if self._dispatch_limit == 0:
                 return []
             if not self._tasks:
-                lead_ids = self.runner.deps.store.next_queued(self.runner.job_id, n, self.sample)
+                if self._isolation_leads:
+                    placeholders = ",".join("?" for _ in self._isolation_leads)
+                    rows = self.runner.deps.store.rows(
+                        "SELECT lead_id FROM leads WHERE job_id=? AND status='queued' "
+                        "AND (?=0 OR in_sample=1) AND lead_id IN ("
+                        + placeholders
+                        + ") ORDER BY lead_id LIMIT ?",
+                        (
+                            self.runner.job_id,
+                            int(self.sample),
+                            *sorted(self._isolation_leads),
+                            n,
+                        ),
+                    )
+                    lead_ids = [str(row[0]) for row in rows]
+                else:
+                    lead_ids = self.runner.deps.store.next_queued(self.runner.job_id, n, self.sample)
                 self._tasks = await self.runner._task_list(self.sample, lead_ids)
                 if self.runner._state() is not self.runner._phase_state(self.sample):
                     return []
