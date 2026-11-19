@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -188,7 +190,7 @@ def test_ipc_silent_client_does_not_block_calls_or_close(tmp_path: Path) -> None
     address, family = new_ipc_address()
     authkey = b"e" * 32
     thread = start_ipc_thread(host, address, authkey)
-    silent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    silent = socket.socket(cast(int, socket.__dict__["AF_UNIX"]), socket.SOCK_STREAM)
     try:
         silent.connect(address)
         started = time.monotonic()
@@ -199,6 +201,33 @@ def test_ipc_silent_client_does_not_block_calls_or_close(tmp_path: Path) -> None
         started = time.monotonic()
         host.close()
         assert time.monotonic() - started < 5
+    assert not thread.is_alive()
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="bounded raw-client test is POSIX-only")
+def test_ipc_failed_handshakes_do_not_create_unbounded_threads(tmp_path: Path) -> None:
+    host = make_host(tmp_path)
+    address, _family = new_ipc_address()
+    authkey = b"h" * 32
+    thread = start_ipc_thread(host, address, authkey)
+    baseline = threading.active_count()
+    clients: list[socket.socket] = []
+    try:
+        unix_family = cast(int, socket.__dict__["AF_UNIX"])
+        for _ in range(50):
+            client = socket.socket(unix_family, socket.SOCK_STREAM)
+            client.connect(address)
+            clients.append(client)
+        for client in clients:
+            client.close()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and threading.active_count() > baseline + 8:
+            time.sleep(0.01)
+        assert threading.active_count() <= baseline + 8
+    finally:
+        for client in clients:
+            client.close()
+        host.close()
     assert not thread.is_alive()
 
 
@@ -226,7 +255,7 @@ def test_windows_pipe_dacl_has_only_current_user(tmp_path: Path) -> None:
     authkey = b"f" * 32
     thread = start_ipc_thread(host, address, authkey)
     connection = Client(address, family=family, authkey=authkey)
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32 = cast(Any, ctypes).WinDLL("advapi32", use_last_error=True)
     GetSecurityInfo = advapi32.GetSecurityInfo
     GetSecurityInfo.restype = wintypes.DWORD
     GetSecurityInfo.argtypes = [
@@ -257,7 +286,7 @@ def test_windows_pipe_dacl_has_only_current_user(tmp_path: Path) -> None:
     advapi32.ConvertSidToStringSidW.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
     try:
         result = GetSecurityInfo(
-            connection._handle,  # type: ignore[attr-defined]
+            cast(Any, connection)._handle,
             6,
             4,
             ctypes.byref(owner),

@@ -7,8 +7,8 @@ import re
 import sys
 import threading
 import time
-from collections import deque
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import replace
 from multiprocessing import AuthenticationError
@@ -537,22 +537,19 @@ class ToolHost:
         address = self._ipc_address
         family = self._ipc_family
         authkey = self._ipc_authkey
+        listener = self._ipc_listener
+        if listener is not None:
+            with suppress(OSError):
+                cast(Any, listener).close()
         if address is not None and family is not None and authkey is not None:
-
-            def wake_listener() -> None:
-                try:
-                    wake = Client(address, family=family, authkey=authkey)
-                    wake.close()
-                except (OSError, EOFError, AuthenticationError):
-                    pass
-
-            threading.Thread(target=wake_listener, daemon=True).start()
+            try:
+                wake = Client(address, family=family, authkey=authkey)
+                wake.close()
+            except (OSError, EOFError, AuthenticationError):
+                pass
         thread = self._ipc_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=5)
-        listener = self._ipc_listener
-        if listener is not None:
-            cast(Any, listener).close()
         if address is not None and family is not None:
             _remove_ipc_socket(address, family)
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
@@ -601,52 +598,18 @@ def serve_ipc(
     if selected_family == "AF_UNIX":
         with suppress(OSError):
             Path(address).chmod(0o600)
-    accepted: deque[object | BaseException] = deque()
-    accepted_lock = threading.Lock()
-
-    def queue_authenticated(connection: Any) -> None:
-        timer = threading.Timer(1.0, connection.close)
-        timer.daemon = True
-        try:
-            from multiprocessing.connection import answer_challenge, deliver_challenge
-
-            timer.start()
-            deliver_challenge(connection, authkey)
-            answer_challenge(connection, authkey)
-            with accepted_lock:
-                accepted.append(connection)
-        except (OSError, EOFError, AuthenticationError) as exc:
-            with accepted_lock:
-                accepted.append(exc)
-            with suppress(OSError, EOFError):
-                connection.close()
-        finally:
-            timer.cancel()
-
-    def accept_one() -> None:
-        item: object | BaseException
-        try:
-            if selected_family == "AF_UNIX":
-                raw_listener = cast(Any, listener)._listener
-                sock, _ = raw_listener._socket.accept()
-                from multiprocessing.connection import Connection
-
-                connection = Connection(sock.detach())
-            else:
-                item = listener.accept()
-                connection = cast(Any, item)
-        except (OSError, EOFError, AuthenticationError) as exc:
-            with accepted_lock:
-                accepted.append(exc)
-        else:
-            threading.Thread(target=queue_authenticated, args=(connection,), daemon=True).start()
-        finally:
-            if not stopping.is_set():
-                start_accept()
+    workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bca-ipc")
+    worker_slots = threading.BoundedSemaphore(4)
 
     def handle(connection: Any) -> None:
         try:
-            if stopping.is_set() or not connection.poll(0.5):
+            from multiprocessing.connection import answer_challenge, deliver_challenge
+
+            deliver_challenge(connection, authkey)
+            if not connection.poll(1.0):
+                raise TimeoutError("IPC authentication timed out")
+            answer_challenge(connection, authkey)
+            if stopping.is_set() or not connection.poll(1.0):
                 return
             request = connection.recv()
             if not isinstance(request, dict):
@@ -672,33 +635,53 @@ def serve_ipc(
             with suppress(OSError, EOFError):
                 connection.close()
 
-    def start_accept() -> None:
-        threading.Thread(target=accept_one, daemon=True).start()
-
-    start_accept()
+    accept_failures = 0
     try:
         while not stopping.is_set():
-            item: object | None = None
-            with accepted_lock:
-                if accepted:
-                    item = accepted.popleft()
-            if item is None:
-                time.sleep(0.01)
+            if not worker_slots.acquire(timeout=0.1):
                 continue
-            if isinstance(item, BaseException):
-                if not stopping.is_set():
-                    _LOG.warning("MCP IPC accept failed: %s", type(item).__name__)
-                start_accept()
+            try:
+                if selected_family == "AF_UNIX":
+                    raw_listener = cast(Any, listener)._listener
+                    sock, _ = raw_listener._socket.accept()
+                    from multiprocessing.connection import Connection
+
+                    connection = Connection(sock.detach())
+                else:
+                    connection = cast(Any, listener).accept()
+            except (OSError, EOFError, AuthenticationError) as exc:
+                worker_slots.release()
+                if stopping.is_set():
+                    break
+                accept_failures += 1
+                _LOG.warning("MCP IPC accept failed: %s", type(exc).__name__)
+                stopping.wait(min(0.1 * (2 ** min(accept_failures - 1, 4)), 2.0))
                 continue
-            threading.Thread(target=handle, args=(item,), daemon=True).start()
+            accept_failures = 0
+
+            def run_worker(connection: Any = connection) -> None:
+                try:
+                    handle(connection)
+                finally:
+                    worker_slots.release()
+
+            try:
+                workers.submit(run_worker)
+            except RuntimeError:
+                worker_slots.release()
+                with suppress(OSError, EOFError):
+                    connection.close()
+                raise
     finally:
-        listener.close()
+        with suppress(OSError):
+            listener.close()
+        workers.shutdown(wait=True, cancel_futures=True)
         host._ipc_listener = None
         _remove_ipc_socket(address, selected_family)
 
 
 def start_ipc_thread(host: ToolHost, address: str, authkey: bytes) -> threading.Thread:
-    thread = threading.Thread(target=serve_ipc, args=(host, address, authkey), daemon=True)
+    thread = threading.Thread(target=serve_ipc, args=(host, address, authkey), name="bca-ipc-listener")
     host._ipc_thread = thread
     thread.start()
     return thread

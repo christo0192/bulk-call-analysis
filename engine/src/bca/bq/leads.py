@@ -3,9 +3,10 @@ from __future__ import annotations
 import csv
 import io
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from openpyxl import load_workbook
 
@@ -14,7 +15,7 @@ from bca.store import LeadStatus, Store
 from bca.store.spec import LeadSourceIds, LeadSourceSql
 
 from .queries import lead_source_sql
-from .runner import BqRunner
+from .runner import BqRunner, DryRun
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -116,11 +117,15 @@ def parse_id_list(path_or_text: str | Path) -> IdIntake:
     return parse_id_text(path_or_text)
 
 
+class QueryRunner(Protocol):
+    def dry_run(self, sql: str, params: Mapping[str, object] | None = None) -> DryRun: ...
+
+
 class LeadSourceError(ValueError):
     """Raised when a lead source cannot be safely consumed."""
 
 
-def check_single_id_column(runner: BqRunner, user_sql: str) -> None:
+def check_single_id_column(runner: QueryRunner, user_sql: str) -> None:
     result = runner.dry_run(user_sql.strip().removesuffix(";").rstrip(), {})
     if len(result.schema) != 1 or result.schema[0][1] != "STRING":
         raise LeadSourceError("lead source must return exactly one STRING lead_id column")

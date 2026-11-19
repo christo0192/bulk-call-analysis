@@ -83,13 +83,17 @@ def test_app_stdio_shim_returns_short_errors_and_caps_large_strings(tmp_path: Pa
             await session.initialize()
             error = await session.call_tool("brief_update", {"text": "x" * 20_001})
             assert error.is_error
-            error_text = str(error.content[0].text)
+            error_content = error.content[0]
+            assert isinstance(error_content, TextContent)
+            error_text = error_content.text
             assert "20k" in error_text
             assert "Traceback" not in error_text
             assert str(tmp_path) not in error_text
             large = await session.call_tool("data_notes", {})
             assert not large.is_error
-            large_text = str(large.content[0].text)
+            large_content = large.content[0]
+            assert isinstance(large_content, TextContent)
+            large_text = large_content.text
             assert "[truncated:" in large_text
             assert len(large_text) <= 40_000
 
@@ -121,14 +125,18 @@ def test_bq_stdio_shim_preserves_refusal_and_validation_reasons(tmp_path: Path) 
             await session.initialize()
             refused = await session.call_tool("bq_query", {"sql": "SELECT 1"})
             assert refused.is_error
-            refusal_text = str(refused.content[0].text)
+            refused_content = refused.content[0]
+            assert isinstance(refused_content, TextContent)
+            refusal_text = refused_content.text
             assert refusal_text == (
                 "REFUSED: too large for chat; propose it as the job's lead source "
                 "so the operator can approve the scan"
             )
             invalid = await session.call_tool("bq_query", {"sql": "UPDATE x SET y=1"})
             assert invalid.is_error
-            invalid_text = str(invalid.content[0].text)
+            invalid_content = invalid.content[0]
+            assert isinstance(invalid_content, TextContent)
+            invalid_text = invalid_content.text
             assert invalid_text == "only SELECT or WITH queries are allowed"
             assert "Traceback" not in invalid_text
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from bca.bq.runner import DryRun
-from bca.mcp.host import ToolHostError
+from bca.mcp.host import ToolHost, ToolHostError
 from bca.store import JobSpec, LeadSourceSql, LeadStatus, save_spec
 from tests.fakes.fake_bq import FakeBqRunner
 from tests.mcp.test_host import make_host, recipe_config
@@ -158,6 +158,7 @@ def test_lead_transcript_is_masked_and_capped(tmp_path: Path) -> None:
             + "\n"
         )
     result = host.call("lead_transcript", {"job_id": "job", "lead_id": "lead"})
+    assert isinstance(result, str)
     assert "[PHONE]" in result
     assert "[truncated:" in result
 
@@ -237,7 +238,7 @@ def proposal_json(title: str = "title", *, model: str = "gpt-5.6-luna") -> str:
     )
 
 
-def proposal_host(tmp_path: Path, pages: list[list[dict[str, object]]]) -> object:
+def proposal_host(tmp_path: Path, pages: list[list[dict[str, object]]]) -> ToolHost:
     job_dir = tmp_path / "jobs" / "job"
     job_dir.mkdir(parents=True)
     (job_dir / "ids.txt").write_text("lead-1\n", encoding="utf-8")
