@@ -111,9 +111,10 @@ class _Callbacks(PoolCallbacks):
                 return tasks
             if self.runner._phase_finished(self.sample):
                 return []
-            self.runner._phase_event.clear()
+            phase_event = self.runner._get_phase_event()
+            phase_event.clear()
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self.runner._phase_event.wait(), 1.0)
+                await asyncio.wait_for(phase_event.wait(), 1.0)
 
     async def on_started(self, task: LeadTask) -> None:
         attempt = self.runner.deps.store.start_attempt(
@@ -160,7 +161,7 @@ class _Callbacks(PoolCallbacks):
             clear_repair_pending=is_repair,
         )
         self.attempt_ended = True
-        self.runner._phase_event.set()
+        self.runner._get_phase_event().set()
         if not accepted:
             try:
                 self.runner.deps.store.fail_attempt(
@@ -188,7 +189,7 @@ class _Callbacks(PoolCallbacks):
 
     async def on_failure(self, task: LeadTask, error_code: str, counted: bool, detail: str) -> None:
         self.attempt_ended = True
-        self.runner._phase_event.set()
+        self.runner._get_phase_event().set()
         attempt = self.runner._attempts.get(task.attempt_id)
         if attempt is None:
             # claim_queued() runs before on_started().  A pool dispatch decision,
@@ -336,7 +337,7 @@ class _Callbacks(PoolCallbacks):
                 (self.runner.job_id,),
             ):
                 self.runner.deps.store.release_claim(self.runner.job_id, str(lead_id))
-        self.runner._phase_event.set()
+        self.runner._get_phase_event().set()
         if reason in {item.value for item in PauseReason}:
             pause(self.runner.deps.store, self.runner.job_id, PauseReason(reason), resume_at)
         self.runner._eta.pause(
@@ -360,7 +361,7 @@ class JobRunner:
         self._liveness = Liveness(lambda: deps.concurrency, deps.config.limits.lead_timeout_s)
         self._sleep = SleepDetector(clock=deps.clock)
         self._masking_task: asyncio.Task[None] | None = None
-        self._phase_event = asyncio.Event()
+        self._phase_event: asyncio.Event | None = None
         self._phase_loop: asyncio.AbstractEventLoop | None = None
         self._phase_pool: LunaPool | None = None
         self._pause_started: float | None = None
@@ -374,6 +375,15 @@ class JobRunner:
 
     def _ts(self) -> float:
         return self.deps.clock.now() if self.deps.clock is not None else time.time()
+
+    def _get_phase_event(self) -> asyncio.Event:
+        loop = asyncio.get_running_loop()
+        event = self._phase_event
+        event_loop = getattr(cast(Any, event), "_loop", None) if event is not None else None
+        if event is None or (event_loop is not None and event_loop is not loop):
+            event = asyncio.Event()
+            self._phase_event = event
+        return event
 
     def _publish(self, kind: EventKind, data: dict[str, object]) -> None:
         self.deps.event_bus.publish(Event(kind, self.job_id, self._ts(), data))
@@ -463,7 +473,9 @@ class JobRunner:
                 )
             raw.unlink(missing_ok=True)
             if self._phase_loop is not None:
-                self._phase_loop.call_soon_threadsafe(self._phase_event.set)
+                phase_event = self._phase_event
+                if phase_event is not None:
+                    self._phase_loop.call_soon_threadsafe(phase_event.set)
 
     def _task_list(self, sample: bool, repair: bool = False) -> list[LeadTask]:
         self._refresh_spec()
@@ -604,7 +616,8 @@ class JobRunner:
     async def _run_phase(self, sample: bool, canary: bool = False) -> None:
         """Run one store-driven phase with one pool and one termination rule."""
         self._phase_loop = asyncio.get_running_loop()
-        self._phase_event.set()
+        phase_event = self._get_phase_event()
+        phase_event.set()
         callbacks = _Callbacks(self, sample, 1 if canary else None)
         pool = self._phase_pool
         if pool is None:
@@ -653,11 +666,12 @@ class JobRunner:
                     break
                 if canary and callbacks.attempt_ended:
                     break
-                self._phase_event.clear()
+                phase_event = self._get_phase_event()
+                phase_event.clear()
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._phase_event.wait(), 1.0)
+                    await asyncio.wait_for(phase_event.wait(), 1.0)
         finally:
-            self._phase_event.set()
+            self._get_phase_event().set()
             if not canary and self._phase_pool is pool and self._state() is not JobState.paused:
                 self._phase_pool = None
 

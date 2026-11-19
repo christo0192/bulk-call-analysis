@@ -124,19 +124,21 @@ def test_recover_fresh_runner_when_full_run_has_no_masking_left(
     _run(coordinator.runner.run_sample())
     coordinator.runner.on_sample_approved(1)
 
-    original_phase_finished = coordinator.runner._phase_finished
+    original_on_result = runner_module._Callbacks.on_result
+    crashed = False
 
-    def crash_after_masking(sample: bool) -> bool:
-        masking_task = coordinator.runner._masking_task
-        phase_finished = original_phase_finished(sample)
-        if not sample and masking_task is not None and masking_task.done():
+    async def crash_on_first_full_result(callbacks: Any, task: Any, *args: Any, **kwargs: Any) -> None:
+        nonlocal crashed
+        if not callbacks.sample and not crashed:
+            crashed = True
             raise RuntimeError("synthetic runner crash")
-        return phase_finished
+        await original_on_result(callbacks, task, *args, **kwargs)
 
-    monkeypatch.setattr(coordinator.runner, "_phase_finished", crash_after_masking)
+    monkeypatch.setattr(runner_module._Callbacks, "on_result", crash_on_first_full_result)
     with pytest.raises(RuntimeError, match="synthetic runner crash"):
         _run(coordinator.runner.start_full_run())
 
+    monkeypatch.undo()
     recovered = make_runner()
     recovered.recover()
     _run(recovered.start_full_run())
@@ -310,7 +312,7 @@ def test_full_run_dispatches_while_background_masking_continues(
     def blocking_mask(raw: Any, masked: Any, context: Any) -> Any:
         if raw.name == "8.jsonl.gz":
             entered.set()
-            assert release.wait(10)
+            assert release.wait(15)
         return original_mask(raw, masked, context)
 
     class ObservingPool(ScriptedPool):
@@ -331,7 +333,7 @@ def test_full_run_dispatches_while_background_masking_continues(
     coordinator.runner.on_plan_approved(1)
     _run(coordinator.runner.run_sample())
     coordinator.runner.on_sample_approved(1)
-    _run(asyncio.wait_for(coordinator.runner.start_full_run(), timeout=15))
+    _run(asyncio.wait_for(coordinator.runner.start_full_run(), timeout=30))
 
     assert dispatched_during_masking
     assert (

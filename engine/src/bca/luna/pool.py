@@ -115,6 +115,7 @@ class LunaPool:
         self._completed = 0
         self._backoff = 0.0
         self._restart_lock = asyncio.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._crashes: list[float] = []
         self._models: set[str] = set()
         self._needs_recycle = False
@@ -143,6 +144,10 @@ class LunaPool:
             await self._interrupt_all(reason)
 
     async def run_until_idle(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            self._restart_lock = asyncio.Lock()
+            self._loop = loop
         self._stopping = False
         self._paused = False
         self._latched_decision = None
