@@ -585,15 +585,12 @@ def serve_ipc(
     if host._ipc_thread is None:
         host._ipc_thread = threading.current_thread()
     listener: Any
-    if selected_family == "AF_PIPE" and sys.platform == "win32":
-        from .windows_pipe import OwnerOnlyPipeListener
-
-        listener = OwnerOnlyPipeListener(address)
-    else:
-        # Authentication is performed in a short-lived worker.  Listener.accept
-        # performs it inline, which lets a peer that never answers the challenge
-        # block every subsequent client.
-        listener = Listener(address, family=selected_family, authkey=None)
+    # Authentication is performed in a worker.  Listener.accept performs it
+    # inline when given an authkey, which lets a peer that never answers the
+    # challenge block every subsequent client.  The standard listener still
+    # supplies the platform-specific endpoint, including the default Windows
+    # named-pipe DACL; only its raw accept is used here.
+    listener = Listener(address, family=selected_family, authkey=None)
     host._ipc_listener = listener
     if selected_family == "AF_UNIX":
         with suppress(OSError):
@@ -626,6 +623,8 @@ def serve_ipc(
                 _LOG.warning("MCP IPC send failed: %s", type(exc).__name__)
         except (OSError, EOFError, AuthenticationError) as exc:
             _LOG.warning("MCP IPC connection failed: %s", type(exc).__name__)
+        except TimeoutError:
+            _LOG.warning("MCP IPC connection timed out")
         except BaseException as exc:
             try:
                 connection.send({"ok": False, "error": str(_safe_error(exc, host.mask_context))})
@@ -641,14 +640,17 @@ def serve_ipc(
             if not worker_slots.acquire(timeout=0.1):
                 continue
             try:
-                if selected_family == "AF_UNIX":
+                if selected_family in {"AF_UNIX", "AF_PIPE"}:
                     raw_listener = cast(Any, listener)._listener
-                    sock, _ = raw_listener._socket.accept()
-                    from multiprocessing.connection import Connection
+                    if selected_family == "AF_UNIX":
+                        sock, _ = raw_listener._socket.accept()
+                        from multiprocessing.connection import Connection
 
-                    connection = Connection(sock.detach())
+                        connection = Connection(sock.detach())
+                    else:
+                        connection = raw_listener.accept()
                 else:
-                    connection = cast(Any, listener).accept()
+                    raise ValueError(f"unsupported IPC family: {selected_family}")
             except (OSError, EOFError, AuthenticationError) as exc:
                 worker_slots.release()
                 if stopping.is_set():

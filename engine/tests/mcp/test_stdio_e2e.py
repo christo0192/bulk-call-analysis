@@ -53,7 +53,7 @@ def test_bq_stdio_shim_round_trips_to_host(tmp_path: Path) -> None:
             assert payload["rows"] == [{"phone": "Call [PHONE]", "count": 7}]
 
     try:
-        asyncio.run(exercise())
+        asyncio.run(asyncio.wait_for(exercise(), timeout=30))
     finally:
         host.close()
         assert not thread.is_alive()
@@ -98,7 +98,7 @@ def test_app_stdio_shim_returns_short_errors_and_caps_large_strings(tmp_path: Pa
             assert len(large_text) <= 40_000
 
     try:
-        asyncio.run(exercise())
+        asyncio.run(asyncio.wait_for(exercise(), timeout=30))
     finally:
         host.close()
         assert not thread.is_alive()
@@ -141,7 +141,7 @@ def test_bq_stdio_shim_preserves_refusal_and_validation_reasons(tmp_path: Path) 
             assert "Traceback" not in invalid_text
 
     try:
-        asyncio.run(exercise())
+        asyncio.run(asyncio.wait_for(exercise(), timeout=30))
     finally:
         host.close()
         assert not thread.is_alive()

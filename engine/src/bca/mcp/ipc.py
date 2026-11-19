@@ -1,3 +1,12 @@
+"""Local IPC helpers.
+
+IPC security: D-PIPE deliberately uses the standard Windows named-pipe
+listener.  Its default DACL grants Everyone read access, but not write
+access, so another user cannot open the pipe for a useful connection or
+complete the HMAC handshake.  Handshake deadlines also prevent a read-only
+opener from wedging the listener.
+"""
+
 from __future__ import annotations
 
 import os

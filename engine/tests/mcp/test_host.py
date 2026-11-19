@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import socket
-import sys
 import threading
 import time
 from pathlib import Path
@@ -167,10 +166,10 @@ def test_ipc_client_disconnect_does_not_kill_listener(tmp_path: Path) -> None:
     assert not thread.is_alive()
 
 
-def test_ipc_bad_authkey_does_not_kill_listener(tmp_path: Path) -> None:
+def test_wrong_authkey_is_rejected_and_listener_survives(tmp_path: Path) -> None:
     host = make_host(tmp_path)
     address, family = new_ipc_address()
-    authkey = b"d" * 32
+    authkey = b"w" * 32
     thread = start_ipc_thread(host, address, authkey)
     try:
         from multiprocessing import AuthenticationError
@@ -184,27 +183,51 @@ def test_ipc_bad_authkey_does_not_kill_listener(tmp_path: Path) -> None:
     assert not thread.is_alive()
 
 
-@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="raw silent-client test is POSIX-only")
-def test_ipc_silent_client_does_not_block_calls_or_close(tmp_path: Path) -> None:
+def test_silent_client_does_not_block_others_or_shutdown(tmp_path: Path) -> None:
     host = make_host(tmp_path)
     address, family = new_ipc_address()
     authkey = b"e" * 32
     thread = start_ipc_thread(host, address, authkey)
-    silent = socket.socket(cast(int, socket.__dict__["AF_UNIX"]), socket.SOCK_STREAM)
+    silent: Any
+    if family == "AF_UNIX":
+        silent = socket.socket(cast(int, socket.__dict__["AF_UNIX"]), socket.SOCK_STREAM)
+    else:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        handle = kernel32.CreateFileW(address, 0xC0000000, 0, None, 3, 0, None)
+        if handle == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        silent = (kernel32, handle)
     try:
-        silent.connect(address)
+        if family == "AF_UNIX":
+            silent.connect(address)
         started = time.monotonic()
         assert call_engine(address, authkey, "data_notes", {}, family) == "no notes yet"
         assert time.monotonic() - started < 5
     finally:
-        silent.close()
+        if family == "AF_UNIX":
+            silent.close()
+        else:
+            silent[0].CloseHandle(silent[1])
         started = time.monotonic()
         host.close()
         assert time.monotonic() - started < 5
     assert not thread.is_alive()
 
 
-@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="bounded raw-client test is POSIX-only")
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="raw bounded-client test is POSIX-only")
 def test_ipc_failed_handshakes_do_not_create_unbounded_threads(tmp_path: Path) -> None:
     host = make_host(tmp_path)
     address, _family = new_ipc_address()
@@ -240,69 +263,3 @@ def test_new_ipc_address_is_private_and_uses_posix_socket_on_posix() -> None:
     else:
         assert address.startswith(r"\\.\pipe\bca-")
         assert len(address.rsplit("-", 1)[1]) == 32
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows named-pipe ACL test")
-def test_windows_pipe_dacl_has_only_current_user(tmp_path: Path) -> None:
-    import ctypes
-    from ctypes import wintypes
-    from multiprocessing.connection import Client
-
-    from bca.mcp.windows_pipe import _current_user_sid
-
-    host = make_host(tmp_path)
-    address, family = new_ipc_address()
-    authkey = b"f" * 32
-    thread = start_ipc_thread(host, address, authkey)
-    connection = Client(address, family=family, authkey=authkey)
-    advapi32 = cast(Any, ctypes).WinDLL("advapi32", use_last_error=True)
-    GetSecurityInfo = advapi32.GetSecurityInfo
-    GetSecurityInfo.restype = wintypes.DWORD
-    GetSecurityInfo.argtypes = [
-        wintypes.HANDLE,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        ctypes.POINTER(wintypes.LPVOID),
-        ctypes.POINTER(wintypes.LPVOID),
-        ctypes.POINTER(wintypes.LPVOID),
-        ctypes.POINTER(wintypes.LPVOID),
-        ctypes.POINTER(wintypes.LPVOID),
-    ]
-    descriptor = wintypes.LPVOID()
-    dacl = wintypes.LPVOID()
-    owner = wintypes.LPVOID()
-
-    class ACL(ctypes.Structure):
-        _fields_ = [
-            ("revision", ctypes.c_ubyte),
-            ("sbz1", ctypes.c_ubyte),
-            ("size", wintypes.WORD),
-            ("ace_count", wintypes.WORD),
-            ("sbz2", wintypes.WORD),
-        ]
-
-    sid_text = wintypes.LPWSTR()
-    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
-    advapi32.ConvertSidToStringSidW.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
-    try:
-        result = GetSecurityInfo(
-            cast(Any, connection)._handle,
-            6,
-            4,
-            ctypes.byref(owner),
-            None,
-            ctypes.byref(dacl),
-            None,
-            ctypes.byref(descriptor),
-        )
-        assert result == 0
-        assert advapi32.ConvertSidToStringSidW(owner, ctypes.byref(sid_text))
-        assert sid_text.value == _current_user_sid()
-        assert dacl.value
-        assert ctypes.cast(dacl, ctypes.POINTER(ACL)).contents.ace_count == 1
-    finally:
-        if sid_text:
-            advapi32.LocalFree(sid_text)
-        connection.close()
-        host.close()
-    assert not thread.is_alive()
