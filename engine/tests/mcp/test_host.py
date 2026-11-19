@@ -151,9 +151,12 @@ def test_ipc_close_without_client_stops_thread(tmp_path: Path) -> None:
     host = make_host(tmp_path)
     address, _family = new_ipc_address()
     thread = start_ipc_thread(host, address, b"b" * 32)
-    started = time.monotonic()
-    host.close()
-    assert time.monotonic() - started < 5
+    try:
+        started = time.monotonic()
+        host.close()
+        assert time.monotonic() - started < 5
+    finally:
+        host.close()
     assert not thread.is_alive()
 
 
@@ -192,7 +195,7 @@ def test_wrong_authkey_is_rejected_and_listener_survives(tmp_path: Path) -> None
     assert not thread.is_alive()
 
 
-def test_silent_client_does_not_block_others_or_shutdown(tmp_path: Path) -> None:
+def test_ipc_close_with_silent_client_returns_quickly(tmp_path: Path) -> None:
     host = make_host(tmp_path)
     address, family = new_ipc_address()
     authkey = b"e" * 32

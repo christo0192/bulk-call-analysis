@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import gzip
+import hmac
 import json
 import logging
+import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -12,7 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import replace
 from multiprocessing import AuthenticationError
-from multiprocessing.connection import Client
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -534,27 +536,49 @@ class ToolHost:
 
     def close(self) -> None:
         """Stop a listener started with :func:`start_ipc_thread`."""
+        deadline = time.monotonic() + 5
         self._ipc_stop.set()
         address = self._ipc_address
         family = self._ipc_family
-        authkey = self._ipc_authkey
         listener = self._ipc_listener
+        if address is not None and family is not None:
+            _wake_ipc_listener(address, family)
         if listener is not None:
             with suppress(OSError):
                 cast(Any, listener).close()
-        if address is not None and family is not None and authkey is not None:
-            try:
-                wake = Client(address, family=family, authkey=authkey)
-                wake.close()
-            except (OSError, EOFError, AuthenticationError):
-                pass
         thread = self._ipc_thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=5)
+            thread.join(timeout=max(0, deadline - time.monotonic()))
         if address is not None and family is not None:
             _remove_ipc_socket(address, family)
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
             raise RuntimeError("IPC listener did not stop")
+
+
+def _wake_ipc_listener(address: str, family: str) -> None:
+    """Wake a raw accept without starting the multiprocessing auth handshake."""
+    try:
+        if family == "AF_PIPE" and sys.platform == "win32":
+            import _winapi
+
+            _winapi.WaitNamedPipe(address, 500)
+            handle = _winapi.CreateFile(
+                address,
+                _winapi.GENERIC_READ | _winapi.GENERIC_WRITE,
+                0,
+                0,
+                _winapi.OPEN_EXISTING,
+                0,
+                0,
+            )
+            _winapi.CloseHandle(handle)
+        elif family == "AF_UNIX":
+            unix_family = cast(int, socket.__dict__["AF_UNIX"])
+            with socket.socket(unix_family, socket.SOCK_STREAM) as wake:
+                wake.settimeout(1)
+                wake.connect(address)
+    except OSError:
+        pass
 
 
 def _remove_ipc_socket(address: str, family: str) -> None:
@@ -602,12 +626,16 @@ def serve_ipc(
 
     def handle(connection: Any) -> None:
         try:
-            from multiprocessing.connection import answer_challenge, deliver_challenge
-
-            deliver_challenge(connection, authkey)
+            challenge = b"{sha256}" + os.urandom(32)
+            connection.send_bytes(b"#CHALLENGE#" + challenge)
             if not connection.poll(1.0):
                 raise TimeoutError("IPC authentication timed out")
-            answer_challenge(connection, authkey)
+            response = connection.recv_bytes(256)
+            expected = b"{sha256}" + hmac.new(authkey, challenge, "sha256").digest()
+            if not hmac.compare_digest(response, expected):
+                connection.send_bytes(b"#FAILURE#")
+                raise AuthenticationError("digest sent was wrong")
+            connection.send_bytes(b"#WELCOME#")
             if stopping.is_set() or not connection.poll(1.0):
                 return
             request = connection.recv()
@@ -662,6 +690,11 @@ def serve_ipc(
                 stopping.wait(min(0.1 * (2 ** min(accept_failures - 1, 4)), 2.0))
                 continue
             accept_failures = 0
+            if stopping.is_set():
+                with suppress(OSError, EOFError):
+                    connection.close()
+                worker_slots.release()
+                break
 
             def run_worker(connection: Any = connection) -> None:
                 try:
