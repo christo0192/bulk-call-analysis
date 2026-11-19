@@ -144,6 +144,7 @@ pub fn run() {
                 hide_windows(app);
                 handle_exit(
                     app.try_state::<Engine>().map(|engine| engine.inner()),
+                    SHUTDOWN_STARTED.load(Ordering::Acquire),
                     SHUTDOWN_DONE.get().map(std::sync::Arc::as_ref),
                 );
             }
@@ -151,9 +152,13 @@ pub fn run() {
         })
 }
 
-fn handle_exit<R: tauri::Runtime>(engine: Option<&Engine<R>>, done: Option<&Notify>) {
+fn handle_exit<R: tauri::Runtime>(
+    engine: Option<&Engine<R>>,
+    shutdown_started: bool,
+    done: Option<&Notify>,
+) {
     let exit_deadline = Instant::now() + Duration::from_secs(10);
-    if !SHUTDOWN_STARTED.load(Ordering::Acquire) {
+    if !shutdown_started {
         if let Some(engine) = engine {
             let remaining = exit_deadline.saturating_duration_since(Instant::now());
             let completed = tauri::async_runtime::block_on(async move {
@@ -178,7 +183,16 @@ fn handle_exit<R: tauri::Runtime>(engine: Option<&Engine<R>>, done: Option<&Noti
     }
 }
 
-pub(crate) fn handle_tray_quit<R: tauri::Runtime>(_engine: Engine<R>, exit: impl FnOnce()) {
+pub(crate) fn handle_tray_quit<R: tauri::Runtime>(engine: Engine<R>, exit: impl FnOnce()) {
+    let done = SHUTDOWN_DONE
+        .get_or_init(|| std::sync::Arc::new(Notify::new()))
+        .clone();
+    if SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
+        exit();
+        return;
+    }
+    tauri::async_runtime::block_on(async { engine.shutdown().await });
+    done.notify_one();
     exit();
 }
 
@@ -211,9 +225,10 @@ fn start_shutdown(app: tauri::AppHandle) -> bool {
 mod tests {
     use super::{
         exit_action, handle_exit, handle_tray_quit, run_event_action, Engine, ExitAction,
-        RunEventAction,
+        RunEventAction, SHUTDOWN_STARTED,
     };
     use std::time::{Duration, Instant};
+    use tokio::sync::Notify;
 
     #[test]
     fn closing_last_window_keeps_engine_running() {
@@ -239,7 +254,7 @@ mod tests {
         let engine = Engine::<tauri::Wry>::new_without_app();
         let started = Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            handle_exit(Some(&engine), None);
+            handle_exit(Some(&engine), false, None);
         }));
         assert!(result.is_ok());
         assert!(started.elapsed() < Duration::from_secs(1));
@@ -247,6 +262,7 @@ mod tests {
 
     #[test]
     fn tray_quit_handler_does_not_require_an_entered_tokio_runtime() {
+        SHUTDOWN_STARTED.store(false, std::sync::atomic::Ordering::Release);
         let engine = Engine::<tauri::Wry>::new_without_app();
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let called_by_exit = called.clone();
@@ -258,6 +274,19 @@ mod tests {
         }));
         assert!(result.is_ok());
         assert!(called.load(std::sync::atomic::Ordering::Acquire));
+        assert!(SHUTDOWN_STARTED.load(std::sync::atomic::Ordering::Acquire));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn exit_handler_waits_for_an_existing_shutdown_without_a_runtime() {
+        let done = Notify::new();
+        done.notify_one();
+        let started = Instant::now();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle_exit::<tauri::Wry>(None, true, Some(&done));
+        }));
+        assert!(result.is_ok());
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

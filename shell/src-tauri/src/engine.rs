@@ -356,7 +356,8 @@ impl<R: Runtime> Engine<R> {
     }
     pub(crate) async fn force_terminate(&self) {
         if let Some(guard) = self.inner.guard.lock().await.clone() {
-            let _ = tokio::task::spawn_blocking(move || guard.terminate()).await;
+            let grace = exit_backstop_grace();
+            let _ = tokio::task::spawn_blocking(move || guard.terminate_with_grace(grace)).await;
         }
     }
     async fn set_status(&self, status: &str, reason: Option<String>) {
@@ -425,6 +426,17 @@ pub fn job_event_requires_keep_awake(notification: &Value) -> Option<bool> {
             .and_then(Value::as_str)
             .map(is_running_job_state),
         _ => None,
+    }
+}
+
+pub(crate) fn exit_backstop_grace() -> Duration {
+    #[cfg(target_os = "macos")]
+    {
+        Duration::from_secs(1)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Duration::from_secs(5)
     }
 }
 
@@ -536,6 +548,74 @@ mod health_tests {
     }
 
     #[test]
+    fn health_ping_terminates_after_three_slow_replies() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (writer, server_io) = tokio::io::duplex(1024);
+            let client = Client::with_write_timeout(writer, Duration::from_secs(1));
+            let target = Arc::new(FakeSpawner {
+                kills: AtomicUsize::new(0),
+            });
+            let mut server = BufReader::new(server_io);
+            let health = tokio::spawn(health_ping_with_intervals(
+                client,
+                target.clone(),
+                || async {},
+                Duration::from_millis(10),
+                Duration::from_millis(1),
+            ));
+            for _ in 0..3 {
+                let mut line = String::new();
+                server.read_line(&mut line).await.unwrap();
+            }
+            health.await.unwrap();
+            assert_eq!(target.kills.load(Ordering::Relaxed), 1);
+        });
+    }
+
+    #[test]
+    fn health_ping_resets_failures_after_a_slow_reply() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (writer, server_io) = tokio::io::duplex(1024);
+            let client = Client::with_write_timeout(writer, Duration::from_secs(1));
+            let response_client = client.clone();
+            let target = Arc::new(FakeSpawner {
+                kills: AtomicUsize::new(0),
+            });
+            let success = Arc::new(tokio::sync::Notify::new());
+            let success_for_callback = success.clone();
+            let mut server = BufReader::new(server_io);
+            let health = tokio::spawn(health_ping_with_intervals(
+                client,
+                target.clone(),
+                move || {
+                    let success = success_for_callback.clone();
+                    async move { success.notify_one() }
+                },
+                Duration::from_millis(10),
+                Duration::from_millis(1),
+            ));
+            for _ in 0..2 {
+                let mut line = String::new();
+                server.read_line(&mut line).await.unwrap();
+            }
+            let mut line = String::new();
+            server.read_line(&mut line).await.unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let (notifications, _) = mpsc::channel(1);
+            response_client
+                .dispatch(json!({"id": request["id"], "result": true}), &notifications)
+                .await;
+            tokio::time::timeout(Duration::from_secs(1), success.notified())
+                .await
+                .unwrap();
+            assert_eq!(target.kills.load(Ordering::Relaxed), 0);
+            health.abort();
+        });
+    }
+
+    #[test]
     fn job_events_hold_and_release_power() {
         assert_eq!(
             job_event_requires_keep_awake(&json!({"method":"job/progress"})),
@@ -582,13 +662,12 @@ mod health_tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let mut command = if cfg!(windows) {
-                let mut command = Command::new("cmd");
-                command.args(["/C", "ping -n 60 127.0.0.1 > NUL"]);
-                command
+                configured_command(
+                    "cmd".into(),
+                    vec!["/C".into(), "ping -n 60 127.0.0.1 > NUL".into()],
+                )
             } else {
-                let mut command = Command::new("sleep");
-                command.arg("60");
-                command
+                configured_command("sleep".into(), vec!["60".into()])
             };
             let mut child = command
                 .stdin(std::process::Stdio::piped())
@@ -600,8 +679,18 @@ mod health_tests {
             let guard = Arc::new(procguard::attach(pid).unwrap());
             let stdin = child.stdin.take().unwrap();
             let engine = Engine::<tauri::Wry>::new_without_app();
-            *engine.inner.rpc.lock().await =
-                Some(Client::with_write_timeout(stdin, Duration::from_millis(20)));
+            let client = Client::with_write_timeout(stdin, Duration::from_secs(5));
+            let jam = client.clone();
+            let jammed = tokio::spawn(async move {
+                jam.notify(
+                    "jam",
+                    json!({"data": "x".repeat(4 * 1024 * 1024)}),
+                    Duration::from_secs(5),
+                )
+                .await
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            *engine.inner.rpc.lock().await = Some(client);
             *engine.inner.guard.lock().await = Some(guard);
             engine.inner.active_pid.store(pid, Ordering::Release);
 
@@ -610,7 +699,15 @@ mod health_tests {
             assert!(started.elapsed() < Duration::from_secs(2));
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert!(child.try_wait().unwrap().is_some());
+            let _ = jammed.await;
         });
+    }
+
+    #[test]
+    fn exit_backstop_uses_a_short_grace() {
+        assert!(exit_backstop_grace() <= Duration::from_secs(5));
+        #[cfg(target_os = "macos")]
+        assert!(exit_backstop_grace() <= Duration::from_secs(1));
     }
 }
 

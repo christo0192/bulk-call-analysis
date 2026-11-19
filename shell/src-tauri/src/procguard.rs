@@ -105,6 +105,10 @@ impl Guard {
     pub fn terminate(&self) {
         terminate_group(self.0);
     }
+
+    pub fn terminate_with_grace(&self, grace: std::time::Duration) {
+        terminate_group_with_grace(self.0, grace);
+    }
 }
 
 #[cfg(windows)]
@@ -124,5 +128,9 @@ impl Guard {
         unsafe {
             let _ = TerminateJobObject(self.0, 1);
         }
+    }
+
+    pub fn terminate_with_grace(&self, _grace: std::time::Duration) {
+        self.terminate();
     }
 }
