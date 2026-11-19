@@ -695,9 +695,12 @@ class ToolHost:
         validate_rules(spec.rules, spec.output_schema)
         job_dir = self._job_dir(spec.job_id)
         existing = self.store.rows(
-            "SELECT state FROM jobs WHERE id=? AND project_id=?", (spec.job_id, self.project_id)
+            "SELECT state, resume_state FROM jobs WHERE id=? AND project_id=?",
+            (spec.job_id, self.project_id),
         )
-        if existing and str(existing[0][0]) in {"sample_running", "full_running"}:
+        state = str(existing[0][0]) if existing else None
+        resume_state = str(existing[0][1]) if existing and existing[0][1] else None
+        if state == "sample_running":
             raise ToolRefusalError("Pause the job before editing its plan.")
         if hasattr(spec.lead_source, "ids_file"):
             ids_file = Path(str(cast(Any, spec.lead_source).ids_file))
@@ -710,7 +713,14 @@ class ToolHost:
         if owner and str(owner[0][0]) != self.project_id:
             raise ToolHostError("job id already in use")
         created = not existing
-        if existing and str(existing[0][0]) in {
+        if state in {
+            "full_running",
+            "quote_check",
+            "building_output",
+            "verifying",
+            "done",
+            "done_with_issues",
+        } or resume_state in {
             "full_running",
             "quote_check",
             "building_output",
