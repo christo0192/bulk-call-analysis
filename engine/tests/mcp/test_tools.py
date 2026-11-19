@@ -157,7 +157,7 @@ def test_sample_reference_round_trip_keeps_the_same_masked_lead(tmp_path: Path) 
             "title",
             "question",
             LeadSourceSql("SELECT '1001' AS lead_id"),
-            output_schema={},
+            output_schema={"type": "object", "properties": {}},
         ),
         tmp_path / "jobs" / "job",
     )

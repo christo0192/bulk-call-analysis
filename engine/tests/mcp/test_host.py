@@ -102,7 +102,7 @@ def test_bq_query_stops_a_bounded_page_producer(tmp_path: Path) -> None:
     result = make_host(tmp_path, runner).call("bq_query", {"sql": "SELECT 1", "max_rows": 1})
     assert result["truncated"] is True  # type: ignore[index]
     assert result["more_rows"] is True  # type: ignore[index]
-    assert "aggregate in SQL or narrow the query" in str(result["hint"])  # type: ignore[index]
+    assert "aggregate in sql or narrow the query" in str(result["hint"]).lower()  # type: ignore[index]
     released.set()
     assert runner.producer_thread is not None
     runner.producer_thread.join(timeout=2)
