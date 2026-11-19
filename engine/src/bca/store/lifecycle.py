@@ -256,3 +256,20 @@ def resume(store: Store, job_id: str) -> None:
         if changed.rowcount != 1:
             raise TransitionError("job changed before resume")
         _event(cur, job_id, JobState.paused, target, "resumed")
+
+
+def replace_pause(store: Store, job_id: str, reason: PauseReason, resume_at: int | None = None) -> None:
+    current, _, _, _ = _job(store, job_id)
+    if current != JobState.paused:
+        raise TransitionError("job is not paused")
+    with store.transaction() as cur:
+        changed = cur.execute(
+            "UPDATE jobs SET pause_reason=?, resume_at=?, updated_at=? WHERE id=? AND state='paused'",
+            (reason, resume_at, _timestamp(), job_id),
+        )
+        if changed.rowcount != 1:
+            raise TransitionError("job changed before pause replacement")
+        cur.execute(
+            "INSERT INTO job_events(job_id, ts, kind, data_json) VALUES (?, ?, 'pause', ?)",
+            (job_id, _timestamp(), json.dumps({"reason": reason, "resume_at": resume_at, "replaced": True})),
+        )

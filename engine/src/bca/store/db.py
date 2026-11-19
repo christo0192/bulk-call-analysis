@@ -100,7 +100,13 @@ class Store:
             )
 
     def start_attempt(
-        self, job_id: str, lead_id: str, model: str, counted: bool = True, claimed: bool = False
+        self,
+        job_id: str,
+        lead_id: str,
+        model: str,
+        counted: bool = True,
+        claimed: bool = False,
+        spec_version: int | None = None,
     ) -> str:
         attempt_id, now = str(uuid.uuid4()), _now()
         with self.transaction() as cur:
@@ -121,6 +127,8 @@ class Store:
             spec = cur.execute("SELECT spec_version FROM jobs WHERE id=?", (job_id,)).fetchone()
             if spec is None:
                 raise ClaimError(f"job {job_id!r} not found")
+            if spec_version is not None and int(spec[0]) != spec_version:
+                raise ClaimError("attempt spec version is stale")
             cur.execute(
                 "UPDATE attempts SET ended_at=?, outcome='interrupted', counted=0 "
                 "WHERE job_id=? AND lead_id=? AND ended_at IS NULL",
@@ -262,7 +270,8 @@ class Store:
     def count_uncounted_failures(self, job_id: str, lead_id: str) -> int:
         rows = self.rows(
             "SELECT COUNT(*) FROM attempts WHERE job_id=? AND lead_id=? AND outcome='failed' "
-            "AND counted=0 AND COALESCE(error_code, '') NOT IN ('quota_interrupt', 'interrupted')",
+            "AND counted=0 AND COALESCE(error_code, '') NOT IN "
+            "('quota_interrupt', 'interrupted', 'appserver_crash', 'appserver_restart')",
             (job_id, lead_id),
         )
         return int(rows[0][0]) if rows else 0

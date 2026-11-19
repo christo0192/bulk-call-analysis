@@ -65,6 +65,9 @@ class CoordinatorPool(Protocol):
 
     async def run_until_idle(self) -> None: ...
 
+    @property
+    def pending_pause(self) -> tuple[str, int | None] | None: ...
+
 
 MaskerFactory = Callable[..., MaskingContext]
 MAX_UNCOUNTED_FAILURES = 4
@@ -106,7 +109,8 @@ class _Callbacks(PoolCallbacks):
         self._tasks = sorted(tasks, key=lambda task: task.lead_id)
 
     def _queue_tasks(self, tasks: list[LeadTask]) -> None:
-        self._tasks.extend(tasks)
+        version = self.runner._job_spec_version()
+        self._tasks.extend(task for task in tasks if task.spec_version == version)
         self._tasks.sort(key=lambda task: task.lead_id)
 
     @property
@@ -115,6 +119,8 @@ class _Callbacks(PoolCallbacks):
 
     async def next_tasks(self, n: int) -> list[LeadTask]:
         while True:
+            current_version = self.runner._job_spec_version()
+            self._tasks = [task for task in self._tasks if task.spec_version == current_version]
             if self.runner._state() is not self.runner._phase_state(self.sample):
                 return []
             if self._dispatch_limit == 0:
@@ -160,18 +166,27 @@ class _Callbacks(PoolCallbacks):
 
     async def on_started(self, task: LeadTask) -> bool:
         self._claimed.discard(task.lead_id)
-        if self.runner._state() is not self.runner._phase_state(self.sample):
+        if (
+            self.runner._state() is not self.runner._phase_state(self.sample)
+            or task.spec_version != self.runner._job_spec_version()
+        ):
             self.runner.deps.store.release_claim(self.runner.job_id, task.lead_id)
             self.runner._closed_attempts.add(task.attempt_id)
             return False
         try:
             attempt = self.runner.deps.store.start_attempt(
-                self.runner.job_id, task.lead_id, task.model, counted=True, claimed=True
+                self.runner.job_id,
+                task.lead_id,
+                task.model,
+                counted=True,
+                claimed=True,
+                spec_version=task.spec_version,
             )
         except ClaimError:
             # A pause or another outcome can release a lazy claim after the
             # pool has selected the task but before its worker starts.
             self.runner._closed_attempts.add(task.attempt_id)
+            self.runner.deps.store.release_claim(self.runner.job_id, task.lead_id)
             return False
         self.runner._attempts[task.attempt_id] = attempt
         self.runner._publish("lead_started", {"lead_id": task.lead_id, "attempt_id": attempt})
@@ -179,6 +194,15 @@ class _Callbacks(PoolCallbacks):
         return True
 
     async def on_result(
+        self, task: LeadTask, answer: dict[str, Any], model_used: str, usage: dict[str, Any] | None
+    ) -> None:
+        try:
+            await self._on_result(task, answer, model_used, usage)
+        except Exception as exc:
+            LOGGER.error("result callback failed for attempt %s", task.attempt_id, exc_info=exc)
+            await self.runner._callback_error(task.attempt_id)
+
+    async def _on_result(
         self, task: LeadTask, answer: dict[str, Any], model_used: str, usage: dict[str, Any] | None
     ) -> None:
         attempt = self.runner._attempts.get(task.attempt_id)
@@ -220,7 +244,7 @@ class _Callbacks(PoolCallbacks):
             stored_answer,
             ok,
             stored_flags,
-            self.runner.spec.spec_version,
+            task.spec_version,
             model_used,
             usage,
             clear_repair_pending=is_repair,
@@ -254,6 +278,13 @@ class _Callbacks(PoolCallbacks):
         self.runner._eta.completed(self.runner._ts())
 
     async def on_failure(self, task: LeadTask, error_code: str, counted: bool, detail: str) -> None:
+        try:
+            await self._on_failure(task, error_code, counted, detail)
+        except Exception as exc:
+            LOGGER.error("failure callback failed for attempt %s", task.attempt_id, exc_info=exc)
+            await self.runner._callback_error(task.attempt_id)
+
+    async def _on_failure(self, task: LeadTask, error_code: str, counted: bool, detail: str) -> None:
         self._claimed.discard(task.lead_id)
         self.attempt_ended = True
         self.runner._get_phase_event().set()
@@ -298,14 +329,20 @@ class _Callbacks(PoolCallbacks):
                         self.runner.job_id, task.lead_id
                     )
                     self._uncounted[task.lead_id] = retries
-                    if retries >= MAX_UNCOUNTED_FAILURES:
+                    if retries >= MAX_UNCOUNTED_FAILURES and error_code not in {
+                        "appserver_crash",
+                        "appserver_restart",
+                    }:
                         await self.on_pause("network", None)
                     else:
                         self._queue_tasks([replace(task, attempt_id=str(uuid.uuid4()))])
             elif not counted:
                 retries = self.runner.deps.store.count_uncounted_failures(self.runner.job_id, task.lead_id)
                 self._uncounted[task.lead_id] = retries
-                if retries >= MAX_UNCOUNTED_FAILURES:
+                if retries >= MAX_UNCOUNTED_FAILURES and error_code not in {
+                    "appserver_crash",
+                    "appserver_restart",
+                }:
                     await self.on_pause("network", None)
                 else:
                     self._queue_tasks([replace(task, attempt_id=str(uuid.uuid4()))])
@@ -333,9 +370,15 @@ class _Callbacks(PoolCallbacks):
                 JobState.done_with_issues,
             }:
                 if self.runner._pause_task is None or self.runner._pause_task.done():
-                    await self.runner._persist_pause(PauseReason.sleep.value, None)
+                    parked = (
+                        getattr(self.runner._phase_pool, "pending_pause", None)
+                        if self.runner._phase_pool is not None
+                        else None
+                    )
+                    pause_reason, pause_resume_at = parked or (PauseReason.sleep.value, None)
+                    await self.runner._persist_pause(pause_reason, pause_resume_at)
                     self.runner._pause_task = asyncio.create_task(
-                        self.runner._drain_persisted_pause(PauseReason.sleep.value, None)
+                        self.runner._drain_persisted_pause(pause_reason, pause_resume_at)
                     )
                     self.runner._pause_task.add_done_callback(self.runner._pause_task_done)
                 self.runner._liveness.sleep_detected(ts)
@@ -445,6 +488,24 @@ class JobRunner:
         self._pause_finished = False
         self._wake_requested = False
         self._wake_network_unavailable = False
+
+    def _job_spec_version(self) -> int:
+        rows = self.deps.store.rows("SELECT spec_version FROM jobs WHERE id=?", (self.job_id,))
+        if not rows:
+            raise ValueError(f"job not found: {self.job_id}")
+        return int(rows[0][0])
+
+    async def _callback_error(self, attempt_id: str) -> None:
+        attempt = self._attempts.get(attempt_id)
+        if attempt is not None:
+            self._close_attempt(attempt_id)
+            try:
+                self.deps.store.fail_attempt(
+                    attempt, "callback_error", True, self.deps.config.limits.lead_max_attempts
+                )
+            except ValueError:
+                LOGGER.warning("callback error found an already closed attempt %s", attempt_id)
+        self._get_phase_event().set()
 
     def _ts(self) -> float:
         return self.deps.clock.now() if self.deps.clock is not None else time.time()
@@ -680,6 +741,7 @@ class JobRunner:
                     self.spec.luna_model,
                     self.spec.luna_effort,
                     is_repair,
+                    self.spec.spec_version,
                 )
             )
         return result
@@ -735,6 +797,9 @@ class JobRunner:
                 resume_at = int(row[0][1]) if row[0][1] is not None else None
         self._pause_reason = reason
         self._pause_resume_at = resume_at
+        if reason != PauseReason.sleep.value:
+            self._wake_requested = False
+            self._wake_network_unavailable = False
         self._pause_finished = False
         if self._pause_started is None:
             self._pause_started = self._ts()
@@ -777,7 +842,17 @@ class JobRunner:
 
     async def _pause_with_pool(self, reason: str, resume_at: int | None, *, wait_for_phase: bool) -> None:
         if self._state() is JobState.paused:
-            LOGGER.info("keeping existing pause while ignoring later pause %s", reason)
+            row = self.deps.store.rows("SELECT pause_reason FROM jobs WHERE id=?", (self.job_id,))
+            if row and row[0][0] == PauseReason.sleep.value and reason != PauseReason.sleep.value:
+                from bca.store import replace_pause
+
+                replace_pause(self.deps.store, self.job_id, PauseReason(reason), resume_at)
+                self._pause_reason = reason
+                self._pause_resume_at = resume_at
+                self._wake_requested = False
+                self._wake_network_unavailable = False
+            else:
+                LOGGER.info("keeping existing pause while ignoring later pause %s", reason)
             if wait_for_phase and self._phase_running and self._phase_done is not None:
                 await self._phase_done.wait()
             return
@@ -874,6 +949,7 @@ class JobRunner:
         self._phase_loop = asyncio.get_running_loop()
         self._phase_running = True
         self._phase_done = asyncio.Event()
+        phase_spec_version = self._job_spec_version()
         phase_event = self._get_phase_event()
         phase_event.set()
         callbacks = _Callbacks(self, sample, 1 if canary else None)
@@ -895,6 +971,8 @@ class JobRunner:
         try:
             while True:
                 await pool.run_until_idle()
+                if self._job_spec_version() != phase_spec_version:
+                    break
                 if self._wake_requested and self._state() is JobState.paused:
                     await self._finish_pause(
                         self._pause_reason or PauseReason.sleep.value,
@@ -957,6 +1035,10 @@ class JobRunner:
                 self._phase_pool = None
 
     def on_plan_approved(self, expected_spec_version: int) -> None:
+        if self._phase_running:
+            raise TransitionError("cannot approve a plan while the previous phase is draining")
+        self._wake_requested = False
+        self._wake_network_unavailable = False
         self._refresh_spec(expected_spec_version)
         approve_plan(self.deps.store, self.job_id, "operator", expected_spec_version)
         transition(self.deps.store, self.job_id, JobState.pulling)
