@@ -38,6 +38,8 @@ class PauseReason(StrEnum):
     auth = "auth"
     model_unavailable = "model_unavailable"
     error_storm = "error_storm"
+    network = "network"
+    spend_control = "spend_control"
 
 
 class TransitionError(ValueError):
@@ -213,7 +215,7 @@ def edit_spec(store: Store, job_id: str, spec_version: int) -> None:
         _event(cur, job_id, current, JobState.plan_proposed, "spec edited")
 
 
-def pause(store: Store, job_id: str, reason: PauseReason) -> None:
+def pause(store: Store, job_id: str, reason: PauseReason, resume_at: int | None = None) -> None:
     current, _, remembered, _ = _job(store, job_id)
     if current not in {
         JobState.pulling,
@@ -229,8 +231,8 @@ def pause(store: Store, job_id: str, reason: PauseReason) -> None:
     with store.transaction() as cur:
         resume_target = remembered if current == JobState.stalled and remembered is not None else current
         changed = cur.execute(
-            "UPDATE jobs SET state='paused', pause_reason=?, resume_state=?, updated_at=? WHERE id=? AND state=?",
-            (reason, resume_target, _timestamp(), job_id, current),
+            "UPDATE jobs SET state='paused', pause_reason=?, resume_state=?, resume_at=?, updated_at=? WHERE id=? AND state=?",
+            (reason, resume_target, resume_at, _timestamp(), job_id, current),
         )
         if changed.rowcount != 1:
             raise TransitionError("job changed before pause")
@@ -243,7 +245,7 @@ def resume(store: Store, job_id: str) -> None:
         raise TransitionError("job is not paused")
     with store.transaction() as cur:
         changed = cur.execute(
-            "UPDATE jobs SET state=?, pause_reason=NULL, resume_state=NULL, updated_at=? WHERE id=? AND state='paused' AND resume_state=?",
+            "UPDATE jobs SET state=?, pause_reason=NULL, resume_state=NULL, resume_at=NULL, updated_at=? WHERE id=? AND state='paused' AND resume_state=?",
             (target, _timestamp(), job_id, target),
         )
         if changed.rowcount != 1:

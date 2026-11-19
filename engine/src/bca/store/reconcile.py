@@ -53,11 +53,14 @@ def reconcile_rows(
         leads[lead_id] = status
         if status not in {item.value for item in LeadStatus}:
             problems.append(f"unknown lead status {status} for {lead_id}")
-        if _as_int(row[2]) != _as_int(row[3]) + _as_int(row[4]):
+        unusable = _as_int(row[5]) if len(row) > 5 else 0
+        pulled, sent, capped = (_as_int(row[index]) for index in (2, 3, 4))
+        mismatch = pulled != sent + capped + unusable if pulled else bool(sent + capped)
+        if mismatch:
             problems.append(f"call identity mismatch for {lead_id}")
     distinct = _as_int(intake[1]) if intake else 0
     duplicates = _as_int(intake[2]) if intake else 0
-    if len(leads) != distinct:
+    if intake and len(leads) != distinct:
         problems.append(f"lead identity mismatch: {distinct} distinct ids in, {len(leads)} leads stored")
     if intake and _as_int(intake[0]) != _as_int(intake[1]) + _as_int(intake[2]) + _as_int(intake[3]):
         problems.append("id intake counts do not reconcile")
@@ -88,7 +91,8 @@ def reconcile(store: Store, job_id: str, *, final: bool = False) -> Reconciliati
         "SELECT raw_count, distinct_count, duplicates, malformed FROM id_intake WHERE job_id=?", (job_id,)
     )
     leads = store.rows(
-        "SELECT lead_id, status, calls_pulled, calls_sent, calls_dropped_cap FROM leads WHERE job_id=?",
+        "SELECT lead_id, status, calls_pulled, calls_sent, calls_dropped_cap, calls_dropped_unusable "
+        "FROM leads WHERE job_id=?",
         (job_id,),
     )
     results = store.rows("SELECT r.lead_id, r.attempt_id FROM results r WHERE r.job_id=?", (job_id,))

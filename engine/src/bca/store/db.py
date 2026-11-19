@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
+LATEST_SCHEMA_VERSION = 5
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -72,7 +74,15 @@ class Store:
     def add_lead(
         self, job_id: str, lead_id: str, status: LeadStatus | str = LeadStatus.pending, **counts: int
     ) -> None:
-        allowed = {"reason", "in_sample", "calls_pulled", "calls_sent", "calls_dropped_cap", "chars"}
+        allowed = {
+            "reason",
+            "in_sample",
+            "calls_pulled",
+            "calls_sent",
+            "calls_dropped_cap",
+            "calls_dropped_unusable",
+            "chars",
+        }
         if set(counts) - allowed:
             raise ValueError("unknown lead count")
         cols = ["job_id", "lead_id", "status", *counts]
@@ -89,20 +99,31 @@ class Store:
                 (job_id, _now(), kind, json.dumps(data)),
             )
 
-    def start_attempt(self, job_id: str, lead_id: str, model: str, counted: bool = True) -> str:
+    def start_attempt(
+        self, job_id: str, lead_id: str, model: str, counted: bool = True, claimed: bool = False
+    ) -> str:
         attempt_id, now = str(uuid.uuid4()), _now()
         with self.transaction() as cur:
-            claimed = cur.execute(
-                "UPDATE leads SET status='in_flight' WHERE job_id=? AND lead_id=? AND status='queued'",
-                (job_id, lead_id),
-            )
-            if claimed.rowcount != 1:
-                raise ClaimError(f"lead {lead_id!r} is not queued")
+            if claimed:
+                available = cur.execute(
+                    "SELECT status FROM leads WHERE job_id=? AND lead_id=? AND status='in_flight'",
+                    (job_id, lead_id),
+                ).fetchone()
+                if available is None:
+                    raise ClaimError(f"lead {lead_id!r} is not in flight")
+            else:
+                updated = cur.execute(
+                    "UPDATE leads SET status='in_flight' WHERE job_id=? AND lead_id=? AND status='queued'",
+                    (job_id, lead_id),
+                )
+                if updated.rowcount != 1:
+                    raise ClaimError(f"lead {lead_id!r} is not queued")
             spec = cur.execute("SELECT spec_version FROM jobs WHERE id=?", (job_id,)).fetchone()
             if spec is None:
                 raise ClaimError(f"job {job_id!r} not found")
             cur.execute(
-                "UPDATE attempts SET ended_at=?, outcome='superseded', counted=0 WHERE job_id=? AND lead_id=? AND ended_at IS NULL",
+                "UPDATE attempts SET ended_at=?, outcome='interrupted', counted=0 "
+                "WHERE job_id=? AND lead_id=? AND ended_at IS NULL",
                 (now, job_id, lead_id),
             )
             cur.execute(
@@ -110,6 +131,19 @@ class Store:
                 (attempt_id, job_id, lead_id, now, int(counted), model, spec[0]),
             )
         return attempt_id
+
+    def claim_queued(self, job_id: str, lead_ids: list[str], sample: bool) -> set[str]:
+        claimed: set[str] = set()
+        with self.transaction() as cur:
+            for lead_id in lead_ids:
+                updated = cur.execute(
+                    "UPDATE leads SET status='in_flight' WHERE job_id=? AND lead_id=? "
+                    "AND status='queued' AND in_sample=?",
+                    (job_id, lead_id, int(sample)),
+                )
+                if updated.rowcount == 1:
+                    claimed.add(lead_id)
+        return claimed
 
     def record_result(
         self,
@@ -120,6 +154,9 @@ class Store:
         quotes_ok: bool,
         flags: list[str] | dict[str, object],
         spec_version: int | None = None,
+        model_used: str | None = None,
+        usage: dict[str, object] | None = None,
+        clear_repair_pending: bool = False,
     ) -> bool:
         with self.transaction() as cur:
             job = cur.execute("SELECT spec_version FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -160,11 +197,49 @@ class Store:
                     attempt[0],
                 ),
             )
-            cur.execute(
-                "UPDATE leads SET status='done' WHERE job_id=? AND lead_id=? AND status='in_flight'",
-                (job_id, lead_id),
-            )
+            if model_used is not None or usage:
+                cur.execute(
+                    "UPDATE attempts SET model_used=COALESCE(?, model_used), input_tokens=?, output_tokens=? WHERE attempt_id=?",
+                    (
+                        model_used,
+                        _usage_value(usage, "inputTokens", "input_tokens"),
+                        _usage_value(usage, "outputTokens", "output_tokens"),
+                        attempt_id,
+                    ),
+                )
+            if clear_repair_pending:
+                cur.execute(
+                    "UPDATE leads SET status='done', reason=NULL WHERE job_id=? AND lead_id=? "
+                    "AND status='in_flight'",
+                    (job_id, lead_id),
+                )
+            else:
+                cur.execute(
+                    "UPDATE leads SET status='done' WHERE job_id=? AND lead_id=? AND status='in_flight'",
+                    (job_id, lead_id),
+                )
             return True
+
+    def record_reroute(self, attempt_id: str, from_model: str) -> None:
+        with self.transaction() as cur:
+            cur.execute(
+                "UPDATE attempts SET rerouted_from=? WHERE attempt_id=? AND ended_at IS NULL",
+                (from_model, attempt_id),
+            )
+
+    def record_model_used(self, attempt_id: str, model: str) -> None:
+        with self.transaction() as cur:
+            cur.execute(
+                "UPDATE attempts SET model_used=? WHERE attempt_id=? AND ended_at IS NULL",
+                (model, attempt_id),
+            )
+
+    def count_uncounted_failures(self, job_id: str, lead_id: str) -> int:
+        rows = self.rows(
+            "SELECT COUNT(*) FROM attempts WHERE job_id=? AND lead_id=? AND outcome='failed' AND counted=0",
+            (job_id, lead_id),
+        )
+        return int(rows[0][0]) if rows else 0
 
     @staticmethod
     def _stale(cur: sqlite3.Cursor, job_id: str, lead_id: str, attempt_id: str) -> None:
@@ -173,7 +248,14 @@ class Store:
             (job_id, _now(), json.dumps({"lead_id": lead_id, "attempt_id": attempt_id})),
         )
 
-    def fail_attempt(self, attempt_id: str, error_code: str, counted: bool, max_attempts: int = 2) -> None:
+    def fail_attempt(
+        self,
+        attempt_id: str,
+        error_code: str,
+        counted: bool,
+        max_attempts: int = 2,
+        clear_repair_pending: bool = False,
+    ) -> None:
         with self.transaction() as cur:
             row = cur.execute(
                 "SELECT job_id, lead_id FROM attempts WHERE attempt_id=? AND ended_at IS NULL", (attempt_id,)
@@ -194,20 +276,30 @@ class Store:
                 "UPDATE leads SET status=?, reason=? WHERE job_id=? AND lead_id=?",
                 (status, error_code if status == LeadStatus.failed else None, job_id, lead_id),
             )
+            if clear_repair_pending:
+                cur.execute(
+                    "UPDATE leads SET reason=NULL WHERE job_id=? AND lead_id=?",
+                    (job_id, lead_id),
+                )
 
-    def requeue_in_flight(self, job_id: str, reason: str) -> int:
+    def requeue_in_flight(self, job_id: str, reason: str, outcome: str = "requeued") -> int:
         with self.transaction() as cur:
             rows = cur.execute(
-                "SELECT lead_id, attempt_id FROM attempts WHERE job_id=? AND ended_at IS NULL", (job_id,)
+                "SELECT lead_id, attempt_id, "
+                "(SELECT reason FROM leads WHERE leads.job_id=attempts.job_id "
+                "AND leads.lead_id=attempts.lead_id) "
+                "FROM attempts WHERE job_id=? AND ended_at IS NULL",
+                (job_id,),
             ).fetchall()
-            for lead_id, attempt_id in rows:
+            for lead_id, attempt_id, lead_reason in rows:
+                reason_value = "quote_repair_pending" if lead_reason == "quote_repair_pending" else reason
                 cur.execute(
-                    "UPDATE attempts SET ended_at=?, outcome='requeued', counted=0, error_code=? WHERE attempt_id=?",
-                    (_now(), reason, attempt_id),
+                    "UPDATE attempts SET ended_at=?, outcome=?, counted=0, error_code=? WHERE attempt_id=?",
+                    (_now(), outcome, reason_value, attempt_id),
                 )
                 cur.execute(
                     "UPDATE leads SET status='queued', reason=? WHERE job_id=? AND lead_id=?",
-                    (reason, job_id, lead_id),
+                    (reason_value, job_id, lead_id),
                 )
             return len(rows)
 
@@ -259,7 +351,7 @@ def open_store(path: Path) -> Store:
                 "CREATE TABLE projects(id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL)",
                 "CREATE TABLE jobs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), state TEXT NOT NULL, pause_reason TEXT, spec_version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, plan_approved_at TEXT, sample_approved_at TEXT, full_started_at TEXT, finished_at TEXT)",
                 "CREATE TABLE job_events(id INTEGER PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), ts TEXT NOT NULL, kind TEXT NOT NULL, data_json TEXT NOT NULL)",
-                "CREATE TABLE leads(job_id TEXT NOT NULL REFERENCES jobs(id), lead_id TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, in_sample INTEGER NOT NULL DEFAULT 0, calls_pulled INTEGER NOT NULL DEFAULT 0, calls_sent INTEGER NOT NULL DEFAULT 0, calls_dropped_cap INTEGER NOT NULL DEFAULT 0, chars INTEGER NOT NULL DEFAULT 0)",
+                "CREATE TABLE leads(job_id TEXT NOT NULL REFERENCES jobs(id), lead_id TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, in_sample INTEGER NOT NULL DEFAULT 0, calls_pulled INTEGER NOT NULL DEFAULT 0, calls_sent INTEGER NOT NULL DEFAULT 0, calls_dropped_cap INTEGER NOT NULL DEFAULT 0, calls_dropped_unusable INTEGER NOT NULL DEFAULT 0, chars INTEGER NOT NULL DEFAULT 0)",
                 "CREATE INDEX leads_job_lead ON leads(job_id, lead_id)",
                 "CREATE TABLE attempts(attempt_id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), lead_id TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT, outcome TEXT, error_code TEXT, counted INTEGER NOT NULL DEFAULT 1, model_requested TEXT NOT NULL, model_used TEXT, rerouted_from TEXT, input_tokens INTEGER, output_tokens INTEGER)",
                 "CREATE TABLE results(job_id TEXT NOT NULL, lead_id TEXT NOT NULL, attempt_id TEXT NOT NULL, answer_json TEXT NOT NULL, quotes_ok INTEGER NOT NULL, flags_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(job_id, lead_id))",
@@ -311,4 +403,33 @@ def open_store(path: Path) -> Store:
             ],
             3,
         )
+        version = 3
+    if version < 4:
+        _run_migration(
+            connection,
+            [
+                "ALTER TABLE jobs ADD COLUMN quota_baseline TEXT",
+                "ALTER TABLE jobs ADD COLUMN resume_at INTEGER",
+            ],
+            4,
+        )
+        version = 4
+    if version < LATEST_SCHEMA_VERSION:
+        _run_migration(
+            connection,
+            [
+                "ALTER TABLE leads ADD COLUMN calls_dropped_unusable INTEGER NOT NULL DEFAULT 0",
+            ],
+            5,
+        )
     return Store(connection)
+
+
+def _usage_value(usage: dict[str, object] | None, *names: str) -> int | None:
+    if not usage:
+        return None
+    for name in names:
+        value = usage.get(name)
+        if isinstance(value, int):
+            return value
+    return None

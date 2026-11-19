@@ -107,6 +107,7 @@ nlp = [
 dev = [
     { name = "mypy" },
     { name = "pytest" },
+    { name = "pytest-timeout" },
     { name = "ruff" },
     { name = "types-jsonschema" },
     { name = "types-openpyxl" },
@@ -127,6 +128,7 @@ provides-extras = ["nlp"]
 dev = [
     { name = "mypy", specifier = ">=1.13" },
     { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-timeout", specifier = ">=2.3" },
     { name = "ruff", specifier = ">=0.8" },
     { name = "types-jsonschema", specifier = ">=4.26.0.20261006" },
     { name = "types-openpyxl", specifier = ">=3.1.5.20261017" },
@@ -1005,6 +1007,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-timeout"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/82/4c9ecabab13363e72d880f2fb504c5f750433b2b6f16e99f4ec21ada284c/pytest_timeout-2.4.0.tar.gz", hash = "sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a", size = 17973, upload-time = "2025-05-05T19:44:34.99Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/b6/3127540ecdf1464a00e5a01ee60a1b09175f6913f0644ac748494d9c4b21/pytest_timeout-2.4.0-py3-none-any.whl", hash = "sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2", size = 14382, upload-time = "2025-05-05T19:44:33.502Z" },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -1166,14 +1180,14 @@ wheels = [
 
 [[package]]
 name = "smart-open"
-version = "9.0.4"
+version = "9.0.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "wrapt" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ec/b9/64f33524ac42fc079f7b6cb471ed15415acf80e5fc4ca02f0821b754d93d/smart_open-9.0.4.tar.gz", hash = "sha256:b14abc01a8a778225fcacaf26e2021ff67c04a5d6810433c42b621200ec42ea6", size = 65241, upload-time = "2026-11-14T11:32:58.272Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6d/e5/68e5bf2151b6e2c453ff0984e8792f5aa8fe71ec2a281b835c57995cfc8f/smart_open-9.0.5.tar.gz", hash = "sha256:f338fc9bca550747ea649e004a52ed9949cf3fe4ad32cac9d85f28a98814e2da", size = 65444, upload-time = "2026-11-18T17:34:45.01Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6f/af/62ef87f267e9f5aeed76392d3d25d5a1a36893743e67fb727b61fff6994b/smart_open-9.0.4-py3-none-any.whl", hash = "sha256:a0194ca29b392127c0cfc51183e0d9492ca129be91169250996c307ef293d80c", size = 76143, upload-time = "2026-11-14T11:32:56.777Z" },
+    { url = "https://files.pythonhosted.org/packages/24/f3/883935c16068b728fde1b83ba783f8bfc20578d85b31e94d763912bff6b9/smart_open-9.0.5-py3-none-any.whl", hash = "sha256:23668d371c3f67398bc307ad8fc163a73bc0df92383b452db962abcd7689092c", size = 76372, upload-time = "2026-11-18T17:34:43.599Z" },
 ]
 
 [package.optional-dependencies]

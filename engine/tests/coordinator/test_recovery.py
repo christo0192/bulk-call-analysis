@@ -1,0 +1,335 @@
+from __future__ import annotations
+
+import asyncio
+import threading
+from dataclasses import replace
+from functools import partial
+from typing import Any
+
+import pytest
+
+import bca.coordinator.runner as runner_module
+from bca.mask.masker import mask_lead_stream
+from bca.store import JobState, LeadStatus, save_spec
+from tests.coordinator.conftest import CoordinatorFixture
+from tests.coordinator.test_faults import Script, ScriptedPool
+
+
+def _run(awaitable: Any) -> Any:
+    return asyncio.run(awaitable)
+
+
+def test_fresh_runner_full_run_uses_persisted_harvest(
+    coordinator: CoordinatorFixture, make_runner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompts: list[str] = []
+
+    class RecordingPool(ScriptedPool):
+        async def run_until_idle(self) -> None:
+            while True:
+                tasks = await self.callbacks.next_tasks(self.concurrency)
+                if not tasks:
+                    return
+                for task in tasks:
+                    prompts.append(task.prompt)
+                    await self.callbacks.on_started(task)
+                    await self.callbacks.on_result(task, {"ok": True}, task.model, None)
+
+    monkeypatch.setattr(runner_module, "LunaPool", partial(RecordingPool, control=Script()))
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+    fresh = make_runner()
+    _run(fresh.start_full_run())
+    assert prompts
+    assert all("Synthetic Name" not in prompt for prompt in prompts)
+
+
+def test_missing_harvest_file_fails_closed(coordinator: CoordinatorFixture) -> None:
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+    (coordinator.job_dir / "harvested_names.json").unlink()
+    _run(coordinator.runner.start_full_run())
+    assert (
+        coordinator.store.rows("SELECT COUNT(*) FROM leads WHERE job_id='job' AND status='held_back'")[0][0]
+        > 0
+    )
+
+
+def test_empty_harvest_is_valid(coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runner_module, "harvest_seen_twice", lambda *_: [])
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    assert coordinator.runner._state() is JobState.sample_ready
+
+
+def test_harvest_receives_a_streaming_iterator(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    received: list[object] = []
+
+    def harvesting(calls: Any, _ner: Any) -> list[str]:
+        received.append(calls)
+        assert not isinstance(calls, list)
+        assert sum(1 for _ in calls) > 0
+        return []
+
+    monkeypatch.setattr(runner_module, "harvest_seen_twice", harvesting)
+    coordinator.runner.on_plan_approved(1)
+
+    assert received
+    assert not (coordinator.job_dir / "raw" / "3.jsonl.gz").exists()
+
+
+@pytest.mark.parametrize("phase", ["sample_running", "full_running", "quote_check", "building_output"])
+def test_recover_after_crash_in_each_phase(
+    coordinator: CoordinatorFixture, make_runner: Any, phase: str
+) -> None:
+    coordinator.runner.on_plan_approved(1)
+    if phase == "sample_running":
+        recovered = make_runner()
+        recovered.recover()
+        _run(recovered.run_sample())
+        assert recovered._state() is JobState.sample_ready
+        recovered.on_sample_approved(1)
+        _run(recovered.start_full_run())
+    else:
+        _run(coordinator.runner.run_sample())
+        coordinator.runner.on_sample_approved(1)
+        if phase == "full_running":
+            recovered = make_runner()
+            recovered.recover()
+            _run(recovered.start_full_run())
+        else:
+            _run(coordinator.runner.start_full_run())
+            with coordinator.store.transaction() as cur:
+                cur.execute("UPDATE jobs SET state=? WHERE id='job'", (phase,))
+            recovered = make_runner()
+            recovered.recover()
+            _run(recovered.start_full_run())
+    assert recovered._state() in {JobState.done, JobState.done_with_issues}
+    assert coordinator.store.rows("SELECT COUNT(*) FROM results WHERE job_id='job'")[0][0] == 34
+    assert (
+        coordinator.store.rows("SELECT COUNT(*) FROM leads WHERE job_id='job' AND status='in_flight'")[0][0]
+        == 0
+    )
+
+
+@pytest.mark.timeout(5)
+def test_recover_fresh_runner_when_full_run_has_no_masking_left(
+    coordinator: CoordinatorFixture, make_runner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+
+    original_wait = coordinator.runner._wait_for_masking
+
+    async def crash_after_masking(sample: bool) -> bool:
+        masking_finished = await original_wait(sample)
+        if not sample and masking_finished:
+            raise RuntimeError("synthetic runner crash")
+        return masking_finished
+
+    monkeypatch.setattr(coordinator.runner, "_wait_for_masking", crash_after_masking)
+    with pytest.raises(RuntimeError, match="synthetic runner crash"):
+        _run(coordinator.runner.start_full_run())
+
+    recovered = make_runner()
+    recovered.recover()
+    _run(recovered.start_full_run())
+
+    assert recovered._state() in {JobState.done, JobState.done_with_issues}
+    usable_leads = {
+        str(lead_id)
+        for (lead_id,) in coordinator.store.rows(
+            "SELECT lead_id FROM leads WHERE job_id='job' AND status='done'"
+        )
+    }
+    outcomes = coordinator.store.rows(
+        "SELECT lead_id, COUNT(*) FROM attempts WHERE job_id='job' AND counted=1 GROUP BY lead_id"
+    )
+    assert {str(lead_id) for lead_id, _count in outcomes} == usable_leads
+    assert all(int(count) == 1 for _lead_id, count in outcomes)
+
+
+def test_resume_on_fresh_runner_after_pause(coordinator: CoordinatorFixture, make_runner: Any) -> None:
+    coordinator.runner.on_plan_approved(1)
+    coordinator.store.set_lead_status("job", "0", LeadStatus.queued)
+    coordinator.store.start_attempt("job", "0", "codex")
+    from bca.store import PauseReason, pause
+
+    pause(coordinator.store, "job", PauseReason.user)
+    recovered = make_runner()
+    with pytest.raises(PermissionError):
+        _run(recovered.resume("automatic"))
+    _run(recovered.resume("operator"))
+    assert recovered._state() is JobState.sample_ready
+
+
+def test_plan_edit_then_reapprove_uses_new_spec(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = replace(coordinator.runner.spec, instructions="Return v2.")
+    save_spec(spec, coordinator.job_dir)
+    with coordinator.store.transaction() as cur:
+        cur.execute("UPDATE jobs SET spec_version=2 WHERE id='job'")
+    control = Script()
+    monkeypatch.setattr(runner_module, "LunaPool", partial(ScriptedPool, control=control))
+    coordinator.runner.on_plan_approved(2)
+    _run(coordinator.runner.run_sample())
+    assert control.prompts and all("Return v2." in prompt for prompt in control.prompts)
+    assert (
+        coordinator.store.rows("SELECT COUNT(*) FROM leads WHERE job_id='job' AND status='in_flight'")[0][0]
+        == 0
+    )
+
+
+def test_repair_attempt_counted_failure_keeps_answer_with_flag(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bca.store import QuoteField
+
+    spec = replace(coordinator.runner.spec, quote_fields=(QuoteField("quote", "any"),))
+    save_spec(spec, coordinator.job_dir)
+    with coordinator.store.transaction() as cur:
+        cur.execute("UPDATE jobs SET spec_version=2 WHERE id='job'")
+
+    class FailingRepairPool(ScriptedPool):
+        async def run_until_idle(self) -> None:
+            tasks = await self.callbacks.next_tasks(self.concurrency)
+            for task in tasks:
+                await self.callbacks.on_started(task)
+                if task.repair:
+                    await self.callbacks.on_failure(task, "invalid_output", True, "synthetic")
+                else:
+                    await self.callbacks.on_result(task, {"ok": True}, task.model, None)
+
+    monkeypatch.setattr(runner_module, "LunaPool", partial(FailingRepairPool, control=Script()))
+    coordinator.runner.on_plan_approved(2)
+    _run(coordinator.runner.run_sample())
+    assert coordinator.runner._state() is JobState.sample_ready
+    assert (
+        coordinator.store.rows(
+            "SELECT COUNT(*) FROM leads WHERE job_id='job' AND status IN ('queued','in_flight')"
+        )[0][0]
+        == 0
+    )
+
+
+def test_pause_during_repair_sends_repair_prompt_on_resume(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompts: list[str] = []
+
+    class PauseRepairPool(ScriptedPool):
+        async def run_until_idle(self) -> None:
+            tasks = await self.callbacks.next_tasks(self.concurrency)
+            for task in tasks:
+                prompts.append(task.prompt)
+                await self.callbacks.on_started(task)
+                if not task.repair:
+                    await self.callbacks.on_result(task, {"ok": False}, task.model, None)
+                else:
+                    if not self.control.repair_paused:
+                        self.control.repair_paused = True
+                        await self.callbacks.on_pause("user", None)
+                        return
+                    await self.callbacks.on_result(task, {"ok": False, "quote": "repaired"}, task.model, None)
+
+    monkeypatch.setattr(runner_module, "LunaPool", partial(PauseRepairPool, control=Script()))
+    from bca.store import QuoteField
+
+    updated = replace(coordinator.runner.spec, quote_fields=(QuoteField("quote", "any"),))
+    save_spec(updated, coordinator.job_dir)
+    with coordinator.store.transaction() as cur:
+        cur.execute("UPDATE jobs SET spec_version=2 WHERE id='job'")
+    coordinator.runner.on_plan_approved(2)
+    _run(coordinator.runner.run_sample())
+    assert coordinator.runner._state() is JobState.paused
+    with pytest.raises(PermissionError):
+        _run(coordinator.runner.resume("automatic"))
+    _run(coordinator.runner.resume("operator"))
+    assert coordinator.runner._state() is JobState.sample_ready
+    counted_by_lead = [
+        (str(lead_id), int(count))
+        for lead_id, count in coordinator.store.rows(
+            "SELECT lead_id, COUNT(*) FROM attempts WHERE job_id='job' AND counted=1 GROUP BY lead_id"
+        )
+    ]
+    assert counted_by_lead
+    assert all(count == 2 for _lead_id, count in counted_by_lead)
+    uncounted = coordinator.store.rows(
+        "SELECT lead_id, counted, error_code FROM attempts WHERE job_id='job' AND counted=0 ORDER BY lead_id"
+    )
+    assert len(uncounted) == 1
+    assert [(str(lead_id), int(counted), str(error_code)) for lead_id, counted, error_code in uncounted] == [
+        ("10", 0, "quote_repair_pending")
+    ]
+    assert prompts and "Repair only the failed quote fields." in prompts[-1]
+    attempts = coordinator.store.rows(
+        "SELECT lead_id, counted, outcome FROM attempts WHERE job_id='job' ORDER BY lead_id, started_at"
+    )
+    attempts_by_lead: dict[str, list[tuple[int, str | None]]] = {}
+    for lead_id, counted, outcome in attempts:
+        attempts_by_lead.setdefault(str(lead_id), []).append((int(counted), outcome))
+    assert set(attempts_by_lead) == {str(lead_id) for lead_id, _count in counted_by_lead}
+    assert attempts_by_lead["10"] == [(1, "ok"), (0, "interrupted"), (1, "ok")]
+    assert all(rows == [(1, "ok"), (1, "ok")] for lead, rows in attempts_by_lead.items() if lead != "10")
+
+
+def test_corrupt_raw_file_holds_back_only_that_lead(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompts: list[str] = []
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+    raw = coordinator.job_dir / "raw" / "20.jsonl.gz"
+    raw.write_text("not gzip", encoding="utf-8")
+    coordinator.store.set_lead_status("job", "20", LeadStatus.not_started)
+    monkeypatch.setattr(runner_module, "LunaPool", partial(ScriptedPool, control=Script(prompts=prompts)))
+    _run(coordinator.runner.start_full_run())
+    assert (
+        coordinator.store.rows("SELECT status FROM leads WHERE job_id='job' AND lead_id='20'")[0][0]
+        == LeadStatus.held_back
+    )
+
+
+def test_full_run_dispatches_while_background_masking_continues(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+
+    entered = threading.Event()
+    release = threading.Event()
+    dispatched_during_masking: list[str] = []
+    original_mask = mask_lead_stream
+
+    def blocking_mask(raw: Any, masked: Any, context: Any) -> Any:
+        if raw.name == "8.jsonl.gz":
+            entered.set()
+            assert release.wait(2)
+        return original_mask(raw, masked, context)
+
+    class ObservingPool(ScriptedPool):
+        async def run_until_idle(self) -> None:
+            while True:
+                tasks = await self.callbacks.next_tasks(self.concurrency)
+                if not tasks:
+                    return
+                for task in tasks:
+                    if entered.is_set() and not release.is_set():
+                        dispatched_during_masking.append(task.lead_id)
+                        release.set()
+                    await self.callbacks.on_started(task)
+                    await self.callbacks.on_result(task, {"ok": True}, task.model, None)
+
+    monkeypatch.setattr(runner_module, "mask_lead_stream", blocking_mask)
+    monkeypatch.setattr(runner_module, "LunaPool", partial(ObservingPool, control=Script()))
+    _run(coordinator.runner.start_full_run())
+
+    assert dispatched_during_masking

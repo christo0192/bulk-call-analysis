@@ -9,7 +9,8 @@ import pytest
 
 from bca.bq.pull import build_bundle, pull_transcripts, run_preflight
 from bca.config import BigQueryConfig, RecipeConfig
-from bca.store import CapRule, LeadStatus, Store, UsableRule, open_store
+from bca.monitor.progress import counts
+from bca.store import CapRule, LeadStatus, Store, UsableRule, open_store, reconcile
 
 from ..fakes.fake_bq import FakeBqRunner
 
@@ -90,6 +91,35 @@ def test_preflight_buckets_reconcile_and_errors_raise(tmp_path: Path) -> None:
         run_preflight(recipe(), UsableRule(), "all", None, ["1"], runner, db, "j", BigQueryConfig("p"))
 
 
+def test_too_short_untranscribed_call_is_not_a_cap_drop(tmp_path: Path) -> None:
+    db = store(tmp_path)
+    db.add_lead("j", "short")
+    from bca.bq.runner import DryRun
+
+    runner = FakeBqRunner(
+        [
+            [
+                {
+                    "lead_id": "short",
+                    "found": True,
+                    "calls": 2,
+                    "transcript_calls": 1,
+                    "usable_calls": 0,
+                    "transcription_failed": 0,
+                }
+            ]
+        ],
+        dry=DryRun(1, [], []),
+    )
+    run_preflight(recipe(), UsableRule(), "all", None, ["short"], runner, db, "j", BigQueryConfig("p"))
+
+    row = db.rows("SELECT status, calls_pulled, calls_dropped_cap FROM leads WHERE lead_id='short'")[0]
+    assert tuple(row) == (LeadStatus.too_short, 0, 0)
+    assert db.rows("SELECT calls_dropped_unusable FROM leads WHERE lead_id='short'")[0][0] == 2
+    assert counts(db, "j").capped == 0
+    assert reconcile(db, "j", final=True).ok
+
+
 def test_pull_streams_and_rejects_unapproved_scan(tmp_path: Path) -> None:
     db = store(tmp_path)
     db.add_lead("j", "1")
@@ -114,6 +144,29 @@ def test_pull_streams_and_rejects_unapproved_scan(tmp_path: Path) -> None:
     assert stats.calls == 1
     with gzip.open(tmp_path / "out" / "raw" / "1.jsonl.gz", "rt", encoding="utf-8") as stream:
         assert json.loads(stream.readline())["call_id"] == "c1"
+
+
+def test_pull_requests_only_usable_ids(tmp_path: Path) -> None:
+    db = store(tmp_path)
+    for lead_id in ("1", "3", "5"):
+        db.add_lead("j", lead_id)
+    from bca.bq.runner import DryRun
+
+    runner = FakeBqRunner(
+        [
+            [
+                {"lead_id": "1", "call_id": "c1", "transcript_text": "one"},
+                {"lead_id": "3", "call_id": "c3", "transcript_text": "three"},
+                {"lead_id": "5", "call_id": "c5", "transcript_text": "five"},
+            ]
+        ],
+        dry=DryRun(1, [], []),
+    )
+    stats = pull_transcripts(BigQueryConfig("p"), recipe(), ["1", "5"], runner, db, "j", tmp_path / "out")
+
+    assert stats.calls == 2
+    assert not (tmp_path / "out" / "raw" / "3.jsonl.gz").exists()
+    assert "IN UNNEST(@lead_ids)" in str(runner.calls[0][0])
 
 
 @pytest.mark.parametrize("policy", ["drop_short_then_oldest", "keep_newest"])

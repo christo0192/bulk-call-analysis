@@ -27,6 +27,7 @@ from bca.store import (
     start_full_run,
     transition,
 )
+from bca.store.db import LATEST_SCHEMA_VERSION
 
 
 def store_for(path: Path | str = ":memory:", state: JobState = JobState.plan_proposed) -> Store:
@@ -211,7 +212,7 @@ def test_v1_migration_preserves_rows_and_duplicate_failure_rolls_back(tmp_path: 
     v1_database(valid)
     store = open_store(valid)
     assert store.rows("SELECT lead_id FROM leads")[0][0] == "one"
-    assert store.rows("PRAGMA user_version")[0][0] == 3
+    assert store.rows("PRAGMA user_version")[0][0] == LATEST_SCHEMA_VERSION
     store.close()
 
     invalid = tmp_path / "invalid.sqlite"

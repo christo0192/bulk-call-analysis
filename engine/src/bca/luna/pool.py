@@ -33,6 +33,7 @@ class LeadTask:
     output_schema: dict[str, object]
     model: str
     effort: str
+    repair: bool = False
 
 
 class PoolCallbacks(Protocol):
@@ -53,6 +54,10 @@ class PoolCallbacks(Protocol):
     async def on_reroute(self, task: LeadTask, from_model: str, to_model: str, reason: str) -> None: ...
 
     async def on_pause(self, reason: str, resume_at: int | None) -> None: ...
+
+
+class PoolClock(Protocol):
+    def now(self) -> float: ...
 
 
 @dataclass
@@ -84,6 +89,7 @@ class LunaPool:
         crash_window_s: float = 600,
         restart_backoff_s: float = 0,
         rpc_timeout_s: float = 30,
+        clock: PoolClock | None = None,
     ) -> None:
         self.launch_factory = launch_factory
         self.callbacks = callbacks
@@ -96,6 +102,7 @@ class LunaPool:
         self.crash_window_s = max(0, crash_window_s)
         self.restart_backoff_s = max(0, restart_backoff_s)
         self.rpc_timeout_s = max(0, rpc_timeout_s)
+        self.clock = clock
         self._server: AppServer | None = None
         self._leads: dict[str, _Lead] = {}
         self._by_turn: dict[str, _Lead] = {}
@@ -129,8 +136,12 @@ class LunaPool:
         self._needs_recycle = False
         await self._launch_and_prepare()
         running: set[asyncio.Task[None]] = set()
+        heartbeat = asyncio.create_task(self._heartbeat())
         try:
             while not self._stopping and not self._paused:
+                if self._client.callback_error is not None:
+                    error = self._client.callback_error
+                    raise RuntimeError("app-server notification callback failed") from error
                 await self._check_quota()
                 if self._paused:
                     break
@@ -160,10 +171,15 @@ class LunaPool:
                     done, running = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
                     for completed in done:
                         await completed
+                if self._client.callback_error is not None:
+                    error = self._client.callback_error
+                    raise RuntimeError("app-server notification callback failed") from error
                 if self._needs_recycle and not running and not self._paused:
                     self._needs_recycle = False
                     await self._restart("appserver_recycle")
         finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
             if running:
                 if self._paused and not self._stopping:
                     await asyncio.gather(*running, return_exceptions=True)
@@ -181,6 +197,11 @@ class LunaPool:
                 await self._server.stop()
                 self._server = None
 
+    async def _heartbeat(self) -> None:
+        while True:
+            await asyncio.sleep(5)
+            await self.callbacks.on_activity(self.clock.now() if self.clock is not None else time.time())
+
     async def stop(self) -> None:
         self._stopping = True
         self._dispatch_closed = True
@@ -191,6 +212,10 @@ class LunaPool:
             await asyncio.gather(*(self._interrupt(lead) for lead in list(self._leads.values())))
             await server.stop()
             self._server = None
+
+    async def interrupt_all(self, reason: str) -> None:
+        """Interrupt active turns and deliver one uncounted outcome for each."""
+        await self._interrupt_all(reason)
 
     async def _launch_and_prepare(self) -> None:
         self._server = await self.launch_factory()
@@ -271,7 +296,13 @@ class LunaPool:
             await self._pause("quota", decision.resume_at)
         elif decision.kind == INTERRUPT_ALL:
             self._latched_decision = decision
-            await self._interrupt_all("credit" if "credit" in decision.reason else "quota")
+            await self._interrupt_all(
+                "credit"
+                if "credit" in decision.reason
+                else "spend_control"
+                if "subscription" in decision.reason
+                else "quota"
+            )
 
     async def _before_dispatch(self, model: str) -> bool:
         if self._rate_result is not None:
@@ -287,7 +318,13 @@ class LunaPool:
             await self._pause("quota", decision.resume_at)
         else:
             self._latched_decision = decision
-            await self._interrupt_all("credit" if "credit" in decision.reason else "quota")
+            await self._interrupt_all(
+                "credit"
+                if "credit" in decision.reason
+                else "spend_control"
+                if "subscription" in decision.reason
+                else "quota"
+            )
         return False
 
     async def _run_lead(self, lead: _Lead) -> None:
@@ -388,7 +425,7 @@ class LunaPool:
             self._needs_recycle = True
 
     async def _notification(self, message: dict[str, Any]) -> None:
-        await self.callbacks.on_activity(time.time())
+        await self.callbacks.on_activity(self.clock.now() if self.clock is not None else time.time())
         method = message.get("method", "")
         params = message.get("params")
         if not isinstance(params, dict):

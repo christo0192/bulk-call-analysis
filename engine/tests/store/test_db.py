@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from bca.store import ClaimError, LeadStatus, Store, open_store
+from bca.store.db import LATEST_SCHEMA_VERSION
 
 
 def prepared_store(path: Path | str = ":memory:") -> Store:
@@ -17,13 +18,43 @@ def prepared_store(path: Path | str = ":memory:") -> Store:
 def test_migrations_are_applied_and_reopen_is_idempotent(tmp_path: Path) -> None:
     path = tmp_path / "store.sqlite"
     store = prepared_store(path)
-    assert store.rows("PRAGMA user_version")[0][0] == 3
+    assert store.rows("PRAGMA user_version")[0][0] == LATEST_SCHEMA_VERSION
     assert store.rows("PRAGMA journal_mode")[0][0] == "wal"
     store.close()
     reopened = open_store(path)
     assert reopened.rows("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    assert reopened.rows("PRAGMA user_version")[0][0] == 3
+    assert reopened.rows("PRAGMA user_version")[0][0] == LATEST_SCHEMA_VERSION
     reopened.close()
+
+
+def test_version_3_migration_preserves_rows(tmp_path: Path) -> None:
+    path = tmp_path / "version-3.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        PRAGMA user_version=3;
+        CREATE TABLE projects(id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE jobs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, state TEXT NOT NULL,
+            pause_reason TEXT, spec_version INTEGER NOT NULL, created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL, plan_approved_at TEXT, sample_approved_at TEXT,
+            full_started_at TEXT, finished_at TEXT, resume_state TEXT);
+        CREATE TABLE leads(job_id TEXT NOT NULL, lead_id TEXT NOT NULL, status TEXT NOT NULL,
+            reason TEXT, in_sample INTEGER NOT NULL DEFAULT 0, calls_pulled INTEGER NOT NULL DEFAULT 0,
+            calls_sent INTEGER NOT NULL DEFAULT 0, calls_dropped_cap INTEGER NOT NULL DEFAULT 0,
+            chars INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job_id, lead_id));
+        INSERT INTO projects VALUES ('p', 'Project', 'now');
+        INSERT INTO jobs VALUES ('j', 'p', 'draft', NULL, 1, 'now', 'now', NULL, NULL, NULL, NULL, NULL);
+        INSERT INTO leads(job_id, lead_id, status) VALUES ('j', 'lead-1', 'queued');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = open_store(path)
+    assert store.rows("PRAGMA user_version")[0][0] == LATEST_SCHEMA_VERSION
+    assert store.rows("SELECT lead_id, status FROM leads")[0][:] == ("lead-1", "queued")
+    assert store.rows("SELECT quota_baseline, resume_at FROM jobs")[0][:] == (None, None)
+    store.close()
 
 
 def test_duplicate_lead_is_rejected() -> None:

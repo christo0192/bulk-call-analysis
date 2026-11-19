@@ -43,6 +43,7 @@ class AppServerClient:
         self._any: list[Callback] = []
         self.malformed_lines = 0
         self._closed = False
+        self.callback_error: Exception | None = None
         self._reader_task = asyncio.create_task(self._read_loop())
 
     async def request(
@@ -96,8 +97,10 @@ class AppServerClient:
                     continue
                 try:
                     await self._dispatch(message)
-                except Exception:
+                except Exception as exc:
+                    self.callback_error = exc
                     log.exception("app-server notification callback failed")
+                    return
         except asyncio.CancelledError:
             raise
         except Exception:
