@@ -323,3 +323,30 @@ def test_sleep_with_parked_quota_pause_keeps_quota_deterministic(
     _run(runner.resume("automatic"))
     assert runner._state() is JobState.sample_ready
     assert _count(coordinator, "SELECT COUNT(*) FROM results WHERE job_id='job'") == 4
+
+
+def test_user_pause_overrides_quota_pause(
+    coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _real_pool(
+        coordinator,
+        tmp_path,
+        monkeypatch,
+        {"used_percent": 94, "quota_increment": 1, "latency_ms": 20},
+    )
+    runner = coordinator.runner
+    runner.on_plan_approved(1)
+    _run(runner.run_sample())
+    state, reason, resume_at = coordinator.store.rows(
+        "SELECT state, pause_reason, resume_at FROM jobs WHERE id='job'"
+    )[0]
+    assert (state, reason) == ("paused", "quota")
+    assert resume_at is not None
+
+    _run(runner.pause("user"))
+    assert coordinator.store.rows("SELECT pause_reason, resume_at FROM jobs WHERE id='job'")[0] == (
+        "user",
+        None,
+    )
+    with pytest.raises(PermissionError):
+        _run(runner.resume("automatic"))

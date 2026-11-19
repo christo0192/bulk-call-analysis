@@ -276,6 +276,14 @@ class Store:
         )
         return int(rows[0][0]) if rows else 0
 
+    def count_appserver_crashes(self, job_id: str, lead_id: str) -> int:
+        rows = self.rows(
+            "SELECT COUNT(*) FROM attempts WHERE job_id=? AND lead_id=? "
+            "AND outcome='failed' AND error_code='appserver_crash'",
+            (job_id, lead_id),
+        )
+        return int(rows[0][0]) if rows else 0
+
     @staticmethod
     def _stale(cur: sqlite3.Cursor, job_id: str, lead_id: str, attempt_id: str) -> None:
         cur.execute(

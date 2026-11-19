@@ -302,6 +302,11 @@ class _Callbacks(PoolCallbacks):
             if self.runner._is_closed_attempt(task.attempt_id):
                 LOGGER.debug("ignoring failure for closed attempt %s", task.attempt_id)
                 return
+            if error_code == "appserver_crash" and not counted:
+                crash_count = self.runner.deps.store.count_appserver_crashes(self.runner.job_id, task.lead_id)
+                if crash_count >= 2:
+                    error_code = "appserver_crash_repeated"
+                    counted = True
             self.runner._close_attempt(task.attempt_id)
             try:
                 self.runner.deps.store.fail_attempt(
@@ -843,12 +848,25 @@ class JobRunner:
     async def _pause_with_pool(self, reason: str, resume_at: int | None, *, wait_for_phase: bool) -> None:
         if self._state() is JobState.paused:
             row = self.deps.store.rows("SELECT pause_reason FROM jobs WHERE id=?", (self.job_id,))
-            if row and row[0][0] == PauseReason.sleep.value and reason != PauseReason.sleep.value:
+            operator_pause_reasons = {
+                PauseReason.user.value,
+                PauseReason.auth.value,
+                PauseReason.model_unavailable.value,
+                PauseReason.error_storm.value,
+                PauseReason.credit.value,
+                PauseReason.network.value,
+                PauseReason.spend_control.value,
+            }
+            if (
+                row
+                and row[0][0] in {PauseReason.sleep.value, PauseReason.quota.value}
+                and reason in operator_pause_reasons
+            ):
                 from bca.store import replace_pause
 
-                replace_pause(self.deps.store, self.job_id, PauseReason(reason), resume_at)
-                self._pause_reason = reason
-                self._pause_resume_at = resume_at
+                replace_pause(self.deps.store, self.job_id, PauseReason(reason), None)
+                self._pause_reason = None
+                self._pause_resume_at = None
                 self._wake_requested = False
                 self._wake_network_unavailable = False
             else:

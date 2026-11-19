@@ -468,7 +468,9 @@ class LunaPool:
                 and lead.server_generation == self._server_generation
                 and not self._restart_lock.locked()
             ):
-                with contextlib.suppress(ConnectionError, BrokenPipeError, RpcError, RpcTimeout):
+                with contextlib.suppress(
+                    ConnectionError, BrokenPipeError, RpcError, RpcTimeout, RuntimeError
+                ):
                     await self._request("thread/unsubscribe", {"threadId": lead.thread_id})
             self._leads.pop(task.attempt_id, None)
             if lead.turn_id:
@@ -502,6 +504,7 @@ class LunaPool:
             return
         self._completed += 1
         self._consecutive_failures = 0
+        self._crashes.clear()
         if self._completed % self.recycle_every == 0:
             self._needs_recycle = True
 
@@ -773,11 +776,9 @@ class LunaPool:
                 return
             if crash and server_generation is not None:
                 self._restarted_crash_generations.add(server_generation)
-            now = time.monotonic()
-            self._crashes = [stamp for stamp in self._crashes if now - stamp < self.crash_window_s]
             if crash:
-                self._crashes.append(now)
-            if len(self._crashes) > 3:
+                self._crashes.append(time.monotonic())
+            if len(self._crashes) >= 4:
                 await self._pause("error_storm", None)
                 return
             if self._server is not None:
@@ -794,4 +795,4 @@ class LunaPool:
                 self._server = None
                 if server is not None:
                     await server.stop()
-                await self._pause("appserver_restart_failed", None)
+                await self._pause("error_storm", None)
