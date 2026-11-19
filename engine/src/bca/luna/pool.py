@@ -536,7 +536,7 @@ class LunaPool:
             "-32001",
         }
         if code in retryable:
-            self._backoff = min(60, self.retry_backoff_s if self._backoff == 0 else self._backoff * 2)
+            self._backoff = self.retry_backoff_s
             self.set_concurrency(self.concurrency - 1)
             await self._fail(lead, code, False, detail)
         elif code == "usageLimitExceeded":

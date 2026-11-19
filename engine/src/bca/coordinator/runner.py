@@ -601,22 +601,28 @@ class JobRunner:
                 if self._masking_task is not None and self._masking_task.done():
                     masking_task = self._masking_task
                     self._masking_task = None
-                    try:
-                        masking_task.result()
-                    except Exception as exc:
-                        if self._state() not in {
-                            JobState.paused,
-                            JobState.stalled,
-                            JobState.done,
-                            JobState.done_with_issues,
-                        }:
-                            transition(
-                                self.deps.store,
-                                self.job_id,
+                    if masking_task.cancelled():
+                        current = asyncio.current_task()
+                        if current is not None and current.cancelling():
+                            raise asyncio.CancelledError
+                        self._start_masking_worker(sample)
+                    else:
+                        try:
+                            masking_task.result()
+                        except Exception as exc:
+                            if self._state() not in {
+                                JobState.paused,
                                 JobState.stalled,
-                                f"masking failed: {type(exc).__name__}: {exc}",
-                            )
-                        raise
+                                JobState.done,
+                                JobState.done_with_issues,
+                            }:
+                                transition(
+                                    self.deps.store,
+                                    self.job_id,
+                                    JobState.stalled,
+                                    f"masking failed: {type(exc).__name__}: {exc}",
+                                )
+                            raise
                 if self._state() is JobState.paused or self._phase_finished(sample):
                     break
         finally:

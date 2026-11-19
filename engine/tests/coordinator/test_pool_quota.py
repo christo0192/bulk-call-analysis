@@ -42,7 +42,7 @@ def _real_pool(
         )
 
     monkeypatch.setattr(runner_module, "LunaPool", LunaPool)
-    coordinator.runner.deps = replace(coordinator.runner.deps, launch_pool=launch)
+    coordinator.runner.deps = replace(coordinator.runner.deps, launch_pool=launch, retry_backoff_s=0.01)
     return scenario_path
 
 
