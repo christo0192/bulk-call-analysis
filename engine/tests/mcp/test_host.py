@@ -24,7 +24,7 @@ from bca.mcp.host import (
     start_ipc_thread,
 )
 from bca.mcp.ipc import call_engine, new_ipc_address
-from bca.mcp.wire import OK, expected_mac
+from bca.mcp.wire import HANDSHAKE_TIMEOUT, OK, expected_mac
 from bca.store import LeadStatus, open_store
 from tests.fakes.fake_bq import FakeBqRunner
 
@@ -366,27 +366,38 @@ def test_ipc_close_with_silent_client_returns_quickly(tmp_path: Path) -> None:
 @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="raw bounded-client test is POSIX-only")
 def test_ipc_failed_handshakes_do_not_create_unbounded_threads(tmp_path: Path) -> None:
     host = make_host(tmp_path)
-    address, _family = new_ipc_address()
+    address, family = new_ipc_address()
     authkey = b"h" * 32
     thread = start_ipc_thread(host, address, authkey)
     baseline = threading.active_count()
-    clients: list[socket.socket] = []
+    all_clients: list[socket.socket] = []
     try:
         unix_family = cast(int, socket.__dict__["AF_UNIX"])
-        for _ in range(50):
-            client = socket.socket(unix_family, socket.SOCK_STREAM)
-            client.connect(address)
-            clients.append(client)
-        for client in clients:
-            client.close()
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline and threading.active_count() > baseline + 8:
-            time.sleep(0.01)
-        assert threading.active_count() <= baseline + 8
+        for wave_start in range(0, 50, 8):
+            wave: list[socket.socket] = []
+            for _ in range(min(8, 50 - wave_start)):
+                client = socket.socket(unix_family, socket.SOCK_STREAM)
+                all_clients.append(client)
+                client.connect(address)
+                wave.append(client)
+            time.sleep(HANDSHAKE_TIMEOUT + 0.1)
+            assert threading.active_count() <= baseline + 8
+            for client in wave:
+                client.close()
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and threading.active_count() > baseline + 8:
+                time.sleep(0.01)
+            assert threading.active_count() <= baseline + 8
+
+        started = time.monotonic()
+        assert call_engine(address, authkey, "data_notes", {}, family) == "no notes yet"
+        assert time.monotonic() - started < 5
     finally:
-        for client in clients:
+        for client in all_clients:
             client.close()
+        started = time.monotonic()
         host.close()
+        assert time.monotonic() - started < 5
     assert not thread.is_alive()
 
 
