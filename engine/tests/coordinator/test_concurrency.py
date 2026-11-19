@@ -270,7 +270,60 @@ def test_sleep_gap_during_quota_drain_holds_back_nothing(
     runner = coordinator.runner
     runner.on_plan_approved(1)
 
-    _run(runner.run_sample)
+    async def diag() -> None:
+        task = asyncio.ensure_future(runner.run_sample())
+        done, _ = await asyncio.wait({task}, timeout=25)
+        if done:
+            await task
+            return
+        lines = ["DIAG-HANG"]
+        for item in asyncio.all_tasks():
+            if item is asyncio.current_task():
+                continue
+            frames = " <- ".join(f"{f.f_code.co_name}:{f.f_lineno}" for f in item.get_stack(limit=15))
+            lines.append(f"TASK {item.get_name()} {frames}")
+        pool: Any = runner._phase_pool
+        if pool is not None:
+            lines.append(
+                f"POOL paused={pool._paused} pending={pool._pending_pause} closed={pool._dispatch_closed}"
+            )
+            for lead in pool._leads.values():
+                lines.append(
+                    f"LEAD {lead.task.lead_id} done={lead.done} delivered={lead.outcome_delivered} "
+                    f"turn={lead.turn_id} attrs={sorted(k for k in vars(lead))}"
+                )
+        lines.append(f"JOB {_job(coordinator)}")
+        lines.append(
+            "LEADS "
+            + str(
+                [
+                    tuple(r)
+                    for r in coordinator.store.rows(
+                        "SELECT lead_id, status, reason FROM leads WHERE job_id='job' AND in_sample=1"
+                    )
+                ]
+            )
+        )
+        lines.append(
+            "ATTEMPTS "
+            + str(
+                [
+                    tuple(r)
+                    for r in coordinator.store.rows(
+                        "SELECT lead_id, outcome, counted, error_code, ended_at IS NULL "
+                        "FROM attempts WHERE job_id='job'"
+                    )
+                ]
+            )
+        )
+        lines.append("EVENTS " + str([(e.kind, e.data.get("reason")) for e in coordinator.events.events]))
+        methods = path.parent / (path.name + ".methods.json")
+        if methods.exists():
+            lines.append("FAKE " + methods.read_text(encoding="utf-8")[-1500:].replace("\n", " | "))
+        task.cancel()
+        raise AssertionError("\n".join(lines))
+
+    asyncio.run(diag())
 
     # The sleep must not replace the quota pause: the reset time is kept for the automatic resume.
     state, reason, resume_at = _job(coordinator)
