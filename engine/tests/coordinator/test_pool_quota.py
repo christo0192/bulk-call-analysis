@@ -118,7 +118,9 @@ def test_repair_always_failing_uncounted_pauses_network_after_four(
     )
     coordinator.runner.on_plan_approved(2)
     _run(coordinator.runner.run_sample())
-    assert coordinator.store.rows("SELECT in_sample FROM leads WHERE job_id='job' AND lead_id='20'")[0][0] == 0
+    assert (
+        coordinator.store.rows("SELECT in_sample FROM leads WHERE job_id='job' AND lead_id='20'")[0][0] == 0
+    )
     coordinator.runner.on_sample_approved(2)
     _run(coordinator.runner.start_full_run())
 
@@ -162,9 +164,13 @@ def test_repair_always_failing_uncounted_pauses_network_after_four(
     _run(coordinator.runner.resume("operator"))
     assert coordinator.runner._state() is JobState.done
     # Lead 20's repair now succeeds; a sqlite3.Row never equals a tuple, so compare tuple(row).
-    lead_row = coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='20'")[0]
+    lead_row = coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='20'")[
+        0
+    ]
     assert tuple(lead_row) == ("done", None)
-    repaired = coordinator.store.rows("SELECT quotes_ok FROM results WHERE job_id='job' AND lead_id='20'")[0][0]
+    repaired = coordinator.store.rows("SELECT quotes_ok FROM results WHERE job_id='job' AND lead_id='20'")[0][
+        0
+    ]
     assert repaired == 1
 
 
@@ -398,5 +404,9 @@ def test_reroute_rate_denominator_on_large_job(
     )
     assert [json.loads(str(row[0]))["lead_id"] for row in rerouted] == ["97", "99"]
     # No pause after the first rerouted answer: "97" kept its answer and "98" ran after it.
-    assert coordinator.store.rows("SELECT status FROM leads WHERE job_id='job' AND lead_id='97'")[0][0] == "done"
-    assert coordinator.store.rows("SELECT status FROM leads WHERE job_id='job' AND lead_id='98'")[0][0] == "done"
+    assert (
+        coordinator.store.rows("SELECT status FROM leads WHERE job_id='job' AND lead_id='97'")[0][0] == "done"
+    )
+    assert (
+        coordinator.store.rows("SELECT status FROM leads WHERE job_id='job' AND lead_id='98'")[0][0] == "done"
+    )
