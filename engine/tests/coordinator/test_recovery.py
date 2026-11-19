@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import json
 import threading
 from dataclasses import replace
 from functools import partial
@@ -262,11 +264,11 @@ def test_cap_edit_after_background_masking_rebundles_full_run_leads(
     coordinator.runner.on_plan_approved(1)
     _run(coordinator.runner.run_sample())
     assert coordinator.runner._bundles["6"][0] == 1
-    assert coordinator.runner._bundle_metadata["6"] == (
-        1,
-        1,
-        len("Synthetic Name says hello. zzlead6zz " + ("x" * 25)),
-    )
+    with gzip.open(coordinator.job_dir / "masked" / "6.jsonl.gz", "rt", encoding="utf-8") as source:
+        call_chars = [len(str(json.loads(line)["transcript_text"])) for line in source]
+    # Both masked calls are stored; the v1 cap sends only the long one.
+    assert len(call_chars) == 2
+    assert coordinator.runner._bundle_metadata["6"] == (1, 1, max(call_chars))
     assert tuple(
         coordinator.store.rows(
             "SELECT calls_sent, calls_dropped_cap FROM leads WHERE job_id='job' AND lead_id='6'"
@@ -311,7 +313,7 @@ def test_cap_edit_after_background_masking_rebundles_full_run_leads(
         coordinator.store.rows(
             "SELECT calls_sent, calls_dropped_cap, chars FROM leads WHERE job_id='job' AND lead_id='6'"
         )[0]
-    ) == (2, 0, 2 * len("Synthetic Name says hello. zzlead6zz " + ("x" * 25)))
+    ) == (2, 0, sum(call_chars))
 
 
 def test_repair_attempt_counted_failure_keeps_answer_with_flag(

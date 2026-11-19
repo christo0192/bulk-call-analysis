@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
-from bca.bq.leads import resolve_lead_source
+from bca.bq.leads import IdIntake, resolve_lead_source
 from bca.bq.pull import build_bundle, pull_transcripts, run_preflight
 from bca.bq.runner import BqRunner
 from bca.config import SiteConfig
@@ -812,7 +812,12 @@ class JobRunner:
         self._refresh_spec(expected_spec_version)
         approve_plan(self.deps.store, self.job_id, "operator", expected_spec_version)
         transition(self.deps.store, self.job_id, JobState.pulling)
-        self._pull()
+        intake = self._pull()
+        if not intake.ids:
+            transition(
+                self.deps.store, self.job_id, JobState.stalled, "no leads resolved from the lead source"
+            )
+            return
         transition(self.deps.store, self.job_id, JobState.masking_sample)
         try:
             self._mask_sample()
@@ -825,7 +830,7 @@ class JobRunner:
             )
             raise
 
-    def _pull(self) -> None:
+    def _pull(self) -> IdIntake:
         source = self.spec.lead_source
         intake = resolve_lead_source(
             source,
@@ -872,6 +877,7 @@ class JobRunner:
             window,
             self.deps.approved_bytes,
         )
+        return intake
 
     def spec_to_recipe(self) -> Any:
         return self.deps.config.recipe
@@ -1098,7 +1104,12 @@ class JobRunner:
     def recover(self) -> int:
         state = self._state()
         if state is JobState.pulling:
-            self._pull()
+            intake = self._pull()
+            if not intake.ids:
+                transition(
+                    self.deps.store, self.job_id, JobState.stalled, "no leads resolved from the lead source"
+                )
+                return 0
             transition(self.deps.store, self.job_id, JobState.masking_sample)
             self._mask_sample()
         elif state is JobState.masking_sample:

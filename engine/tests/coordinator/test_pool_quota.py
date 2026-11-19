@@ -5,7 +5,7 @@ import json
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from openpyxl import load_workbook
@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 import bca.coordinator.runner as runner_module
 from bca.luna.appserver import AppServer, CodexLaunch, start
 from bca.luna.pool import LunaPool
-from bca.store import JobState, LeadStatus, QuoteField, edit_spec, save_spec
+from bca.store import JobState, LeadSourceIds, LeadStatus, QuoteField, edit_spec, save_spec
 from bca.store import start_full_run as start_full_run_job
 from tests.coordinator.conftest import CoordinatorFixture
 from tests.fakes import fake_codex
@@ -68,73 +68,94 @@ def test_uncounted_failures_are_bounded_then_pause(
     )
 
 
+def test_zero_resolved_leads_stalls_with_reason(coordinator: CoordinatorFixture) -> None:
+    source = cast(LeadSourceIds, coordinator.runner.spec.lead_source)
+    spec = replace(
+        coordinator.runner.spec,
+        lead_source=replace(source, count=0),
+    )
+    # save_spec always writes the next version file, so the job must move to it.
+    save_spec(spec, coordinator.job_dir)
+    edit_spec(coordinator.store, "job", 2)
+    (coordinator.job_dir / "ids.txt").write_text("\n", encoding="utf-8", newline="\n")
+
+    coordinator.runner.on_plan_approved(2)
+
+    assert coordinator.runner._state() is JobState.stalled
+    # The stall reason is recorded on the state-transition event.
+    last_state = coordinator.store.rows(
+        "SELECT data_json FROM job_events WHERE job_id='job' AND kind='state' ORDER BY id DESC LIMIT 1"
+    )[0][0]
+    event = json.loads(str(last_state))
+    assert (event["to"], event["reason"]) == ("stalled", "no leads resolved from the lead source")
+    assert not (coordinator.job_dir / "output" / "results.v1.xlsx").exists()
+
+
 def test_repair_always_failing_uncounted_pauses_network_after_four(
     coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    spec = replace(coordinator.runner.spec, quote_fields=(QuoteField("quote", "any"),))
+    # Raise the cap: the prefix below makes every call longer than the fixture's v1 cap.
+    spec = replace(
+        coordinator.runner.spec,
+        quote_fields=(QuoteField("quote", "any"),),
+        cap=replace(coordinator.runner.spec.cap, max_chars=1000),
+    )
     save_spec(spec, coordinator.job_dir)
     edit_spec(coordinator.store, "job", 2)
     for call in coordinator.bq.pages[0]:
         call["transcript_text"] = "Customer: hello. " + str(call["transcript_text"])
+    # Lead 20 is a full-run lead, so the whole scenario can be in place from the start:
+    # its first answer fails the quote check, and every repair turn then fails uncounted.
     scenario_path = _real_pool(
         coordinator,
         tmp_path,
         monkeypatch,
         {
-            "answers": {"10": {"quote": "not in the transcript"}},
+            "answers": {"20": {"quote": "not in the transcript"}},
             "default_answer": {"quote": "hello"},
+            "errors_after_first_answer": {"20": "httpConnectionFailed"},
         },
     )
     coordinator.runner.on_plan_approved(2)
     _run(coordinator.runner.run_sample())
+    assert coordinator.store.rows("SELECT in_sample FROM leads WHERE job_id='job' AND lead_id='20'")[0][0] == 0
     coordinator.runner.on_sample_approved(2)
-    scenario_path.write_text(
-        json.dumps(
-            {
-                "answers": {"10": {"quote": "not in the transcript"}},
-                "default_answer": {"quote": "hello"},
-                "errors": {"10": "httpConnectionFailed"},
-            }
-        ),
-        encoding="utf-8",
-        newline="\n",
-    )
     _run(coordinator.runner.start_full_run())
 
     assert coordinator.runner._state() is JobState.paused
     assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "network"
     assert (
-        coordinator.store.rows("SELECT reason FROM leads WHERE job_id='job' AND lead_id='10'")[0][0]
+        coordinator.store.rows("SELECT reason FROM leads WHERE job_id='job' AND lead_id='20'")[0][0]
         == "quote_repair_pending"
     )
     assert (
         coordinator.store.rows(
-            "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND lead_id='10' AND counted=0 "
+            "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND lead_id='20' AND counted=0 "
             "AND error_code='httpConnectionFailed'"
         )[0][0]
         == 4
     )
     assert (
         coordinator.store.rows(
-            "SELECT quotes_ok, flags_json, answer_json FROM results WHERE job_id='job' AND lead_id='10'"
+            "SELECT quotes_ok, flags_json, answer_json FROM results WHERE job_id='job' AND lead_id='20'"
         )[0][0]
         == 0
     )
     result = coordinator.store.rows(
-        "SELECT quotes_ok, flags_json, answer_json FROM results WHERE job_id='job' AND lead_id='10'"
+        "SELECT quotes_ok, flags_json, answer_json FROM results WHERE job_id='job' AND lead_id='20'"
     )[0]
     assert "quote:" in str(result[1])
     assert "not in the transcript" in str(result[2])
     assert (
         coordinator.store.rows(
-            "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND lead_id='10' "
+            "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND lead_id='20' "
             "AND error_code IN ('interrupted', 'quota_interrupt')"
         )[0][0]
         == 0
     )
 
     scenario_path.write_text(
-        json.dumps({"answers": {"10": {"quote": "hello"}}, "default_answer": {"quote": "hello"}}),
+        json.dumps({"answers": {"20": {"quote": "hello"}}, "default_answer": {"quote": "hello"}}),
         encoding="utf-8",
         newline="\n",
     )
@@ -307,7 +328,7 @@ def test_reroute_rate_baseline_resets_after_operator_resume(
 def test_reroute_rate_denominator_on_large_job(
     coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    extra_ids = [f"synthetic{index:03d}" for index in range(120)]
+    extra_ids = [str(index + 40) for index in range(120)]
     ids = [str(row[0]) for row in coordinator.store.rows("SELECT lead_id FROM leads WHERE job_id='job'")]
     all_ids = ids + extra_ids
     (coordinator.job_dir / "ids.txt").write_text("\n".join(all_ids) + "\n", encoding="utf-8", newline="\n")
@@ -335,20 +356,37 @@ def test_reroute_rate_denominator_on_large_job(
         )
     coordinator.bq.pages = [calls]
     coordinator.bq.preflight_pages = [preflight]
+    original_masking_context = coordinator.runner.deps.masking_context
+
+    def masking_context(*args: Any) -> Any:
+        return replace(original_masking_context(*args), allow_ids=frozenset(all_ids))
+
+    coordinator.runner.deps = replace(coordinator.runner.deps, masking_context=masking_context)
+    source = cast(LeadSourceIds, coordinator.runner.spec.lead_source)
+    updated_spec = replace(
+        coordinator.runner.spec,
+        lead_source=replace(source, count=len(all_ids)),
+    )
+    # save_spec always writes the next version file, so the job must move to it.
+    save_spec(updated_spec, coordinator.job_dir)
+    edit_spec(coordinator.store, "job", 2)
     _real_pool(
         coordinator,
         tmp_path,
         monkeypatch,
         {
-            "reroute": ["synthetic110", "synthetic115"],
+            # Leads are claimed in lead_id TEXT order, so "97" and "99" come last: more than 100
+            # leads have finished before the first reroute, and "98" finishes between the two.
+            "reroute": ["97", "99"],
             "models": ["codex", "codex-mini"],
             "latency_ms": 0,
         },
     )
     coordinator.runner.deps = replace(coordinator.runner.deps, concurrency=1)
-    _approve_plan(coordinator)
+    coordinator.runner.on_plan_approved(2)
+    assert coordinator.store.rows("SELECT COUNT(*) FROM leads WHERE job_id='job'")[0][0] == len(all_ids)
     _run(coordinator.runner.run_sample())
-    coordinator.runner.on_sample_approved(1)
+    coordinator.runner.on_sample_approved(2)
     _run(coordinator.runner.start_full_run())
 
     assert coordinator.runner._state() is JobState.paused
@@ -356,18 +394,7 @@ def test_reroute_rate_denominator_on_large_job(
     rerouted = coordinator.store.rows(
         "SELECT data_json FROM job_events WHERE job_id='job' AND kind='reroute' ORDER BY id"
     )
-    assert [json.loads(str(row[0]))["lead_id"] for row in rerouted] == [
-        "synthetic110",
-        "synthetic115",
-    ]
-    assert (
-        coordinator.store.rows("SELECT status FROM leads WHERE job_id='job' AND lead_id='synthetic110'")[0][0]
-        == "done"
-    )
-    assert (
-        coordinator.store.rows(
-            "SELECT COUNT(*) FROM leads WHERE job_id='job' AND lead_id IN "
-            "('synthetic111', 'synthetic112', 'synthetic113', 'synthetic114') AND status='done'"
-        )[0][0]
-        >= 1
-    )
+    assert [json.loads(str(row[0]))["lead_id"] for row in rerouted] == ["97", "99"]
+    # No pause after the first rerouted answer: "97" kept its answer and "98" ran after it.
+    assert coordinator.store.rows("SELECT status FROM leads WHERE job_id='job' AND lead_id='97'")[0][0] == "done"
+    assert coordinator.store.rows("SELECT status FROM leads WHERE job_id='job' AND lead_id='98'")[0][0] == "done"
