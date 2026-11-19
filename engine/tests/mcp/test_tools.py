@@ -149,18 +149,7 @@ def test_propose_job_plan_card_formats_both_byte_fields(
 def test_sample_reference_round_trip_keeps_the_same_masked_lead(tmp_path: Path) -> None:
     host = make_host(tmp_path, FakeBqRunner(dry=DryRun(0, [], [("lead_id", "STRING")])))
     host.store.create_job("job", "project", 1)
-    save_spec(
-        JobSpec(
-            1,
-            "job",
-            "project",
-            "title",
-            "question",
-            LeadSourceSql("SELECT '1001' AS lead_id"),
-            output_schema={"type": "object", "properties": {}},
-        ),
-        tmp_path / "jobs" / "job",
-    )
+    save_spec(JobSpec.from_dict(json.loads(proposal_json())), tmp_path / "jobs" / "job")
     for lead_id, status in (
         ("1001", LeadStatus.masked),
         ("1002", LeadStatus.masked),
