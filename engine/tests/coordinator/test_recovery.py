@@ -10,13 +10,13 @@ import pytest
 
 import bca.coordinator.runner as runner_module
 from bca.mask.masker import mask_lead_stream
-from bca.store import JobState, LeadStatus, save_spec
+from bca.store import JobState, LeadStatus, edit_spec, save_spec
 from tests.coordinator.conftest import CoordinatorFixture
 from tests.coordinator.test_faults import Script, ScriptedPool
 
 
 def _run(awaitable: Any) -> Any:
-    return asyncio.run(awaitable)
+    return asyncio.run(asyncio.wait_for(awaitable, timeout=15))
 
 
 def test_fresh_runner_full_run_uses_persisted_harvest(
@@ -252,6 +252,56 @@ def test_plan_edit_then_reapprove_uses_new_spec(
         coordinator.store.rows("SELECT COUNT(*) FROM leads WHERE job_id='job' AND status='in_flight'")[0][0]
         == 0
     )
+
+
+def test_cap_edit_after_background_masking_rebundles_full_run_leads(
+    coordinator: CoordinatorFixture, make_runner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Lead 6 has two calls; v1's cap keeps only its long call. Materialize that
+    # bundle before the edit to exercise the spec-version cache invalidation.
+    coordinator.runner.on_plan_approved(1)
+    assert coordinator.store.rows(
+        "SELECT calls_sent, calls_dropped_cap FROM leads WHERE job_id='job' AND lead_id='6'"
+    )[0] == (1, 1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+
+    updated = replace(
+        coordinator.runner.spec,
+        spec_version=2,
+        cap=replace(coordinator.runner.spec.cap, max_chars=1000),
+    )
+    save_spec(updated, coordinator.job_dir)
+    edit_spec(coordinator.store, "job", 2)
+    coordinator.runner.on_plan_approved(2)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(2)
+
+    prompts: list[str] = []
+
+    class RecordingPool(ScriptedPool):
+        async def run_until_idle(self) -> None:
+            while True:
+                tasks = await self.callbacks.next_tasks(self.concurrency)
+                if not tasks:
+                    return
+                for task in tasks:
+                    prompts.append(task.prompt)
+                    await self.callbacks.on_started(task)
+                    await self.callbacks.on_result(task, {"ok": True}, task.model, None)
+
+    monkeypatch.setattr(runner_module, "LunaPool", partial(RecordingPool, control=Script()))
+    # The edited plan requires a fresh sample approval; make the already
+    # materialized lead part of the full-run set for this focused regression.
+    with coordinator.store.transaction() as cur:
+        cur.execute("UPDATE leads SET in_sample=0, status='queued' WHERE job_id='job' AND lead_id='6'")
+    fresh = make_runner()
+    _run(fresh.start_full_run())
+
+    assert any("CALL 2 of 2" in prompt for prompt in prompts)
+    assert coordinator.store.rows(
+        "SELECT calls_sent, calls_dropped_cap, chars FROM leads WHERE job_id='job' AND lead_id='6'"
+    )[0] == (2, 0, 2 * len("Synthetic Name says hello. zzlead6zz " + ("x" * 25)))
 
 
 def test_repair_attempt_counted_failure_keeps_answer_with_flag(

@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 import bca.coordinator.runner as runner_module
 from bca.luna.appserver import AppServer, CodexLaunch, start
 from bca.luna.pool import LunaPool
-from bca.store import JobState, LeadStatus
+from bca.store import JobState, LeadStatus, QuoteField, save_spec
 from bca.store import start_full_run as start_full_run_job
 from tests.coordinator.conftest import CoordinatorFixture
 from tests.fakes import fake_codex
@@ -66,6 +66,84 @@ def test_uncounted_failures_are_bounded_then_pause(
         )[0][0]
         == 4
     )
+
+
+def test_repair_always_failing_uncounted_pauses_network_after_four(
+    coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = replace(coordinator.runner.spec, quote_fields=(QuoteField("quote", "any"),))
+    save_spec(spec, coordinator.job_dir)
+    with coordinator.store.transaction() as cur:
+        cur.execute("UPDATE jobs SET spec_version=2 WHERE id='job'")
+    for call in coordinator.bq.pages[0]:
+        call["transcript_text"] = "Customer: hello. " + str(call["transcript_text"])
+    scenario_path = _real_pool(
+        coordinator,
+        tmp_path,
+        monkeypatch,
+        {
+            "answers": {"10": {"quote": "not in the transcript"}},
+            "default_answer": {"quote": "hello"},
+        },
+    )
+    _approve_plan(coordinator)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(2)
+    scenario_path.write_text(
+        json.dumps(
+            {
+                "answers": {"10": {"quote": "not in the transcript"}},
+                "default_answer": {"quote": "hello"},
+                "errors": {"10": "httpConnectionFailed"},
+            }
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    _run(coordinator.runner.start_full_run())
+
+    assert coordinator.runner._state() is JobState.paused
+    assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "network"
+    assert (
+        coordinator.store.rows("SELECT reason FROM leads WHERE job_id='job' AND lead_id='10'")[0][0]
+        == "quote_repair_pending"
+    )
+    assert (
+        coordinator.store.rows(
+            "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND lead_id='10' AND counted=0 "
+            "AND error_code='httpConnectionFailed'"
+        )[0][0]
+        == 4
+    )
+    assert (
+        coordinator.store.rows(
+            "SELECT quotes_ok, flags_json, answer_json FROM results WHERE job_id='job' AND lead_id='10'"
+        )[0][0]
+        == 0
+    )
+    result = coordinator.store.rows(
+        "SELECT quotes_ok, flags_json, answer_json FROM results WHERE job_id='job' AND lead_id='10'"
+    )[0]
+    assert "quote:" in str(result[1])
+    assert "not in the transcript" in str(result[2])
+    assert (
+        coordinator.store.rows(
+            "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND lead_id='10' "
+            "AND error_code IN ('interrupted', 'quota_interrupt')"
+        )[0][0]
+        == 0
+    )
+
+    scenario_path.write_text(
+        json.dumps({"answers": {"10": {"quote": "hello"}}, "default_answer": {"quote": "hello"}}),
+        encoding="utf-8",
+        newline="\n",
+    )
+    _run(coordinator.runner.resume("operator"))
+    assert coordinator.runner._state() is JobState.done
+    assert coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='10'")[
+        0
+    ] == ("done", None)
 
 
 def test_credit_drop_with_real_pool_pauses_and_fresh_runner_refuses_automatic_resume(
@@ -225,3 +303,59 @@ def test_reroute_rate_baseline_resets_after_operator_resume(
 
     assert coordinator.runner._state() is JobState.paused
     assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "model_unavailable"
+
+
+def test_reroute_rate_denominator_on_large_job(
+    coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    extra_ids = [f"synthetic{index:03d}" for index in range(120)]
+    ids = [str(row[0]) for row in coordinator.store.rows("SELECT lead_id FROM leads WHERE job_id='job'")]
+    all_ids = ids + extra_ids
+    (coordinator.job_dir / "ids.txt").write_text("\n".join(all_ids) + "\n", encoding="utf-8", newline="\n")
+    preflight = list(coordinator.bq.preflight_pages[0] if coordinator.bq.preflight_pages else [])
+    calls = list(coordinator.bq.pages[0])
+    for lead_id in extra_ids:
+        preflight.append(
+            {
+                "lead_id": lead_id,
+                "found": True,
+                "calls": 1,
+                "usable_calls": 1,
+                "transcript_calls": 1,
+                "transcription_failed": None,
+            }
+        )
+        calls.append(
+            {
+                "lead_id": lead_id,
+                "call_id": f"call-{lead_id}-synthetic-0",
+                "transcript_text": f"Synthetic Name says hello. zzlead{lead_id}zz " + ("x" * 25),
+                "call_start": "synthetic-start-0",
+                "duration": 200,
+            }
+        )
+    coordinator.bq.pages = [calls]
+    coordinator.bq.preflight_pages = [preflight]
+    _real_pool(
+        coordinator,
+        tmp_path,
+        monkeypatch,
+        {"reroute": "synthetic119", "models": ["codex", "codex-mini"], "latency_ms": 0},
+    )
+    coordinator.runner.deps = replace(coordinator.runner.deps, concurrency=1)
+    _approve_plan(coordinator)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+    _run(coordinator.runner.start_full_run())
+
+    assert coordinator.runner._state() is JobState.paused
+    assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "model_unavailable"
+    rerouted = coordinator.store.rows(
+        "SELECT COUNT(*) FROM job_events WHERE job_id='job' AND kind='reroute'"
+    )[0][0]
+    ended_before_reroute = coordinator.store.rows(
+        "SELECT COUNT(DISTINCT lead_id) FROM attempts WHERE job_id='job' "
+        "AND ended_at IS NOT NULL AND lead_id != 'synthetic119'"
+    )[0][0]
+    assert rerouted == 1
+    assert ended_before_reroute > 100
