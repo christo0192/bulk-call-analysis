@@ -52,11 +52,14 @@ class SleepOnQuotaDrainPool(RecPool):
     """When the pool parks a quota pause because leads are still in flight, the laptop sleeps."""
 
     clock: Any = None
+    slept = False
 
     async def _pause(self, reason: str, resume_at: int | None) -> None:
         had = self._paused
         await super()._pause(reason, resume_at)
-        if reason == "quota" and not had and self._pending_pause is not None:
+        # The laptop sleeps ONCE, while the first parked quota drain is still running.
+        if reason == "quota" and not had and self._pending_pause is not None and not type(self).slept:
+            type(self).slept = True
             type(self).clock.current += 100
 
 
@@ -267,6 +270,7 @@ def test_sleep_gap_during_quota_drain_holds_back_nothing(
         SleepOnQuotaDrainPool,
     )
     SleepOnQuotaDrainPool.clock = coordinator.clock
+    SleepOnQuotaDrainPool.slept = False
     runner = coordinator.runner
     runner.on_plan_approved(1)
 
