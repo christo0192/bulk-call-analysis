@@ -72,6 +72,7 @@ class RunnerDeps:
     ner: Any | None = None
     concurrency: int = 4
     approved_bytes: int | None = None
+    retry_backoff_s: float = 1
 
 
 def _as_dict(value: object) -> dict[str, object]:
@@ -587,6 +588,7 @@ class JobRunner:
                 self._quota_guard,
                 self.deps.concurrency,
                 self.deps.config.limits.lead_timeout_s,
+                retry_backoff_s=self.deps.retry_backoff_s,
                 clock=self.deps.clock,
             )
             self._phase_pool = pool
@@ -594,7 +596,29 @@ class JobRunner:
             pool.callbacks = callbacks
         pool.set_concurrency(1 if canary else self.deps.concurrency)
         try:
-            await pool.run_until_idle()
+            while True:
+                await pool.run_until_idle()
+                if self._masking_task is not None and self._masking_task.done():
+                    masking_task = self._masking_task
+                    self._masking_task = None
+                    try:
+                        masking_task.result()
+                    except Exception as exc:
+                        if self._state() not in {
+                            JobState.paused,
+                            JobState.stalled,
+                            JobState.done,
+                            JobState.done_with_issues,
+                        }:
+                            transition(
+                                self.deps.store,
+                                self.job_id,
+                                JobState.stalled,
+                                f"masking failed: {type(exc).__name__}: {exc}",
+                            )
+                        raise
+                if self._state() is JobState.paused or self._phase_finished(sample):
+                    break
         finally:
             self._phase_event.set()
             if not canary and self._phase_pool is pool and self._state() is not JobState.paused:
@@ -604,6 +628,20 @@ class JobRunner:
         self._refresh_spec(expected_spec_version)
         approve_plan(self.deps.store, self.job_id, "operator", expected_spec_version)
         transition(self.deps.store, self.job_id, JobState.pulling)
+        self._pull()
+        transition(self.deps.store, self.job_id, JobState.masking_sample)
+        try:
+            self._mask_sample()
+        except Exception as exc:
+            transition(
+                self.deps.store,
+                self.job_id,
+                JobState.stalled,
+                f"sample masking failed: {type(exc).__name__}: {exc}",
+            )
+            raise
+
+    def _pull(self) -> None:
         source = self.spec.lead_source
         intake = resolve_lead_source(
             source,
@@ -650,8 +688,6 @@ class JobRunner:
             window,
             self.deps.approved_bytes,
         )
-        transition(self.deps.store, self.job_id, JobState.masking_sample)
-        self._mask_sample()
 
     def spec_to_recipe(self) -> Any:
         return self.deps.config.recipe
@@ -664,7 +700,7 @@ class JobRunner:
             self._bundles[lead_id] = ""
 
     def _mask_sample(self) -> None:
-        usable = [
+        all_usable = [
             str(row[0])
             for row in self.deps.store.rows(
                 "SELECT lead_id FROM leads WHERE job_id=? AND status IN ('pulled', 'masked') "
@@ -672,22 +708,48 @@ class JobRunner:
                 (self.job_id,),
             )
         ]
-        sample = usable[: self.spec.sample_size]
+        selected = [
+            str(row[0])
+            for row in self.deps.store.rows(
+                "SELECT lead_id FROM leads WHERE job_id=? AND in_sample=1 "
+                "AND status IN ('queued', 'in_flight', 'done', 'masked') ORDER BY lead_id",
+                (self.job_id,),
+            )
+        ]
+        usable = list(dict.fromkeys(all_usable + selected))
+        sample = selected or usable[: self.spec.sample_size]
+        if sample:
+            with self.deps.store.transaction() as cur:
+                cur.executemany(
+                    "UPDATE leads SET in_sample=1 WHERE job_id=? AND lead_id=?",
+                    [(self.job_id, lead_id) for lead_id in sample],
+                )
         context = self._base_context()
-        raw_available = all(
-            (self.deps.job_dir / "raw" / f"{lead_id}.jsonl.gz").is_file() for lead_id in usable
-        )
-        if context.ner is not None and raw_available:
+        harvest_path = self.deps.job_dir / "harvested_names.json"
+        harvest_inputs: list[str] = []
+        if context.ner is not None:
 
             def source_texts() -> Iterable[str]:
                 for lead_id in usable:
-                    yield from (
-                        str(record.get("transcript_text", "")) for record in self._lead_calls(lead_id, False)
-                    )
+                    raw = self.deps.job_dir / "raw" / f"{lead_id}.jsonl.gz"
+                    if not raw.is_file():
+                        continue
+                    try:
+                        calls = self._lead_calls(lead_id, False)
+                    except Exception as exc:
+                        self.deps.store.set_lead_status(
+                            self.job_id,
+                            lead_id,
+                            LeadStatus.held_back,
+                            f"harvest failed: {type(exc).__name__}: {exc}",
+                        )
+                        continue
+                    harvest_inputs.append(lead_id)
+                    yield from (str(record.get("transcript_text", "")) for record in calls)
 
             harvested = harvest_seen_twice(source_texts(), context.ner)
-            harvest_path = self.deps.job_dir / "harvested_names.json"
-            if usable or not harvest_path.exists():
+            usable = harvest_inputs or usable
+            if harvest_inputs and (not harvest_path.exists() or not harvest_path.is_file()):
                 harvest_path.write_text(
                     json.dumps(harvested, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n"
                 )
@@ -713,8 +775,12 @@ class JobRunner:
                     LeadStatus.held_back,
                     f"masked bundle unavailable: {type(exc).__name__}: {exc}",
                 )
-        for lead_id in usable[self.spec.sample_size :]:
-            self.deps.store.set_lead_status(self.job_id, lead_id, LeadStatus.not_started)
+        sample_set = set(sample)
+        for lead_id in usable:
+            if lead_id not in sample_set and self.deps.store.rows(
+                "SELECT status FROM leads WHERE job_id=? AND lead_id=?", (self.job_id, lead_id)
+            )[0][0] in {LeadStatus.pulled, LeadStatus.masked}:
+                self.deps.store.set_lead_status(self.job_id, lead_id, LeadStatus.not_started)
         transition(self.deps.store, self.job_id, JobState.sample_running)
 
     async def run_sample(self) -> None:
@@ -833,7 +899,14 @@ class JobRunner:
             await self.start_full_run()
 
     def recover(self) -> int:
-        if self._state() in {
+        state = self._state()
+        if state is JobState.pulling:
+            self._pull()
+            transition(self.deps.store, self.job_id, JobState.masking_sample)
+            self._mask_sample()
+        elif state is JobState.masking_sample:
+            self._mask_sample()
+        if state in {
             JobState.pulling,
             JobState.masking_sample,
             JobState.sample_running,

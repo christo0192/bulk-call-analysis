@@ -88,6 +88,7 @@ class LunaPool:
         max_consecutive_failures: int = 25,
         crash_window_s: float = 600,
         restart_backoff_s: float = 0,
+        retry_backoff_s: float = 1,
         rpc_timeout_s: float = 30,
         clock: PoolClock | None = None,
     ) -> None:
@@ -101,6 +102,7 @@ class LunaPool:
         self.max_consecutive_failures = max(1, max_consecutive_failures)
         self.crash_window_s = max(0, crash_window_s)
         self.restart_backoff_s = max(0, restart_backoff_s)
+        self.retry_backoff_s = max(0, retry_backoff_s)
         self.rpc_timeout_s = max(0, rpc_timeout_s)
         self.clock = clock
         self._server: AppServer | None = None
@@ -111,7 +113,7 @@ class LunaPool:
         self._stopping = False
         self._consecutive_failures = 0
         self._completed = 0
-        self._backoff = 0
+        self._backoff = 0.0
         self._restart_lock = asyncio.Lock()
         self._crashes: list[float] = []
         self._models: set[str] = set()
@@ -534,7 +536,7 @@ class LunaPool:
             "-32001",
         }
         if code in retryable:
-            self._backoff = min(60, 1 if self._backoff == 0 else self._backoff * 2)
+            self._backoff = min(60, self.retry_backoff_s if self._backoff == 0 else self._backoff * 2)
             self.set_concurrency(self.concurrency - 1)
             await self._fail(lead, code, False, detail)
         elif code == "usageLimitExceeded":

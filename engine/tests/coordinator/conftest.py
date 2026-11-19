@@ -259,6 +259,7 @@ def coordinator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Co
         job_dir,
         concurrency=4,
         approved_bytes=1,
+        retry_backoff_s=0.01,
     )
     runner = JobRunner("job", deps)
     fixture = CoordinatorFixture(runner, store, bq, clock, events, pool, config, job_dir)

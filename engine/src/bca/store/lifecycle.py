@@ -208,7 +208,7 @@ def edit_spec(store: Store, job_id: str, spec_version: int) -> None:
             (_timestamp(), job_id),
         )
         cur.execute(
-            "UPDATE leads SET status='masked', reason=NULL WHERE job_id=? AND status IN ('in_flight','queued','done') AND in_sample=1",
+            "UPDATE leads SET status='queued', reason=NULL WHERE job_id=? AND status IN ('in_flight','queued','done','masked') AND in_sample=1",
             (job_id,),
         )
         cur.execute("DELETE FROM results WHERE job_id=?", (job_id,))
