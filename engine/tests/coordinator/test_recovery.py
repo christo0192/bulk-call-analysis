@@ -260,10 +260,18 @@ def test_cap_edit_after_background_masking_rebundles_full_run_leads(
     # Lead 6 has two calls; v1's cap keeps only its long call. Materialize that
     # bundle before the edit to exercise the spec-version cache invalidation.
     coordinator.runner.on_plan_approved(1)
-    assert coordinator.store.rows(
-        "SELECT calls_sent, calls_dropped_cap FROM leads WHERE job_id='job' AND lead_id='6'"
-    )[0] == (1, 1)
     _run(coordinator.runner.run_sample())
+    assert coordinator.runner._bundles["6"][0] == 1
+    assert coordinator.runner._bundle_metadata["6"] == (
+        1,
+        1,
+        len("Synthetic Name says hello. zzlead6zz " + ("x" * 25)),
+    )
+    assert tuple(
+        coordinator.store.rows(
+            "SELECT calls_sent, calls_dropped_cap FROM leads WHERE job_id='job' AND lead_id='6'"
+        )[0]
+    ) == (1, 1)
     coordinator.runner.on_sample_approved(1)
 
     updated = replace(
@@ -299,9 +307,11 @@ def test_cap_edit_after_background_masking_rebundles_full_run_leads(
     _run(fresh.start_full_run())
 
     assert any("CALL 2 of 2" in prompt for prompt in prompts)
-    assert coordinator.store.rows(
-        "SELECT calls_sent, calls_dropped_cap, chars FROM leads WHERE job_id='job' AND lead_id='6'"
-    )[0] == (2, 0, 2 * len("Synthetic Name says hello. zzlead6zz " + ("x" * 25)))
+    assert tuple(
+        coordinator.store.rows(
+            "SELECT calls_sent, calls_dropped_cap, chars FROM leads WHERE job_id='job' AND lead_id='6'"
+        )[0]
+    ) == (2, 0, 2 * len("Synthetic Name says hello. zzlead6zz " + ("x" * 25)))
 
 
 def test_repair_attempt_counted_failure_keeps_answer_with_flag(

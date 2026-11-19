@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 import bca.coordinator.runner as runner_module
 from bca.luna.appserver import AppServer, CodexLaunch, start
 from bca.luna.pool import LunaPool
-from bca.store import JobState, LeadStatus, QuoteField, save_spec
+from bca.store import JobState, LeadStatus, QuoteField, edit_spec, save_spec
 from bca.store import start_full_run as start_full_run_job
 from tests.coordinator.conftest import CoordinatorFixture
 from tests.fakes import fake_codex
@@ -73,8 +73,7 @@ def test_repair_always_failing_uncounted_pauses_network_after_four(
 ) -> None:
     spec = replace(coordinator.runner.spec, quote_fields=(QuoteField("quote", "any"),))
     save_spec(spec, coordinator.job_dir)
-    with coordinator.store.transaction() as cur:
-        cur.execute("UPDATE jobs SET spec_version=2 WHERE id='job'")
+    edit_spec(coordinator.store, "job", 2)
     for call in coordinator.bq.pages[0]:
         call["transcript_text"] = "Customer: hello. " + str(call["transcript_text"])
     scenario_path = _real_pool(
@@ -86,7 +85,7 @@ def test_repair_always_failing_uncounted_pauses_network_after_four(
             "default_answer": {"quote": "hello"},
         },
     )
-    _approve_plan(coordinator)
+    coordinator.runner.on_plan_approved(2)
     _run(coordinator.runner.run_sample())
     coordinator.runner.on_sample_approved(2)
     scenario_path.write_text(
@@ -340,7 +339,11 @@ def test_reroute_rate_denominator_on_large_job(
         coordinator,
         tmp_path,
         monkeypatch,
-        {"reroute": "synthetic119", "models": ["codex", "codex-mini"], "latency_ms": 0},
+        {
+            "reroute": ["synthetic110", "synthetic115"],
+            "models": ["codex", "codex-mini"],
+            "latency_ms": 0,
+        },
     )
     coordinator.runner.deps = replace(coordinator.runner.deps, concurrency=1)
     _approve_plan(coordinator)
@@ -351,11 +354,20 @@ def test_reroute_rate_denominator_on_large_job(
     assert coordinator.runner._state() is JobState.paused
     assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "model_unavailable"
     rerouted = coordinator.store.rows(
-        "SELECT COUNT(*) FROM job_events WHERE job_id='job' AND kind='reroute'"
-    )[0][0]
-    ended_before_reroute = coordinator.store.rows(
-        "SELECT COUNT(DISTINCT lead_id) FROM attempts WHERE job_id='job' "
-        "AND ended_at IS NOT NULL AND lead_id != 'synthetic119'"
-    )[0][0]
-    assert rerouted == 1
-    assert ended_before_reroute > 100
+        "SELECT data_json FROM job_events WHERE job_id='job' AND kind='reroute' ORDER BY id"
+    )
+    assert [json.loads(str(row[0]))["lead_id"] for row in rerouted] == [
+        "synthetic110",
+        "synthetic115",
+    ]
+    assert (
+        coordinator.store.rows("SELECT status FROM leads WHERE job_id='job' AND lead_id='synthetic110'")[0][0]
+        == "done"
+    )
+    assert (
+        coordinator.store.rows(
+            "SELECT COUNT(*) FROM leads WHERE job_id='job' AND lead_id IN "
+            "('synthetic111', 'synthetic112', 'synthetic113', 'synthetic114') AND status='done'"
+        )[0][0]
+        >= 1
+    )
