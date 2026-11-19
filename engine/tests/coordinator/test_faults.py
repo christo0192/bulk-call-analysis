@@ -131,6 +131,30 @@ def test_sleep_gap_requeues_uncounted(coordinator: CoordinatorFixture) -> None:
     )
 
 
+def test_pause_is_idempotent_and_late_result_is_ignored(coordinator: CoordinatorFixture) -> None:
+    coordinator.runner.on_plan_approved(1)
+    coordinator.runner._prepare_leads(["10"], True)
+    callbacks = _Callbacks(coordinator.runner, sample=True)
+    task = _run(callbacks.next_tasks(1))[0]
+    _run(callbacks.on_started(task))
+
+    _run(callbacks.on_pause("sleep", None))
+    _run(callbacks.on_pause("quota", None))
+    _run(callbacks.on_result(task, {"ok": True}, task.model, None))
+
+    assert coordinator.runner._state() is JobState.paused
+    assert (
+        coordinator.store.rows("SELECT status FROM leads WHERE job_id='job' AND lead_id='10'")[0][0]
+        == "queued"
+    )
+    assert (
+        coordinator.store.rows("SELECT COUNT(*) FROM job_events WHERE job_id='job' AND kind='stale_result'")[
+            0
+        ][0]
+        == 0
+    )
+
+
 def test_repeated_task_selection_claims_each_lead_once(coordinator: CoordinatorFixture) -> None:
     coordinator.runner.on_plan_approved(1)
     coordinator.runner._prepare_leads(["7", "8"], True)

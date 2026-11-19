@@ -34,6 +34,7 @@ from bca.store import (
     LeadStatus,
     PauseReason,
     Store,
+    TransitionError,
     approve_plan,
     approve_sample,
     load_latest_spec,
@@ -131,6 +132,7 @@ class _Callbacks(PoolCallbacks):
         if attempt is None:
             LOGGER.warning("ignoring result for closed attempt %s", task.attempt_id)
             return
+        self.runner._close_attempt(task.attempt_id)
         self.runner._refresh_spec()
         failures = check_answer(
             answer,
@@ -192,12 +194,16 @@ class _Callbacks(PoolCallbacks):
         self.runner._get_phase_event().set()
         attempt = self.runner._attempts.get(task.attempt_id)
         if attempt is None:
+            if self.runner._is_closed_attempt(task.attempt_id):
+                LOGGER.warning("ignoring failure for closed attempt %s", task.attempt_id)
+                return
             # claim_queued() runs before on_started().  A pool dispatch decision,
             # cancellation, or startup exception can therefore report a task
             # with no attempt row to close.
             if self.runner.deps.store.release_claim(self.runner.job_id, task.lead_id):
                 self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
         else:
+            self.runner._close_attempt(task.attempt_id)
             try:
                 self.runner.deps.store.fail_attempt(
                     attempt,
@@ -249,16 +255,14 @@ class _Callbacks(PoolCallbacks):
                 JobState.done,
                 JobState.done_with_issues,
             }:
-                if self.runner._phase_pool is not None:
-                    await self.runner._phase_pool.pause(PauseReason.sleep.value)
-                else:
-                    self.runner.deps.store.requeue_in_flight(self.runner.job_id, "sleep gap")
+                if self.runner._pause_task is None or self.runner._pause_task.done():
+                    self.runner._pause_task = asyncio.create_task(self.runner.pause(PauseReason.sleep.value))
+                    self.runner._pause_task.add_done_callback(self.runner._pause_task_done)
                 self.runner._liveness.sleep_detected(ts)
                 start = event.data.get("start")
                 if isinstance(start, (int, float)):
                     self.runner._eta.sleep_gap(float(start), ts)
                 self.runner._pause_started = ts
-                await self.on_pause(PauseReason.sleep.value, None)
             elif event.kind == "wake":
                 if not self.runner._sleep.wait_for_network():
                     row = self.runner.deps.store.rows(
@@ -324,28 +328,11 @@ class _Callbacks(PoolCallbacks):
         self.runner._publish("notice", {"lead_id": task.lead_id, "rerouted_to": to_model})
 
     async def on_pause(self, reason: str, resume_at: int | None) -> None:
-        now = self.runner._ts()
-        if self.runner._pause_started is None:
-            self.runner._pause_started = now
-        if reason != PauseReason.model_unavailable.value:
-            self.runner.deps.store.requeue_in_flight(self.runner.job_id, reason, outcome="interrupted")
-        else:
-            # Preserve an open rerouted attempt, but never leave a selection
-            # claim stranded when dispatch was cancelled before on_started.
-            for (lead_id,) in self.runner.deps.store.rows(
-                "SELECT lead_id FROM leads WHERE job_id=? AND status='in_flight'",
-                (self.runner.job_id,),
-            ):
-                self.runner.deps.store.release_claim(self.runner.job_id, str(lead_id))
-        self.runner._get_phase_event().set()
-        if reason in {item.value for item in PauseReason}:
-            pause(self.runner.deps.store, self.runner.job_id, PauseReason(reason), resume_at)
-        self.runner._eta.pause(
-            self.runner._pause_started,
-            float(resume_at) if resume_at is not None else now,
-        )
-        self.runner._publish("pause", {"reason": reason, "resume_at": resume_at})
+        if self.runner._state() is JobState.paused:
+            LOGGER.info("keeping existing pause while ignoring later pause %s", reason)
+            return
         await self.runner._pause_phase_pool(reason)
+        await self.runner._record_pause(reason, resume_at)
 
 
 class JobRunner:
@@ -354,6 +341,7 @@ class JobRunner:
         self.deps = deps
         self.spec, _ = load_latest_spec(deps.job_dir)
         self._attempts: dict[str, str] = {}
+        self._closed_attempts: set[str] = set()
         self._bundles: dict[str, str] = {}
         self._answers: dict[str, dict[str, object]] = {}
         self._quote_failures: dict[str, tuple[dict[str, Any], list[QuoteCheck]]] = {}
@@ -365,6 +353,7 @@ class JobRunner:
         self._phase_loop: asyncio.AbstractEventLoop | None = None
         self._phase_pool: LunaPool | None = None
         self._pause_started: float | None = None
+        self._pause_task: asyncio.Task[None] | None = None
         row = deps.store.rows("SELECT quota_baseline FROM jobs WHERE id=?", (job_id,))
         baseline = None
         if row and row[0][0] is not None:
@@ -372,9 +361,23 @@ class JobRunner:
 
             baseline = Decimal(str(row[0][0]))
         self._quota_guard = QuotaGuard(deps.config.limits.codex_stop_percent, baseline)
+        self._phase_lock = asyncio.Lock()
 
     def _ts(self) -> float:
         return self.deps.clock.now() if self.deps.clock is not None else time.time()
+
+    def _close_attempt(self, attempt_id: str) -> None:
+        self._attempts.pop(attempt_id, None)
+        self._closed_attempts.add(attempt_id)
+
+    def _is_closed_attempt(self, attempt_id: str) -> bool:
+        return attempt_id in self._closed_attempts
+
+    def _pause_task_done(self, task: asyncio.Task[None]) -> None:
+        if self._pause_task is task:
+            self._pause_task = None
+        if not task.cancelled() and task.exception() is not None:
+            LOGGER.error("scheduled pause failed", exc_info=task.exception())
 
     def _get_phase_event(self) -> asyncio.Event:
         loop = asyncio.get_running_loop()
@@ -544,6 +547,43 @@ class JobRunner:
         if pool is not None:
             await pool.pause(reason)
 
+    async def _record_pause(self, reason: str, resume_at: int | None) -> None:
+        now = self._ts()
+        if self._pause_started is None:
+            self._pause_started = now
+        if reason != PauseReason.model_unavailable.value:
+            self.deps.store.requeue_in_flight(self.job_id, reason, outcome="interrupted")
+            self._closed_attempts.update(self._attempts)
+            self._attempts.clear()
+        else:
+            for (lead_id,) in self.deps.store.rows(
+                "SELECT lead_id FROM leads WHERE job_id=? AND status='in_flight'",
+                (self.job_id,),
+            ):
+                self.deps.store.release_claim(self.job_id, str(lead_id))
+        self._get_phase_event().set()
+        if reason in {item.value for item in PauseReason}:
+            try:
+                pause(self.deps.store, self.job_id, PauseReason(reason), resume_at)
+            except TransitionError:
+                if self._state() is not JobState.paused:
+                    raise
+                LOGGER.info("pause %s raced with another pause", reason)
+        self._eta.pause(
+            self._pause_started,
+            float(resume_at) if resume_at is not None else now,
+        )
+        self._publish("pause", {"reason": reason, "resume_at": resume_at})
+
+    async def pause(self, reason: str) -> None:
+        """Pause through the active pool, then persist the pause after draining."""
+        pool = self._phase_pool
+        if pool is not None:
+            await pool.pause(reason)
+            await pool.wait_for_drain()
+        if self._state() is not JobState.paused:
+            await self._record_pause(reason, None)
+
     def _masking_needed(self, sample: bool) -> bool:
         rows = self.deps.store.rows(
             "SELECT 1 FROM leads WHERE job_id=? AND status IN ('pending', 'pulled', 'not_started') "
@@ -614,6 +654,10 @@ class JobRunner:
             self._quote_failures[key] = (answer, failures)
 
     async def _run_phase(self, sample: bool, canary: bool = False) -> None:
+        async with self._phase_lock:
+            await self._run_phase_locked(sample, canary)
+
+    async def _run_phase_locked(self, sample: bool, canary: bool = False) -> None:
         """Run one store-driven phase with one pool and one termination rule."""
         self._phase_loop = asyncio.get_running_loop()
         phase_event = self._get_phase_event()
@@ -934,10 +978,15 @@ class JobRunner:
             self.deps.store.append_event(self.job_id, "reroute_baseline", {})
         # Requeue while the job is still paused so an interrupted repair stays
         # marked as an uncounted, reusable repair attempt before dispatch resumes.
-        self.deps.store.requeue_in_flight(self.job_id, "resume")
-        resume_job(self.deps.store, self.job_id)
-        self._pause_started = None
-        state = self._state()
+        async with self._phase_lock:
+            if self._phase_pool is not None:
+                await self._phase_pool.wait_for_drain()
+            self.deps.store.requeue_in_flight(self.job_id, "resume")
+            self._closed_attempts.update(self._attempts)
+            self._attempts.clear()
+            resume_job(self.deps.store, self.job_id)
+            self._pause_started = None
+            state = self._state()
         if state is JobState.sample_running:
             await self._run_phase(True, canary=True)
             if self._state() is JobState.paused:

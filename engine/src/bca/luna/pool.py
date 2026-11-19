@@ -133,6 +133,8 @@ class LunaPool:
     async def pause(self, reason: str) -> None:
         """Stop dispatching and, for interrupting reasons, stop active turns."""
         if self._paused:
+            if reason != "model_unavailable" and self._leads:
+                await self._interrupt_all(reason)
             return
         self._paused = True
         self._dispatch_closed = True
@@ -142,6 +144,11 @@ class LunaPool:
             await asyncio.gather(next_tasks, return_exceptions=True)
         if reason != "model_unavailable":
             await self._interrupt_all(reason)
+
+    async def wait_for_drain(self) -> None:
+        """Wait until interrupted turns have finished unwinding."""
+        while self._leads:
+            await asyncio.sleep(0.01)
 
     async def run_until_idle(self) -> None:
         loop = asyncio.get_running_loop()
@@ -220,15 +227,21 @@ class LunaPool:
                     for running_task in running:
                         running_task.cancel()
                     await asyncio.gather(*running, return_exceptions=True)
-            if self._pending_pause is not None:
-                reason, resume_at = self._pending_pause
-                self._pending_pause = None
-                await self.callbacks.on_pause(reason, resume_at)
-            if self._pending_actions:
-                await asyncio.gather(*self._pending_actions, return_exceptions=True)
-            if self._server is not None:
-                await self._server.stop()
-                self._server = None
+            try:
+                if self._pending_pause is not None:
+                    reason, resume_at = self._pending_pause
+                    self._pending_pause = None
+                    await self.callbacks.on_pause(reason, resume_at)
+            finally:
+                try:
+                    if self._pending_actions:
+                        await asyncio.gather(*self._pending_actions, return_exceptions=True)
+                finally:
+                    if self._server is not None:
+                        try:
+                            await self._server.stop()
+                        finally:
+                            self._server = None
 
     async def _heartbeat(self) -> None:
         while True:
