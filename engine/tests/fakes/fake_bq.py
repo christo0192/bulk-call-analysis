@@ -28,7 +28,11 @@ class FakeBqRunner:
         return self.dry
 
     def iter_pages(
-        self, sql: str, params: Mapping[str, object] | None = None, page_size: int = 1000
+        self,
+        sql: str,
+        params: Mapping[str, object] | None = None,
+        page_size: int = 1000,
+        timeout: float | None = None,
     ) -> Iterator[list[dict[str, object]]]:
         validate_select(sql)
         self.calls.append((sql, params, page_size))

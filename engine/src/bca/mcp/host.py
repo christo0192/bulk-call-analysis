@@ -13,9 +13,10 @@ from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any, Protocol, cast
 
-from bca.bq.guard import validate_select
+from bca.bq.guard import sql_tokens, validate_select
 from bca.bq.leads import record_lead_intake, resolve_lead_source
 from bca.bq.pull import build_bundle, run_preflight
 from bca.bq.runner import BqRunner
@@ -49,6 +50,11 @@ _VIEWS = {"TABLES", "COLUMNS", "VIEWS", "TABLE_OPTIONS", "COLUMN_FIELD_PATHS", "
 
 
 def _has_forbidden_reconstruction(sql: str) -> bool:
+    return _has_forbidden_from_tokens(sql)
+
+
+def _has_forbidden_from_tokens(sql: str) -> bool:
+    tokens = sql_tokens(sql)
     words = {
         "TO_CODE_POINTS",
         "CODE_POINTS_TO_STRING",
@@ -64,68 +70,28 @@ def _has_forbidden_reconstruction(sql: str) -> bool:
         "UNICODE",
         "REVERSE",
     }
-    scrubbed, commentless = _sql_tokens(sql)
-    if any(re.search(rf"\b{re.escape(word)}\s*\(", scrubbed, re.IGNORECASE) for word in words):
-        return True
-    format_match = re.search(
-        r"\bFORMAT\s*\(\s*(['\"])(?:(?:\\.)|(?:\1\1)|(?!\1).)*%[xXoO]",
-        commentless,
-        re.IGNORECASE,
-    )
-    return (
-        format_match is not None
-        and scrubbed[format_match.start() : format_match.start() + 6].upper() == "FORMAT"
-    )
-
-
-def _sql_tokens(sql: str) -> tuple[str, str]:
-    """Return normalized SQL and a copy retaining only string literal text."""
-    normalized: list[str] = []
-    commentless: list[str] = []
-    index = 0
-    while index < len(sql):
-        if sql.startswith("--", index):
-            end = sql.find("\n", index + 2)
-            index = len(sql) if end < 0 else end + 1
-            normalized.append(" ")
-            commentless.append(" ")
-            continue
-        if sql.startswith("/*", index):
-            end = sql.find("*/", index + 2)
-            index = len(sql) if end < 0 else end + 2
-            normalized.append(" ")
-            commentless.append(" ")
-            continue
-        if sql[index] in "'\"`":
-            quote = sql[index]
-            normalized.append(" ")
-            commentless.append(quote)
-            literal = [quote]
-            index += 1
-            while index < len(sql):
-                literal.append(sql[index])
-                normalized.append(" ")
-                commentless.append(sql[index])
-                if sql[index] == "\\" and quote != "`" and index + 1 < len(sql):
-                    index += 1
-                    literal.append(sql[index])
-                    normalized.append(" ")
-                    commentless.append(sql[index])
-                elif sql[index] == quote:
-                    if index + 1 < len(sql) and sql[index + 1] == quote:
-                        index += 1
-                        literal.append(sql[index])
-                        normalized.append(" ")
-                        commentless.append(sql[index])
-                    else:
-                        index += 1
-                        break
-                index += 1
-            continue
-        normalized.append(sql[index])
-        commentless.append(sql[index])
-        index += 1
-    return "".join(normalized), "".join(commentless)
+    for index, token in enumerate(tokens):
+        if (
+            token.kind == "word"
+            and token.text.upper() in words
+            and index + 1 < len(tokens)
+            and tokens[index + 1].text == "("
+        ):
+            return True
+        if token.kind == "word" and token.text.upper() == "FORMAT":
+            if index + 2 >= len(tokens) or tokens[index + 1].text != "(":
+                continue
+            format_token = tokens[index + 2]
+            if format_token.kind != "literal":
+                return True
+            if index + 3 >= len(tokens) or tokens[index + 3].text != ",":
+                return True
+            literal = format_token.text
+            if len(literal) < 2 or literal[0] not in "'\"" or not literal.endswith(literal[0]):
+                return True
+            if re.fullmatch(r"%[-+# 0]*\d*(?:\.\d+)?[xXoO]", literal[1:-1]):
+                return True
+    return False
 
 
 class ToolHostError(RuntimeError):
@@ -169,7 +135,7 @@ def _masked(
             return "[NUMBER]"
         return value
     if isinstance(value, float):
-        if value.is_integer() and _is_sensitive_number(str(int(value))):
+        if _is_sensitive_number(str(int(value))):
             return "[NUMBER]"
         return value
     if value is None or isinstance(value, bool):
@@ -182,9 +148,10 @@ def _cap(
     context: MaskingContext,
     *,
     unit: str = "characters",
+    already_masked: bool = False,
 ) -> object:
     if isinstance(value, str):
-        masked_text = mask_text(value, context).text
+        masked_text = value if already_masked else mask_text(value, context).text
         if len(value) <= MAX_RESULT_CHARS and len(masked_text) <= MAX_RESULT_CHARS:
             return masked_text
         marker_template = "\n[... {} {} omitted ...]"
@@ -194,7 +161,7 @@ def _cap(
         omitted = len(value) - string_kept
         marker = marker_template.format(omitted, unit)
         return masked_text[:string_kept] + marker
-    masked = _masked(value, context)
+    masked = value if already_masked else _masked(value, context)
     if isinstance(masked, str) and len(masked) > MAX_RESULT_CHARS:
         omitted = len(masked) - MAX_RESULT_CHARS
         return masked[: MAX_RESULT_CHARS - 80] + f"\n[truncated: {omitted} {unit} omitted]"
@@ -225,7 +192,31 @@ def _cap(
         omitted = len(masked) - len(kept)
         return {"items": kept, "truncated": f"{omitted} rows omitted; aggregate in SQL or page the result"}
     if isinstance(masked, dict):
-        return {"value": masked, "truncated": "optional fields omitted; use a narrower request"}
+        result = dict(masked)
+        while len(json.dumps(result, ensure_ascii=False, default=str)) > MAX_RESULT_CHARS:
+            candidates = [
+                (len(json.dumps(item, ensure_ascii=False, default=str)), key, item)
+                for key, item in result.items()
+                if isinstance(item, (list, dict)) and item
+            ]
+            if not candidates:
+                break
+            _, key, item = sorted(candidates)[-1]
+            if isinstance(item, list):
+                kept_count = len(item) // 2
+                dropped = len(item) - kept_count
+                result[key] = item[:kept_count]
+            else:
+                entries = list(item.items())
+                kept_count = len(entries) // 2
+                dropped = len(entries) - kept_count
+                result[key] = dict(entries[:kept_count])
+            result[f"{key}_truncated"] = f"{dropped} entries omitted"
+        encoded_result = json.dumps(result, ensure_ascii=False, default=str)
+        if len(encoded_result) <= MAX_RESULT_CHARS:
+            return result
+        # A single large scalar still needs a hard cap.
+        return encoded_result[: MAX_RESULT_CHARS - 80] + "\n[truncated result]"
     omitted = len(encoded) - MAX_RESULT_CHARS
     return {"items": [], "truncated": f"{omitted} {unit} omitted"}
 
@@ -246,6 +237,49 @@ def _is_sensitive_number(value: str) -> bool:
 
 def _is_pure_numeric(value: str) -> bool:
     return re.fullmatch(r"[+-]?[\d][\d\s,._-]*(?:\.\d+)?", value) is not None
+
+
+def _format_bytes(value: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+    amount = float(value)
+    unit = 0
+    while abs(amount) >= 1024 and unit < len(units) - 1:
+        amount /= 1024
+        unit += 1
+    decimals = 0 if unit == 0 else 2
+    return f"{amount:.{decimals}f} {units[unit]}"
+
+
+def _pages_until_deadline(runner: BqRunner, sql: str, deadline: float) -> Any:
+    messages: Queue[object] = Queue()
+    finished = object()
+
+    def produce() -> None:
+        try:
+            remaining = deadline - time.monotonic()
+            remaining = remaining if remaining > 0 else 0.0
+            for page in runner.iter_pages(sql, page_size=500, timeout=remaining):
+                messages.put(page)
+        except BaseException as exc:
+            messages.put(exc)
+        finally:
+            messages.put(finished)
+
+    thread = threading.Thread(target=produce, name="bca-bq-query", daemon=True)
+    thread.start()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ToolHostError("BigQuery query timed out")
+        try:
+            message = messages.get(timeout=remaining)
+        except Empty:
+            raise ToolHostError("BigQuery query timed out") from None
+        if message is finished:
+            return
+        if isinstance(message, BaseException):
+            raise message
+        yield cast(list[dict[str, object]], message)
 
 
 def _safe_error(exc: BaseException, context: MaskingContext) -> ToolHostError:
@@ -320,7 +354,7 @@ class ToolHost:
         if method is None:
             raise ToolHostError("unknown tool")
         try:
-            return _cap(method(**args), self.mask_context)
+            return _cap(method(**args), self.mask_context, already_masked=name == "bq_query")
         except BaseException as exc:
             safe = _safe_error(exc, self.mask_context)
             _LOG.warning("MCP tool %s failed: %s", name, type(exc).__name__)
@@ -358,7 +392,11 @@ class ToolHost:
     def bq_dry_run(self, sql: str) -> dict[str, object]:
         validate_select(sql)
         dry = self.runner.dry_run(sql)
-        return {"bytes": dry.bytes, "referenced_tables": dry.referenced_tables, "schema": dry.schema}
+        return {
+            "bytes": _format_bytes(dry.bytes),
+            "referenced_tables": dry.referenced_tables,
+            "schema": dry.schema,
+        }
 
     def bq_query(self, sql: str, max_rows: int = 200) -> object:
         if max_rows < 1 or max_rows > 1000:
@@ -376,7 +414,7 @@ class ToolHost:
         omitted_rows = 0
         omitted_chars = 0
         deadline = time.monotonic() + BQ_QUERY_DEADLINE_S
-        for page in self.runner.iter_pages(sql, page_size=500):
+        for page in _pages_until_deadline(self.runner, sql, deadline):
             if time.monotonic() >= deadline:
                 raise ToolHostError("BigQuery query timed out")
             for row in page:
@@ -399,7 +437,9 @@ class ToolHost:
                     _masked(row, self.mask_context),
                 )
                 candidate = json.dumps(
-                    {"bytes": dry.bytes, "rows": [*rows, masked]}, ensure_ascii=False, default=str
+                    {"bytes": _format_bytes(dry.bytes), "rows": [*rows, masked]},
+                    ensure_ascii=False,
+                    default=str,
                 )
                 if len(candidate) > MAX_RESULT_CHARS:
                     omitted_rows = 1
@@ -408,7 +448,11 @@ class ToolHost:
                 rows.append(masked)
             if len(rows) >= max_rows or omitted_rows:
                 break
-        result: dict[str, object] = {"bytes": dry.bytes, "rows": rows, "truncated": bool(omitted_rows)}
+        result: dict[str, object] = {
+            "bytes": _format_bytes(dry.bytes),
+            "rows": rows,
+            "truncated": bool(omitted_rows),
+        }
         if omitted_rows:
             result["omitted"] = f"{omitted_rows} rows omitted; {omitted_chars} characters omitted"
         return result
@@ -535,11 +579,11 @@ class ToolHost:
         }
         summary["preflight"] = {
             "buckets": preflight.buckets,
-            "dry_run_bytes": preflight.dry_run_bytes,
+            "dry_run_bytes": _format_bytes(preflight.dry_run_bytes),
             "capped_leads": preflight.capped_leads,
         }
         summary["capped_leads"] = preflight.capped_leads
-        summary["lead_source_dry_run_bytes"] = lead_source_dry_run_bytes
+        summary["lead_source_dry_run_bytes"] = _format_bytes(lead_source_dry_run_bytes)
         return summary
 
     def job_status(self, job_id: str) -> object:
@@ -617,6 +661,12 @@ class ToolHost:
         if offset < 0 or limit < 1 or limit > 100:
             raise ToolHostError("invalid sample page")
         self._job_dir(job_id)
+        sample_rows = self.store.rows(
+            "SELECT l.lead_id FROM leads l JOIN jobs j ON j.id=l.job_id "
+            "WHERE l.job_id=? AND j.project_id=? AND l.in_sample=1 ORDER BY l.lead_id",
+            (job_id, self.project_id),
+        )
+        refs = {str(row[0]): f"S{index}" for index, row in enumerate(sample_rows, 1)}
         rows = self.store.rows(
             "SELECT r.lead_id, r.answer_json, r.quotes_ok, r.flags_json "
             "FROM results r JOIN leads l USING(job_id, lead_id) JOIN jobs j ON j.id=r.job_id "
@@ -625,7 +675,7 @@ class ToolHost:
         )
         return [
             {
-                "ref": f"S{offset + index + 1}",
+                "ref": refs[str(row[0])],
                 **{key: row[key] for key in row.keys() if key != "lead_id"},  # noqa: SIM118
             }
             for index, row in enumerate(rows)
@@ -641,13 +691,18 @@ class ToolHost:
         sample_index = int(match.group(1))
         row = self.store.rows(
             "SELECT l.lead_id FROM leads l JOIN jobs j ON j.id=l.job_id "
-            "WHERE l.job_id=? AND j.project_id=? AND l.in_sample=1 AND l.status='masked' "
+            "WHERE l.job_id=? AND j.project_id=? AND l.in_sample=1 "
             "ORDER BY l.lead_id LIMIT 1 OFFSET ?",
             (job_id, self.project_id, sample_index - 1),
         )
         if not row:
             raise ToolHostError("sample reference is unavailable")
         lead_id = str(row[0][0])
+        status_row = self.store.rows(
+            "SELECT status FROM leads WHERE job_id=? AND lead_id=?", (job_id, lead_id)
+        )
+        if not status_row or str(status_row[0][0]) not in {"masked", "queued", "in_flight", "done", "failed"}:
+            raise ToolHostError("sample reference is unavailable")
         spec, _ = load_latest_spec(self._job_dir(job_id))
         path = self._job_dir(job_id) / "cache" / "transcripts" / f"{lead_id}.jsonl.gz"
         if not path.is_file():
