@@ -295,7 +295,13 @@ impl<R: Runtime> Engine<R> {
             .await
             .clone()
             .ok_or(RpcError::Closed)?;
-        rpc.notify(method, params).await
+        let result = rpc.notify(method, params, Duration::from_secs(10)).await;
+        if matches!(result, Err(RpcError::WriteTimeout | RpcError::Io(_))) {
+            if let Some(guard) = self.inner.guard.lock().await.clone() {
+                tauri::async_runtime::spawn_blocking(move || guard.terminate());
+            }
+        }
+        result
     }
     pub async fn send_power_status(&self) -> Result<(), RpcError> {
         let status = self.power_status();
@@ -316,7 +322,8 @@ impl<R: Runtime> Engine<R> {
         let deadline = tokio::time::Instant::now() + shutdown_budget;
         if let Some(rpc) = self.inner.rpc.lock().await.clone() {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let _ = rpc.request("shutdown", json!({}), remaining).await;
+            let _ = tokio::time::timeout(remaining, rpc.request("shutdown", json!({}), remaining))
+                .await;
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let stopped = tokio::time::timeout(remaining, async {
@@ -342,6 +349,11 @@ impl<R: Runtime> Engine<R> {
         }
         let _ = self.inner.power.release();
         self.set_status("stopped", None).await;
+    }
+    pub(crate) async fn force_terminate(&self) {
+        if let Some(guard) = self.inner.guard.lock().await.clone() {
+            let _ = tokio::task::spawn_blocking(move || guard.terminate()).await;
+        }
     }
     async fn set_status(&self, status: &str, reason: Option<String>) {
         let mut current = self.inner.status.lock().await;
@@ -417,16 +429,19 @@ async fn health_ping<W, F, Fut>(
     target: Arc<dyn HealthKill>,
     mut on_success: F,
 ) where
-    W: tokio::io::AsyncWrite + Unpin + Send,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     let mut failures = 0;
     loop {
-        match client
-            .request("health/ping", json!({}), Duration::from_secs(10))
-            .await
-        {
+        let ping = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.request("health/ping", json!({}), Duration::from_secs(10)),
+        )
+        .await
+        .unwrap_or(Err(RpcError::Timeout));
+        match ping {
             Ok(_) => {
                 failures = 0;
                 on_success().await;

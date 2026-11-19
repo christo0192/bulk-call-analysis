@@ -47,3 +47,8 @@ engine/.pytest-os-temp/
 **/.sandbox-tmp/
 .target-darwin/
 engine/.manual*/
+**/.pytest*/
+**/.tmp*/
+uv-*.lock
+.pytest*/
+.tmp*/

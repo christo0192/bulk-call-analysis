@@ -5,6 +5,7 @@ pub mod rpc;
 mod sleepwatch;
 mod tray;
 use serde_json::Value;
+use std::time::Duration;
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
@@ -141,12 +142,30 @@ pub fn run() {
             },
             RunEvent::Exit => {
                 hide_windows(app);
+                let exit_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
                 if !SHUTDOWN_STARTED.load(Ordering::Acquire) {
                     if let Some(engine) = app.try_state::<Engine>() {
-                        tauri::async_runtime::block_on(engine.inner().shutdown());
+                        let engine = engine.inner();
+                        let completed = tauri::async_runtime::block_on(tokio::time::timeout(
+                            exit_deadline.saturating_duration_since(tokio::time::Instant::now()),
+                            engine.shutdown(),
+                        ))
+                        .is_ok();
+                        if !completed {
+                            tauri::async_runtime::block_on(engine.force_terminate());
+                        }
                     }
                 } else if let Some(done) = SHUTDOWN_DONE.get() {
-                    tauri::async_runtime::block_on(done.notified());
+                    if tauri::async_runtime::block_on(tokio::time::timeout(
+                        exit_deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        done.notified(),
+                    ))
+                    .is_err()
+                    {
+                        if let Some(engine) = app.try_state::<Engine>() {
+                            tauri::async_runtime::block_on(engine.inner().force_terminate());
+                        }
+                    }
                 }
             }
             _ => {}

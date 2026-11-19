@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    marker::PhantomData,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -49,20 +50,67 @@ pub fn decode(line: &[u8]) -> Result<Value, RpcError> {
 pub type Notification = Value;
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
 
-pub struct Client<W> {
-    writer: Mutex<W>,
-    pending: Pending,
-    next_id: std::sync::atomic::AtomicU64,
-    closed: AtomicBool,
+const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+struct Frame {
+    bytes: Vec<u8>,
+    written: oneshot::Sender<Result<(), RpcError>>,
+    write_timeout: Duration,
 }
 
-impl<W: AsyncWrite + Unpin + Send> Client<W> {
+pub struct Client<W> {
+    frames: mpsc::Sender<Frame>,
+    _writer: PhantomData<W>,
+    pending: Pending,
+    next_id: std::sync::atomic::AtomicU64,
+    closed: Arc<AtomicBool>,
+    write_timeout: Duration,
+}
+
+impl<W: AsyncWrite + Unpin + Send + 'static> Client<W> {
     pub fn new(writer: W) -> Arc<Self> {
+        Self::with_write_timeout(writer, DEFAULT_WRITE_TIMEOUT)
+    }
+
+    pub fn with_write_timeout(writer: W, write_timeout: Duration) -> Arc<Self> {
+        let (frames, mut frame_rx) = mpsc::channel::<Frame>(64);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let writer_closed = closed.clone();
+        let writer_pending = pending.clone();
+        tokio::spawn(async move {
+            let mut writer = writer;
+            while let Some(frame) = frame_rx.recv().await {
+                if writer_closed.load(Ordering::Acquire) {
+                    let _ = frame.written.send(Err(RpcError::Closed));
+                    continue;
+                }
+                match timeout(frame.write_timeout, writer.write_all(&frame.bytes)).await {
+                    Ok(Ok(())) => {
+                        let _ = frame.written.send(Ok(()));
+                    }
+                    Ok(Err(error)) => {
+                        writer_closed.store(true, Ordering::Release);
+                        let _ = frame.written.send(Err(RpcError::Io(error)));
+                        fail_pending(&writer_pending).await;
+                        break;
+                    }
+                    Err(_) => {
+                        writer_closed.store(true, Ordering::Release);
+                        let _ = frame.written.send(Err(RpcError::WriteTimeout));
+                        fail_pending(&writer_pending).await;
+                        break;
+                    }
+                }
+            }
+        });
         Arc::new(Self {
-            writer: Mutex::new(writer),
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            frames,
+            _writer: PhantomData,
+            pending,
             next_id: std::sync::atomic::AtomicU64::new(1),
-            closed: AtomicBool::new(false),
+            closed,
+            write_timeout,
         })
     }
 
@@ -72,6 +120,7 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
         params: Value,
         wait: Duration,
     ) -> Result<Value, RpcError> {
+        let deadline = tokio::time::Instant::now() + wait;
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -83,27 +132,43 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
             self.pending.lock().await.remove(&id);
             return Err(RpcError::Closed);
         }
-        let mut writer = self.writer.lock().await;
+        let (written, written_rx) = oneshot::channel();
+        let frame = Frame {
+            bytes,
+            written,
+            write_timeout: self.write_timeout,
+        };
+        match timeout(remaining(deadline), self.frames.send(frame)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                self.pending.lock().await.remove(&id);
+                return Err(RpcError::Closed);
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(RpcError::Timeout);
+            }
+        }
+        match timeout(remaining(deadline), written_rx).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                self.pending.lock().await.remove(&id);
+                return Err(error);
+            }
+            Ok(Err(_)) | Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(if self.closed.load(Ordering::Acquire) {
+                    RpcError::WriteTimeout
+                } else {
+                    RpcError::Timeout
+                });
+            }
+        }
         if self.closed.load(Ordering::Acquire) {
-            drop(writer);
             self.pending.lock().await.remove(&id);
             return Err(RpcError::Closed);
         }
-        let write_result = timeout(wait, writer.write_all(&bytes))
-            .await
-            .map_err(|_| RpcError::WriteTimeout)
-            .and_then(|result| result.map_err(RpcError::from));
-        drop(writer);
-        if let Err(error) = write_result {
-            self.close().await;
-            self.pending.lock().await.remove(&id);
-            return Err(error);
-        }
-        if self.closed.load(Ordering::Acquire) {
-            self.pending.lock().await.remove(&id);
-            return Err(RpcError::Closed);
-        }
-        match timeout(wait, rx).await {
+        match timeout(remaining(deadline), rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(RpcError::Closed),
             Err(_) => {
@@ -122,22 +187,38 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
     }
 
     #[allow(dead_code)]
-    pub async fn notify(self: &Arc<Self>, method: &str, params: Value) -> Result<(), RpcError> {
+    pub async fn notify(
+        self: &Arc<Self>,
+        method: &str,
+        params: Value,
+        wait: Duration,
+    ) -> Result<(), RpcError> {
         let message = json!({"jsonrpc":"2.0", "method": method, "params": params});
         if self.closed.load(Ordering::Acquire) {
             return Err(RpcError::Closed);
         }
         let bytes = encode(&message)?;
-        let mut writer = self.writer.lock().await;
-        if self.closed.load(Ordering::Acquire) {
-            return Err(RpcError::Closed);
+        self.enqueue(bytes, wait).await
+    }
+
+    async fn enqueue(&self, bytes: Vec<u8>, wait: Duration) -> Result<(), RpcError> {
+        let deadline = tokio::time::Instant::now() + wait;
+        let (written, written_rx) = oneshot::channel();
+        let frame = Frame {
+            bytes,
+            written,
+            write_timeout: self.write_timeout,
+        };
+        match timeout(remaining(deadline), self.frames.send(frame)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return Err(RpcError::Closed),
+            Err(_) => return Err(RpcError::Timeout),
         }
-        if let Err(error) = writer.write_all(&bytes).await {
-            drop(writer);
-            self.close().await;
-            return Err(RpcError::Io(error));
+        match timeout(remaining(deadline), written_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(RpcError::Closed),
+            Err(_) => Err(RpcError::Timeout),
         }
-        Ok(())
     }
 
     pub async fn dispatch(&self, message: Value, notifications: &mpsc::Sender<Notification>) {
@@ -155,14 +236,7 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
                     if self.closed.load(Ordering::Acquire) {
                         return;
                     }
-                    let mut writer = self.writer.lock().await;
-                    if self.closed.load(Ordering::Acquire) {
-                        return;
-                    }
-                    if writer.write_all(&bytes).await.is_err() {
-                        drop(writer);
-                        self.close().await;
-                    }
+                    let _ = self.enqueue(bytes, Duration::from_secs(10)).await;
                 }
             } else {
                 let _ = notifications.send(message).await;
@@ -184,6 +258,17 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
                 let _ = sender.send(result);
             }
         }
+    }
+}
+
+fn remaining(deadline: tokio::time::Instant) -> Duration {
+    deadline.saturating_duration_since(tokio::time::Instant::now())
+}
+
+async fn fail_pending(pending: &Pending) {
+    let mut pending = pending.lock().await;
+    for (_, sender) in pending.drain() {
+        let _ = sender.send(Err(RpcError::Closed));
     }
 }
 
@@ -240,7 +325,7 @@ mod tests {
             let client = Client::new(client_io);
             assert!(matches!(
                 client
-                    .request("slow", json!({}), Duration::from_millis(5))
+                    .request("slow", json!({}), Duration::from_millis(50))
                     .await,
                 Err(RpcError::Timeout)
             ));
@@ -257,7 +342,7 @@ mod tests {
             let request_client = client.clone();
             let request = tokio::spawn(async move {
                 request_client
-                    .request("slow", json!({}), Duration::from_millis(5))
+                    .request("slow", json!({}), Duration::from_millis(50))
                     .await
             });
             let mut server = BufReader::new(server_io);
@@ -359,14 +444,35 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let (client_io, _server_io) = tokio::io::duplex(1);
-            let client = Client::new(client_io);
+            let client = Client::with_write_timeout(client_io, Duration::from_millis(20));
             let result = client
                 .request(
                     "large",
                     json!({"data": "x".repeat(4096)}),
-                    Duration::from_millis(1),
+                    Duration::from_secs(5),
                 )
                 .await;
+            assert!(matches!(result, Err(RpcError::WriteTimeout)));
+            assert!(client.closed.load(Ordering::Acquire));
+        });
+    }
+
+    #[test]
+    fn notify_to_a_stuck_sink_is_bounded() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, _server_io) = tokio::io::duplex(1);
+            let client = Client::with_write_timeout(client_io, Duration::from_millis(20));
+            let result = timeout(
+                Duration::from_millis(100),
+                client.notify(
+                    "large",
+                    json!({"data": "x".repeat(4096)}),
+                    Duration::from_secs(5),
+                ),
+            )
+            .await
+            .expect("notify must not block forever");
             assert!(matches!(result, Err(RpcError::WriteTimeout)));
             assert!(client.closed.load(Ordering::Acquire));
         });
