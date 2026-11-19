@@ -302,14 +302,12 @@ unsafe extern "C" {
     fn IOPSGetProvidingPowerSourceType(info: CFTypeRef) -> CFStringRef;
     fn IOPSCopyPowerSourcesList(info: CFTypeRef) -> CFTypeRef;
     fn IOPSGetPowerSourceDescription(info: CFTypeRef, source: CFTypeRef) -> CFTypeRef;
-    static kIOPSCurrentCapacityKey: CFStringRef;
-    static kIOPSMaxCapacityKey: CFStringRef;
-    static kIOPSPowerSourceStateKey: CFStringRef;
 }
 #[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFRelease(value: CFTypeRef);
+    fn CFEqual(left: CFTypeRef, right: CFTypeRef) -> bool;
     fn CFStringCreateWithCString(
         allocator: *const std::ffi::c_void,
         value: *const std::ffi::c_char,
@@ -329,7 +327,8 @@ unsafe extern "C" {
 #[cfg(target_os = "macos")]
 fn cf_string(value: &str) -> Result<CFStringRef, PowerError> {
     let c = std::ffi::CString::new(value).map_err(|e| PowerError::Failed(e.to_string()))?;
-    let result = unsafe { CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), 0x0800_0100) };
+    let result =
+        unsafe { CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), CF_STRING_ENCODING_UTF8) };
     if result.is_null() {
         Err(PowerError::Failed(
             "could not create CoreFoundation string".into(),
@@ -339,9 +338,101 @@ fn cf_string(value: &str) -> Result<CFStringRef, PowerError> {
     }
 }
 #[cfg(target_os = "macos")]
+const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+
+#[cfg(target_os = "macos")]
+fn cf_string_literal(value: &std::ffi::CStr) -> Result<CFStringRef, PowerError> {
+    let result = unsafe {
+        CFStringCreateWithCString(std::ptr::null(), value.as_ptr(), CF_STRING_ENCODING_UTF8)
+    };
+    if result.is_null() {
+        Err(PowerError::Failed(
+            "could not create CoreFoundation string".into(),
+        ))
+    } else {
+        Ok(result)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn power_source_strings() -> Result<
+    (
+        CFStringRef,
+        CFStringRef,
+        CFStringRef,
+        CFStringRef,
+        CFStringRef,
+    ),
+    PowerError,
+> {
+    let current_capacity = cf_string_literal(c"Current Capacity")?;
+    let maximum_capacity = match cf_string_literal(c"Max Capacity") {
+        Ok(value) => value,
+        Err(error) => {
+            unsafe { CFRelease(current_capacity) };
+            return Err(error);
+        }
+    };
+    let power_source_state = match cf_string_literal(c"Power Source State") {
+        Ok(value) => value,
+        Err(error) => {
+            unsafe {
+                CFRelease(current_capacity);
+                CFRelease(maximum_capacity);
+            }
+            return Err(error);
+        }
+    };
+    let ac_power = match cf_string_literal(c"AC Power") {
+        Ok(value) => value,
+        Err(error) => {
+            unsafe {
+                CFRelease(current_capacity);
+                CFRelease(maximum_capacity);
+                CFRelease(power_source_state);
+            }
+            return Err(error);
+        }
+    };
+    let battery_power = match cf_string_literal(c"Battery Power") {
+        Ok(value) => value,
+        Err(error) => {
+            unsafe {
+                CFRelease(current_capacity);
+                CFRelease(maximum_capacity);
+                CFRelease(power_source_state);
+                CFRelease(ac_power);
+            }
+            return Err(error);
+        }
+    };
+    Ok((
+        current_capacity,
+        maximum_capacity,
+        power_source_state,
+        ac_power,
+        battery_power,
+    ))
+}
+
+#[cfg(target_os = "macos")]
 fn mac_power_status() -> Result<PowerStatus, PowerError> {
+    let (
+        current_capacity_key,
+        maximum_capacity_key,
+        power_source_state_key,
+        ac_power,
+        battery_power,
+    ) = power_source_strings()?;
     let info = unsafe { IOPSCopyPowerSourcesInfo() };
     if info.is_null() {
+        unsafe {
+            CFRelease(current_capacity_key);
+            CFRelease(maximum_capacity_key);
+            CFRelease(power_source_state_key);
+            CFRelease(ac_power);
+            CFRelease(battery_power);
+        }
         return Ok(PowerStatus {
             on_ac: None,
             percent: None,
@@ -351,16 +442,12 @@ fn mac_power_status() -> Result<PowerStatus, PowerError> {
         let kind_ref = unsafe { IOPSGetProvidingPowerSourceType(info) };
         let kind = if kind_ref.is_null() {
             None
+        } else if unsafe { CFEqual(kind_ref, battery_power) } {
+            Some("Battery Power".to_owned())
+        } else if unsafe { CFEqual(kind_ref, ac_power) } {
+            Some("AC Power".to_owned())
         } else {
-            let mut buf = [0i8; 64];
-            let copied = unsafe {
-                CFStringGetCString(kind_ref, buf.as_mut_ptr(), buf.len() as i64, 0x0800_0100)
-            };
-            copied.then(|| {
-                unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
-                    .to_string_lossy()
-                    .into_owned()
-            })
+            None
         };
         let list = unsafe { IOPSCopyPowerSourcesList(info) };
         let power_status = if !list.is_null() && unsafe { CFArrayGetCount(list) } > 0 {
@@ -370,7 +457,7 @@ fn mac_power_status() -> Result<PowerStatus, PowerError> {
                 unsafe { CFRelease(list) };
                 mac_status(kind.as_deref(), None)
             } else {
-                let state_ref = unsafe { CFDictionaryGetValue(desc, kIOPSPowerSourceStateKey) };
+                let state_ref = unsafe { CFDictionaryGetValue(desc, power_source_state_key) };
                 let state = if state_ref.is_null() {
                     None
                 } else {
@@ -380,7 +467,7 @@ fn mac_power_status() -> Result<PowerStatus, PowerError> {
                             state_ref,
                             buf.as_mut_ptr(),
                             buf.len() as i64,
-                            0x0800_0100,
+                            CF_STRING_ENCODING_UTF8,
                         )
                     };
                     copied.then(|| {
@@ -391,8 +478,8 @@ fn mac_power_status() -> Result<PowerStatus, PowerError> {
                 };
                 let mut current = 0i32;
                 let mut maximum = 0i32;
-                let current_ref = unsafe { CFDictionaryGetValue(desc, kIOPSCurrentCapacityKey) };
-                let maximum_ref = unsafe { CFDictionaryGetValue(desc, kIOPSMaxCapacityKey) };
+                let current_ref = unsafe { CFDictionaryGetValue(desc, current_capacity_key) };
+                let maximum_ref = unsafe { CFDictionaryGetValue(desc, maximum_capacity_key) };
                 let current = (!current_ref.is_null()
                     && unsafe { CFNumberGetValue(current_ref, 3, &mut current as *mut _ as _) })
                 .then_some(current);
@@ -410,6 +497,11 @@ fn mac_power_status() -> Result<PowerStatus, PowerError> {
     };
     unsafe {
         CFRelease(info);
+        CFRelease(current_capacity_key);
+        CFRelease(maximum_capacity_key);
+        CFRelease(power_source_state_key);
+        CFRelease(ac_power);
+        CFRelease(battery_power);
     }
     result
 }

@@ -113,12 +113,12 @@ impl<R: Runtime> Engine<R> {
     }
     pub fn start(&self) {
         let this = self.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             this.set_status("starting", None).await;
             this.supervise().await;
         });
         let this = self.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             this.power_status_loop().await;
         });
     }
@@ -172,7 +172,7 @@ impl<R: Runtime> Engine<R> {
         *self.inner.rpc.lock().await = Some(client.clone());
         let (tx, mut rx) = mpsc::channel(64);
         let reader_client = client.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut line = Vec::new();
             loop {
@@ -193,7 +193,7 @@ impl<R: Runtime> Engine<R> {
             reader_client.close().await;
         });
         let app = self.inner.app.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut bytes = Vec::new();
             loop {
@@ -221,14 +221,15 @@ impl<R: Runtime> Engine<R> {
         });
         let ping_engine = self.clone();
         let ping_guard: Arc<dyn HealthKill> = guard.clone();
-        let ping_task = tokio::spawn(health_ping(client.clone(), ping_guard, move || {
-            let ping_engine = ping_engine.clone();
-            async move {
-                if *ping_engine.inner.status.lock().await != "ready" {
-                    ping_engine.set_status("ready", None).await;
+        let ping_task =
+            tauri::async_runtime::spawn(health_ping(client.clone(), ping_guard, move || {
+                let ping_engine = ping_engine.clone();
+                async move {
+                    if *ping_engine.inner.status.lock().await != "ready" {
+                        ping_engine.set_status("ready", None).await;
+                    }
                 }
-            }
-        }));
+            }));
         while let Some(notification) = rx.recv().await {
             self.update_power_for_notification(&notification).await;
             if notification.get("method").and_then(Value::as_str) == Some("job/progress")
@@ -276,7 +277,7 @@ impl<R: Runtime> Engine<R> {
             .clone()
             .ok_or(RpcError::Closed)?;
         let result = rpc.request(method, params, Duration::from_secs(30)).await;
-        if matches!(result, Err(RpcError::Timeout | RpcError::Io(_))) {
+        if matches!(result, Err(RpcError::WriteTimeout | RpcError::Io(_))) {
             if let Some(guard) = self.inner.guard.lock().await.clone() {
                 let _ = tokio::task::spawn_blocking(move || guard.terminate()).await;
             }
@@ -308,7 +309,11 @@ impl<R: Runtime> Engine<R> {
         if self.inner.shutting_down.swap(true, Ordering::AcqRel) {
             return;
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        #[cfg(target_os = "macos")]
+        let shutdown_budget = Duration::from_secs(8);
+        #[cfg(not(target_os = "macos"))]
+        let shutdown_budget = Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + shutdown_budget;
         if let Some(rpc) = self.inner.rpc.lock().await.clone() {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let _ = rpc.request("shutdown", json!({}), remaining).await;
@@ -323,6 +328,15 @@ impl<R: Runtime> Engine<R> {
         .is_ok();
         if !stopped {
             if let Some(guard) = self.inner.guard.lock().await.clone() {
+                #[cfg(target_os = "macos")]
+                let pid = self.inner.active_pid.load(Ordering::Acquire);
+                #[cfg(target_os = "macos")]
+                let _ = tokio::task::spawn_blocking(move || {
+                    drop(guard);
+                    procguard::terminate_group_with_grace(pid, Duration::from_secs(2));
+                })
+                .await;
+                #[cfg(not(target_os = "macos"))]
                 let _ = tokio::task::spawn_blocking(move || guard.terminate()).await;
             }
         }
@@ -417,7 +431,10 @@ async fn health_ping<W, F, Fut>(
                 failures = 0;
                 on_success().await;
             }
-            Err(RpcError::Closed) => break,
+            Err(RpcError::Closed) => {
+                target.terminate();
+                break;
+            }
             Err(_) => {
                 failures += 1;
                 if failures >= 3 {
@@ -456,7 +473,7 @@ mod health_tests {
             });
             client.close().await;
             health_ping(client, target.clone(), || async {}).await;
-            assert_eq!(target.kills.load(Ordering::Relaxed), 0);
+            assert_eq!(target.kills.load(Ordering::Relaxed), 1);
         });
     }
 
@@ -500,6 +517,19 @@ mod health_tests {
             engine.set_status("stopped", None).await;
             assert_eq!(engine.status().await, "stopped");
         });
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::Engine;
+
+    #[test]
+    fn start_does_not_require_an_entered_tokio_runtime() {
+        std::env::set_var("BCA_ENGINE_PROGRAM", "bca-test-engine-not-started");
+        let engine = Engine::<tauri::Wry>::new_without_app();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.start()));
+        assert!(result.is_ok());
     }
 }
 

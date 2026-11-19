@@ -20,6 +20,8 @@ pub enum RpcError {
     Malformed(#[from] serde_json::Error),
     #[error("RPC timed out")]
     Timeout,
+    #[error("RPC write timed out")]
+    WriteTimeout,
     #[error("RPC connection closed")]
     Closed,
     #[error("RPC error {code}: {message}")]
@@ -76,15 +78,22 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
         let message = json!({"jsonrpc":"2.0", "id": id, "method": method, "params": params});
-        let write = async {
-            self.writer
-                .lock()
-                .await
-                .write_all(&encode(&message)?)
-                .await
-                .map_err(RpcError::from)
-        };
-        let write_result = timeout(wait, write).await.unwrap_or(Err(RpcError::Timeout));
+        let bytes = encode(&message)?;
+        if self.closed.load(Ordering::Acquire) {
+            self.pending.lock().await.remove(&id);
+            return Err(RpcError::Closed);
+        }
+        let mut writer = self.writer.lock().await;
+        if self.closed.load(Ordering::Acquire) {
+            drop(writer);
+            self.pending.lock().await.remove(&id);
+            return Err(RpcError::Closed);
+        }
+        let write_result = timeout(wait, writer.write_all(&bytes))
+            .await
+            .map_err(|_| RpcError::WriteTimeout)
+            .and_then(|result| result.map_err(RpcError::from));
+        drop(writer);
         if let Err(error) = write_result {
             self.close().await;
             self.pending.lock().await.remove(&id);
@@ -115,11 +124,19 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
     #[allow(dead_code)]
     pub async fn notify(self: &Arc<Self>, method: &str, params: Value) -> Result<(), RpcError> {
         let message = json!({"jsonrpc":"2.0", "method": method, "params": params});
-        self.writer
-            .lock()
-            .await
-            .write_all(&encode(&message)?)
-            .await?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(RpcError::Closed);
+        }
+        let bytes = encode(&message)?;
+        let mut writer = self.writer.lock().await;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(RpcError::Closed);
+        }
+        if let Err(error) = writer.write_all(&bytes).await {
+            drop(writer);
+            self.close().await;
+            return Err(RpcError::Io(error));
+        }
         Ok(())
     }
 
@@ -135,7 +152,15 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
                     "error": {"code": -32601, "message": "Method not found"}
                 });
                 if let Ok(bytes) = encode(&response) {
-                    if self.writer.lock().await.write_all(&bytes).await.is_err() {
+                    if self.closed.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let mut writer = self.writer.lock().await;
+                    if self.closed.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if writer.write_all(&bytes).await.is_err() {
+                        drop(writer);
                         self.close().await;
                     }
                 }
@@ -220,6 +245,32 @@ mod tests {
                 Err(RpcError::Timeout)
             ));
             assert!(client.pending.lock().await.is_empty());
+        });
+    }
+
+    #[test]
+    fn slow_reply_timeout_does_not_close_the_client() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, server_io) = tokio::io::duplex(1024);
+            let client = Client::new(client_io);
+            let request_client = client.clone();
+            let request = tokio::spawn(async move {
+                request_client
+                    .request("slow", json!({}), Duration::from_millis(5))
+                    .await
+            });
+            let mut server = BufReader::new(server_io);
+            let mut line = String::new();
+            server.read_line(&mut line).await.unwrap();
+            assert!(matches!(request.await.unwrap(), Err(RpcError::Timeout)));
+            assert!(!client.closed.load(Ordering::Acquire));
+            let sent: Value = serde_json::from_str(&line).unwrap();
+            let (notifications, _) = mpsc::channel(1);
+            client
+                .dispatch(json!({"id": sent["id"], "result": 42}), &notifications)
+                .await;
+            assert!(!client.closed.load(Ordering::Acquire));
         });
     }
 
@@ -316,7 +367,7 @@ mod tests {
                     Duration::from_millis(1),
                 )
                 .await;
-            assert!(matches!(result, Err(RpcError::Timeout)));
+            assert!(matches!(result, Err(RpcError::WriteTimeout)));
             assert!(client.closed.load(Ordering::Acquire));
         });
     }

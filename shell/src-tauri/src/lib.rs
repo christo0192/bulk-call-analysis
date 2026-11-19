@@ -9,14 +9,23 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
     sync::Mutex,
+    sync::OnceLock,
 };
 use tauri::RunEvent;
 use tauri::{Manager, State};
+use tokio::sync::Notify;
 
 #[derive(Debug, PartialEq, Eq)]
 enum ExitAction {
     KeepRunning,
     Shutdown,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RunEventAction {
+    KeepRunning,
+    StartShutdown,
+    WaitForShutdown,
 }
 
 fn exit_action(code: Option<i32>) -> ExitAction {
@@ -27,10 +36,22 @@ fn exit_action(code: Option<i32>) -> ExitAction {
     }
 }
 
+fn run_event_action(is_exit: bool, code: Option<i32>) -> RunEventAction {
+    if is_exit {
+        RunEventAction::WaitForShutdown
+    } else {
+        match exit_action(code) {
+            ExitAction::KeepRunning => RunEventAction::KeepRunning,
+            ExitAction::Shutdown => RunEventAction::StartShutdown,
+        }
+    }
+}
+
 #[doc(hidden)]
 pub use engine::{is_running_job_state, job_event_requires_keep_awake, Engine};
 
 static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_DONE: OnceLock<std::sync::Arc<Notify>> = OnceLock::new();
 
 struct AppLogger(Mutex<PathBuf>);
 impl log::Log for AppLogger {
@@ -108,18 +129,25 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building desktop application")
         .run(|app, event| match event {
-            RunEvent::ExitRequested { api, code, .. } => match exit_action(code) {
-                ExitAction::KeepRunning => api.prevent_exit(),
-                ExitAction::Shutdown => {
+            RunEvent::ExitRequested { api, code, .. } => match run_event_action(false, code) {
+                RunEventAction::KeepRunning => api.prevent_exit(),
+                RunEventAction::StartShutdown => {
                     if start_shutdown(app.clone()) {
                         api.prevent_exit();
                         hide_windows(app);
                     }
                 }
+                RunEventAction::WaitForShutdown => unreachable!("ExitRequested cannot wait"),
             },
             RunEvent::Exit => {
                 hide_windows(app);
-                let _ = start_shutdown(app.clone());
+                if !SHUTDOWN_STARTED.load(Ordering::Acquire) {
+                    if let Some(engine) = app.try_state::<Engine>() {
+                        tauri::async_runtime::block_on(engine.inner().shutdown());
+                    }
+                } else if let Some(done) = SHUTDOWN_DONE.get() {
+                    tauri::async_runtime::block_on(done.notified());
+                }
             }
             _ => {}
         })
@@ -132,6 +160,9 @@ fn hide_windows(app: &tauri::AppHandle) {
 }
 
 fn start_shutdown(app: tauri::AppHandle) -> bool {
+    let done = SHUTDOWN_DONE
+        .get_or_init(|| std::sync::Arc::new(Notify::new()))
+        .clone();
     if SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
         return false;
     }
@@ -140,6 +171,7 @@ fn start_shutdown(app: tauri::AppHandle) -> bool {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             engine.shutdown().await;
+            done.notify_one();
             app.exit(0);
         });
     }
@@ -148,11 +180,24 @@ fn start_shutdown(app: tauri::AppHandle) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{exit_action, ExitAction};
+    use super::{exit_action, run_event_action, ExitAction, RunEventAction};
 
     #[test]
     fn closing_last_window_keeps_engine_running() {
         assert_eq!(exit_action(None), ExitAction::KeepRunning);
         assert_eq!(exit_action(Some(0)), ExitAction::Shutdown);
+    }
+
+    #[test]
+    fn exit_event_requires_waiting_for_shutdown() {
+        assert_eq!(
+            run_event_action(true, None),
+            RunEventAction::WaitForShutdown
+        );
+        assert_eq!(run_event_action(false, None), RunEventAction::KeepRunning);
+        assert_eq!(
+            run_event_action(false, Some(0)),
+            RunEventAction::StartShutdown
+        );
     }
 }

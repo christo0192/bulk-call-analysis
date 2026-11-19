@@ -1,6 +1,6 @@
 use crate::engine::Engine;
 use serde_json::json;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 const SLEEP_GAP: Duration = Duration::from_secs(2);
 
@@ -17,23 +17,36 @@ pub fn power_message_hint(message: u32) -> Option<&'static str> {
     }
 }
 
-pub fn gap_hints(previous: SystemTime, now: SystemTime, threshold: Duration) -> Vec<&'static str> {
-    match now.duration_since(previous) {
-        Ok(gap) if gap > threshold => vec!["os/suspendHint", "os/resumeHint"],
+pub fn gap_hints(
+    previous_wall: SystemTime,
+    now_wall: SystemTime,
+    previous_mono: Instant,
+    now_mono: Instant,
+    threshold: Duration,
+) -> Vec<&'static str> {
+    match (
+        now_wall.duration_since(previous_wall),
+        now_mono.checked_duration_since(previous_mono),
+    ) {
+        (Ok(wall_gap), Some(mono_gap)) if wall_gap > threshold && mono_gap > threshold => {
+            vec!["os/suspendHint", "os/resumeHint"]
+        }
         _ => Vec::new(),
     }
 }
 
 pub fn gap_hints_unless_os_hint(
-    previous: SystemTime,
-    now: SystemTime,
+    previous_wall: SystemTime,
+    now_wall: SystemTime,
+    previous_mono: Instant,
+    now_mono: Instant,
     threshold: Duration,
     os_hint_seen: bool,
 ) -> Vec<&'static str> {
     if os_hint_seen {
         Vec::new()
     } else {
-        gap_hints(previous, now, threshold)
+        gap_hints(previous_wall, now_wall, previous_mono, now_mono, threshold)
     }
 }
 
@@ -44,7 +57,8 @@ pub fn start(engine: Engine) {
     #[cfg(target_os = "macos")]
     start_macos(tx.clone());
     tauri::async_runtime::spawn(async move {
-        let mut previous = SystemTime::now();
+        let mut previous_wall = SystemTime::now();
+        let mut previous_mono = Instant::now();
         let mut os_hint_seen = false;
         loop {
             match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
@@ -52,17 +66,29 @@ pub fn start(engine: Engine) {
                     if method == "os/powerStatusChanged" {
                         let _ = engine.send_power_status().await;
                     } else {
-                        os_hint_seen = true;
+                        if method == "os/suspendHint" {
+                            os_hint_seen = true;
+                        } else if method == "os/resumeHint" {
+                            os_hint_seen = false;
+                        }
                         let _ = engine.notify(method, json!({})).await;
                     }
                 }
                 Ok(None) | Err(_) => {
-                    let now = SystemTime::now();
-                    for method in gap_hints_unless_os_hint(previous, now, SLEEP_GAP, os_hint_seen) {
+                    let now_wall = SystemTime::now();
+                    let now_mono = Instant::now();
+                    for method in gap_hints_unless_os_hint(
+                        previous_wall,
+                        now_wall,
+                        previous_mono,
+                        now_mono,
+                        SLEEP_GAP,
+                        os_hint_seen,
+                    ) {
                         let _ = engine.notify(method, json!({})).await;
                     }
-                    previous = now;
-                    os_hint_seen = false;
+                    previous_wall = now_wall;
+                    previous_mono = now_mono;
                 }
             }
         }
@@ -193,10 +219,13 @@ mod tests {
     #[test]
     fn gap_detector_emits_suspend_then_resume() {
         let start = SystemTime::UNIX_EPOCH;
+        let mono = Instant::now();
         assert_eq!(
             gap_hints(
                 start,
                 start + Duration::from_secs(3),
+                mono,
+                mono + Duration::from_secs(3),
                 Duration::from_secs(2)
             ),
             vec!["os/suspendHint", "os/resumeHint"]
@@ -204,14 +233,26 @@ mod tests {
         assert!(gap_hints(
             start,
             start + Duration::from_secs(2),
+            mono,
+            mono + Duration::from_secs(2),
             Duration::from_secs(2)
         )
         .is_empty());
         assert!(gap_hints_unless_os_hint(
             start,
             start + Duration::from_secs(3),
+            mono,
+            mono + Duration::from_secs(3),
             Duration::from_secs(2),
             true
+        )
+        .is_empty());
+        assert!(gap_hints(
+            start,
+            start + Duration::from_secs(30),
+            mono,
+            mono + Duration::from_secs(1),
+            Duration::from_secs(2)
         )
         .is_empty());
     }

@@ -62,6 +62,11 @@ fn attach_windows(pid: u32) -> std::io::Result<Guard> {
 
 #[cfg(unix)]
 pub fn terminate_group(pid: u32) {
+    terminate_group_with_grace(pid, std::time::Duration::from_secs(5));
+}
+
+#[cfg(unix)]
+pub fn terminate_group_with_grace(pid: u32, grace: std::time::Duration) {
     if pid == 0 {
         return;
     }
@@ -71,7 +76,7 @@ pub fn terminate_group(pid: u32) {
     if term_result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
         return;
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + grace;
     while std::time::Instant::now() < deadline {
         let exists = unsafe { libc::killpg(group, 0) } == 0;
         if !exists && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
