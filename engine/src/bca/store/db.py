@@ -314,9 +314,12 @@ class Store:
                     (reason_value, job_id, lead_id),
                 )
             # Selection claims a batch before callbacks create attempts. If a
-            # pause interrupts that batch, return those unstarted claims too.
+            # pause interrupts that batch, return those unstarted claims too,
+            # keeping a pending quote repair so the resume sends the repair prompt.
             cur.execute(
-                "UPDATE leads SET status='queued', reason=? WHERE job_id=? AND status='in_flight' "
+                "UPDATE leads SET status='queued', "
+                "reason=CASE WHEN reason='quote_repair_pending' THEN reason ELSE ? END "
+                "WHERE job_id=? AND status='in_flight' "
                 "AND NOT EXISTS (SELECT 1 FROM attempts WHERE attempts.job_id=leads.job_id "
                 "AND attempts.lead_id=leads.lead_id AND attempts.ended_at IS NULL)",
                 (reason, job_id),

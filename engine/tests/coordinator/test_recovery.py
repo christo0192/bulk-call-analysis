@@ -138,7 +138,8 @@ def test_recover_fresh_runner_when_full_run_has_no_masking_left(
     with pytest.raises(RuntimeError, match="synthetic runner crash"):
         _run(coordinator.runner.start_full_run())
 
-    monkeypatch.undo()
+    # The crash fires once; later calls pass through to the real on_result. Do not
+    # monkeypatch.undo() here: that would also undo the fixture's deterministic pool.
     recovered = make_runner()
     recovered.recover()
     _run(recovered.start_full_run())
@@ -330,9 +331,15 @@ def test_full_run_dispatches_while_background_masking_continues(
 
     monkeypatch.setattr(runner_module, "mask_lead_stream", blocking_mask)
     monkeypatch.setattr(runner_module, "LunaPool", partial(ObservingPool, control=Script()))
+    # Each _run() is a separate event loop in this test, and asyncio.run waits for its
+    # worker threads on exit. Keep full-scope masking out of the sample loop so it runs
+    # (and blocks on lead 8) inside start_full_run, which is the window this test checks.
+    original_start_masking = coordinator.runner._start_masking_worker
+    monkeypatch.setattr(coordinator.runner, "_start_masking_worker", lambda sample: None)
     coordinator.runner.on_plan_approved(1)
     _run(coordinator.runner.run_sample())
     coordinator.runner.on_sample_approved(1)
+    monkeypatch.setattr(coordinator.runner, "_start_masking_worker", original_start_masking)
     _run(asyncio.wait_for(coordinator.runner.start_full_run(), timeout=30))
 
     assert dispatched_during_masking
