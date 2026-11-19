@@ -100,6 +100,24 @@ def test_requeue_and_current_result() -> None:
     assert store.rows("SELECT outcome FROM attempts WHERE attempt_id=?", (current,))[0][0] == "ok"
 
 
+def test_release_claim_requeues_only_unstarted_claim_and_keeps_reason() -> None:
+    store = prepared_store()
+    store.add_lead("j", "claimed", LeadStatus.queued)
+    store.set_lead_status("j", "claimed", LeadStatus.queued, "quote_repair_pending")
+    store.add_lead("j", "started", LeadStatus.queued)
+    assert store.claim_queued("j", ["claimed", "started"], sample=False) == {"claimed", "started"}
+    attempt = store.start_attempt("j", "started", "model", claimed=True)
+
+    assert store.release_claim("j", "claimed")
+    assert not store.release_claim("j", "started")
+    rows = store.rows("SELECT lead_id, status, reason FROM leads ORDER BY lead_id")
+    assert [tuple(row) for row in rows] == [
+        ("claimed", "queued", "quote_repair_pending"),
+        ("started", "in_flight", None),
+    ]
+    store.fail_attempt(attempt, "temporary", counted=False)
+
+
 def test_concurrent_results() -> None:
     store = prepared_store()
     for i in range(200):

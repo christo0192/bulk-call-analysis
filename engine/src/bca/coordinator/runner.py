@@ -190,7 +190,13 @@ class _Callbacks(PoolCallbacks):
         self.attempt_ended = True
         self.runner._phase_event.set()
         attempt = self.runner._attempts.get(task.attempt_id)
-        if attempt is not None:
+        if attempt is None:
+            # claim_queued() runs before on_started().  A pool dispatch decision,
+            # cancellation, or startup exception can therefore report a task
+            # with no attempt row to close.
+            if self.runner.deps.store.release_claim(self.runner.job_id, task.lead_id):
+                self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
+        else:
             try:
                 self.runner.deps.store.fail_attempt(
                     attempt,
@@ -201,7 +207,8 @@ class _Callbacks(PoolCallbacks):
                 )
             except ValueError:
                 LOGGER.warning("ignoring failure for closed attempt %s", task.attempt_id)
-                return
+                if self.runner.deps.store.release_claim(self.runner.job_id, task.lead_id):
+                    self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
             if task.lead_id in self.runner._quote_failures:
                 if counted:
                     self.runner._quote_failures.pop(task.lead_id, None)
@@ -321,6 +328,14 @@ class _Callbacks(PoolCallbacks):
             self.runner._pause_started = now
         if reason != PauseReason.model_unavailable.value:
             self.runner.deps.store.requeue_in_flight(self.runner.job_id, reason, outcome="interrupted")
+        else:
+            # Preserve an open rerouted attempt, but never leave a selection
+            # claim stranded when dispatch was cancelled before on_started.
+            for (lead_id,) in self.runner.deps.store.rows(
+                "SELECT lead_id FROM leads WHERE job_id=? AND status='in_flight'",
+                (self.runner.job_id,),
+            ):
+                self.runner.deps.store.release_claim(self.runner.job_id, str(lead_id))
         self.runner._phase_event.set()
         if reason in {item.value for item in PauseReason}:
             pause(self.runner.deps.store, self.runner.job_id, PauseReason(reason), resume_at)

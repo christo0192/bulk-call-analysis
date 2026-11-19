@@ -145,6 +145,18 @@ class Store:
                     claimed.add(lead_id)
         return claimed
 
+    def release_claim(self, job_id: str, lead_id: str) -> bool:
+        """Return an unstarted claim to the queue without changing its reason."""
+        with self.transaction() as cur:
+            updated = cur.execute(
+                "UPDATE leads SET status='queued' WHERE job_id=? AND lead_id=? "
+                "AND status='in_flight' AND NOT EXISTS ("
+                "SELECT 1 FROM attempts WHERE attempts.job_id=leads.job_id "
+                "AND attempts.lead_id=leads.lead_id AND attempts.ended_at IS NULL)",
+                (job_id, lead_id),
+            )
+            return updated.rowcount == 1
+
     def record_result(
         self,
         job_id: str,
