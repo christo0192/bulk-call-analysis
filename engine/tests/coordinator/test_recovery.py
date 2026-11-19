@@ -90,24 +90,30 @@ def test_recover_after_crash_during_pull(
     assert coordinator.store.rows("SELECT COUNT(*) FROM results WHERE job_id='job'")[0][0] == 4
 
 
+class _ProcessDeath(BaseException):
+    """Simulates the engine process dying: not caught by `except Exception`."""
+
+
 def test_recover_after_crash_masking_second_sample_lead(
     coordinator: CoordinatorFixture, make_runner: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    coordinator.runner.on_plan_approved(1)
-    original_on_result = runner_module._Callbacks.on_result
-    sample_results = 0
+    # The crash happens INSIDE masking_sample: the leak scan of the 2nd sample lead kills the
+    # process during on_plan_approved, after the 1st sample lead was masked and queued.
+    original_scan = runner_module.scan_lead
+    scans = {"n": 0}
 
-    async def crash_on_second_sample_result(callbacks: Any, task: Any, *args: Any, **kwargs: Any) -> None:
-        nonlocal sample_results
-        if callbacks.sample:
-            sample_results += 1
-            if sample_results == 2:
-                raise RuntimeError("synthetic masking_sample crash")
-        await original_on_result(callbacks, task, *args, **kwargs)
+    def dying_scan(*args: Any, **kwargs: Any) -> Any:
+        scans["n"] += 1
+        if scans["n"] == 2:
+            raise _ProcessDeath()
+        return original_scan(*args, **kwargs)
 
-    monkeypatch.setattr(runner_module._Callbacks, "on_result", crash_on_second_sample_result)
-    with pytest.raises(RuntimeError, match="synthetic masking_sample crash"):
-        asyncio.run(asyncio.wait_for(coordinator.runner.run_sample(), timeout=15))
+    monkeypatch.setattr(runner_module, "scan_lead", dying_scan)
+    with pytest.raises(_ProcessDeath):
+        coordinator.runner.on_plan_approved(1)
+    monkeypatch.setattr(runner_module, "scan_lead", original_scan)
+    assert coordinator.runner._state() is JobState.masking_sample
+    assert scans["n"] == 2
 
     recovered = make_runner()
     recovered.recover()

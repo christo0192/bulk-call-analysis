@@ -68,6 +68,7 @@ class CoordinatorPool(Protocol):
 MaskerFactory = Callable[..., MaskingContext]
 MAX_UNCOUNTED_FAILURES = 4
 LOGGER = logging.getLogger(__name__)
+__all__ = ["scan_lead"]
 
 
 @dataclass(frozen=True)
@@ -104,22 +105,19 @@ class _Callbacks(PoolCallbacks):
 
     async def next_tasks(self, n: int) -> list[LeadTask]:
         while True:
-            if self.runner._state() is JobState.paused:
+            if self.runner._state() is not self.runner._phase_state(self.sample):
                 return []
             if self._dispatch_limit == 0:
                 return []
             if not self._tasks:
-                self._tasks = self.runner._task_list(self.sample)
+                lead_ids = self.runner.deps.store.next_queued(self.runner.job_id, n, self.sample)
+                claimed = self.runner.deps.store.claim_queued(
+                    self.runner.job_id, lead_ids, self.sample, self.runner._bundle_metadata
+                )
+                self._tasks = await self.runner._task_list(self.sample, list(claimed))
             if self._tasks:
                 limit = n if self._dispatch_limit is None else min(n, self._dispatch_limit)
                 tasks, self._tasks = self._tasks[:limit], self._tasks[limit:]
-                claimed = self.runner.deps.store.claim_queued(
-                    self.runner.job_id,
-                    [task.lead_id for task in tasks],
-                    self.sample,
-                    self.runner._bundle_metadata,
-                )
-                tasks = [task for task in tasks if task.lead_id in claimed]
                 if self._dispatch_limit is not None:
                     self._dispatch_limit -= len(tasks)
                 return tasks
@@ -147,10 +145,11 @@ class _Callbacks(PoolCallbacks):
             return
         self.runner._close_attempt(task.attempt_id)
         self.runner._refresh_spec()
+        bundle_text = await asyncio.to_thread(self.runner._bundle_text, task.lead_id)
         failures = check_answer(
             answer,
             self.runner.spec.quote_fields,
-            self.runner._bundles.get(task.lead_id, (self.runner.spec.spec_version, ""))[1],
+            bundle_text,
             self.runner.deps.config.recipe.speaker_labels,
         )
         ok = all(item.ok for item in failures)
@@ -184,19 +183,17 @@ class _Callbacks(PoolCallbacks):
                 )
             except ValueError:
                 LOGGER.warning("ignoring stale-spec result for closed attempt %s", task.attempt_id)
-            self.runner.deps.store.set_lead_status(
-                self.runner.job_id, task.lead_id, LeadStatus.held_back, "result rejected for stale spec"
-            )
+            self.runner.deps.store.set_lead_status(self.runner.job_id, task.lead_id, LeadStatus.queued, None)
+            self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
             return
-        self.runner._answers[task.lead_id] = stored_answer
         if not ok and not is_repair:
             self.runner.deps.store.set_lead_status(
                 self.runner.job_id, task.lead_id, LeadStatus.queued, "quote_repair_pending"
             )
             self.runner._quote_failures[task.lead_id] = (answer, [item for item in failures if not item.ok])
         elif is_repair:
-            self.runner._quote_failures.pop(task.lead_id, None)
             self.runner.deps.store.set_lead_status(self.runner.job_id, task.lead_id, LeadStatus.done)
+            self.runner._drop_lead_state(task.lead_id)
         self.runner._publish("lead_done", {"lead_id": task.lead_id, "quotes_ok": ok, "repair": is_repair})
         self.runner._publish_progress()
         self.runner._liveness.lead_ended(task.lead_id, self.runner._ts())
@@ -231,10 +228,10 @@ class _Callbacks(PoolCallbacks):
                     self._tasks.append(replace(task, attempt_id=str(uuid.uuid4())))
             if task.lead_id in self.runner._quote_failures:
                 if counted:
-                    self.runner._quote_failures.pop(task.lead_id, None)
                     self.runner.deps.store.set_lead_status(
                         self.runner.job_id, task.lead_id, LeadStatus.done, "quote repair failed; kept answer"
                     )
+                    self.runner._drop_lead_state(task.lead_id)
                 else:
                     self.runner.deps.store.set_lead_status(
                         self.runner.job_id, task.lead_id, LeadStatus.queued, "quote_repair_pending"
@@ -278,7 +275,10 @@ class _Callbacks(PoolCallbacks):
                 JobState.done_with_issues,
             }:
                 if self.runner._pause_task is None or self.runner._pause_task.done():
-                    self.runner._pause_task = asyncio.create_task(self.runner.pause(PauseReason.sleep.value))
+                    await self.runner._persist_pause(PauseReason.sleep.value, None)
+                    self.runner._pause_task = asyncio.create_task(
+                        self.runner._drain_persisted_pause(PauseReason.sleep.value, None)
+                    )
                     self.runner._pause_task.add_done_callback(self.runner._pause_task_done)
                 self.runner._liveness.sleep_detected(ts)
                 start = event.data.get("start")
@@ -291,14 +291,14 @@ class _Callbacks(PoolCallbacks):
                         "SELECT pause_reason FROM jobs WHERE id=?", (self.runner.job_id,)
                     )
                     if row and row[0][0] == PauseReason.sleep.value:
-                        resume_job(self.runner.deps.store, self.runner.job_id)
-                    await self.on_pause(PauseReason.network.value, None)
+                        self.runner._wake_requested = True
+                        self.runner._wake_network_unavailable = True
                 else:
                     row = self.runner.deps.store.rows(
                         "SELECT pause_reason FROM jobs WHERE id=?", (self.runner.job_id,)
                     )
                     if row and row[0][0] == PauseReason.sleep.value:
-                        resume_job(self.runner.deps.store, self.runner.job_id)
+                        self.runner._wake_requested = True
                         self.runner._eta.pause(
                             self.runner._pause_started or ts,
                             ts,
@@ -360,9 +360,8 @@ class JobRunner:
         self.spec, _ = load_latest_spec(deps.job_dir)
         self._attempts: dict[str, str] = {}
         self._closed_attempts: set[str] = set()
-        self._bundles: dict[str, tuple[int, str]] = {}
+        self._bundles: dict[str, tuple[int, None]] = {}
         self._bundle_metadata: dict[str, tuple[int, int, int]] = {}
-        self._answers: dict[str, dict[str, object]] = {}
         self._quote_failures: dict[str, tuple[dict[str, Any], list[QuoteCheck]]] = {}
         self._eta = EtaEstimator()
         self._liveness = Liveness(lambda: deps.concurrency, deps.config.limits.lead_timeout_s)
@@ -386,6 +385,8 @@ class JobRunner:
         self._pause_reason: str | None = None
         self._pause_resume_at: int | None = None
         self._pause_finished = False
+        self._wake_requested = False
+        self._wake_network_unavailable = False
 
     def _ts(self) -> float:
         return self.deps.clock.now() if self.deps.clock is not None else time.time()
@@ -396,6 +397,11 @@ class JobRunner:
 
     def _is_closed_attempt(self, attempt_id: str) -> bool:
         return attempt_id in self._closed_attempts
+
+    def _drop_lead_state(self, lead_id: str) -> None:
+        self._bundles.pop(lead_id, None)
+        self._bundle_metadata.pop(lead_id, None)
+        self._quote_failures.pop(lead_id, None)
 
     def _pause_task_done(self, task: asyncio.Task[None]) -> None:
         if self._pause_task is task:
@@ -446,6 +452,9 @@ class JobRunner:
             raise ValueError(f"job not found: {self.job_id}")
         return JobState(str(rows[0][0]))
 
+    def _phase_state(self, sample: bool) -> JobState:
+        return JobState.sample_running if sample else JobState.full_running
+
     def _base_context(self) -> MaskingContext:
         try:
             value = self.deps.masking_context(self.deps.job_dir)
@@ -470,6 +479,17 @@ class JobRunner:
         path = self.deps.job_dir / ("masked" if masked else "raw") / f"{lead_id}.jsonl.gz"
         with gzip.open(path, "rt", encoding="utf-8") as source:
             return [_as_dict(json.loads(line)) for line in source if line.strip()]
+
+    def _bundle_text(self, lead_id: str) -> str:
+        bundle = build_bundle(
+            lead_id,
+            self._lead_calls(lead_id),
+            self.spec.cap,
+            self.deps.config.recipe.duration_unit,
+        )
+        if bundle.calls_sent == 0:
+            raise ValueError("bundle has no calls under the current cap")
+        return bundle.text
 
     def _hold_empty_bundle(self, lead_id: str, bundle: Any) -> None:
         dropped = len(bundle.calls_dropped)
@@ -496,6 +516,7 @@ class JobRunner:
                 stats = mask_lead_stream(raw, masked, context)
                 report = scan_lead(masked, context.allow_ids)
             except Exception as exc:
+                raw.unlink(missing_ok=True)
                 self.deps.store.set_lead_status(
                     self.job_id,
                     lead_id,
@@ -505,15 +526,17 @@ class JobRunner:
                 continue
             if stats.failed or report.held_back:
                 reason = stats.error or "leak scan hold-back"
+                raw.unlink(missing_ok=True)
                 self.deps.store.set_lead_status(self.job_id, lead_id, LeadStatus.held_back, reason)
                 continue
             try:
                 calls = self._lead_calls(lead_id)
                 bundle = build_bundle(lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit)
                 if bundle.calls_sent == 0:
+                    raw.unlink(missing_ok=True)
                     self._hold_empty_bundle(lead_id, bundle)
                     continue
-                self._bundles[lead_id] = (self.spec.spec_version, bundle.text)
+                self._bundles[lead_id] = (self.spec.spec_version, None)
                 self._bundle_metadata[lead_id] = (
                     bundle.calls_sent,
                     len(bundle.calls_dropped),
@@ -534,6 +557,7 @@ class JobRunner:
                     )
                 raw.unlink(missing_ok=True)
             except Exception as exc:
+                raw.unlink(missing_ok=True)
                 self.deps.store.set_lead_status(
                     self.job_id,
                     lead_id,
@@ -546,51 +570,48 @@ class JobRunner:
                 if phase_event is not None:
                     self._phase_loop.call_soon_threadsafe(phase_event.set)
 
-    def _task_list(self, sample: bool, repair: bool = False) -> list[LeadTask]:
+    async def _task_list(self, sample: bool, lead_ids: list[str]) -> list[LeadTask]:
         self._refresh_spec()
         self._load_pending_repairs()
         rows = self.deps.store.rows(
-            "SELECT lead_id, reason FROM leads WHERE job_id=? AND status='queued' "
-            "AND in_sample=? ORDER BY lead_id",
-            (self.job_id, int(sample)),
+            "SELECT lead_id, reason FROM leads WHERE job_id=? AND lead_id IN ({}) ORDER BY lead_id".format(
+                ",".join("?" for _ in lead_ids)
+            ),
+            (self.job_id, *lead_ids),
         )
-        lead_ids = [str(row[0]) for row in rows]
         result: list[LeadTask] = []
         for lead_id in lead_ids:
-            cached = self._bundles.get(lead_id)
-            if cached is None or cached[0] != self.spec.spec_version:
-                try:
-                    calls = self._lead_calls(lead_id)
-                    bundle = build_bundle(
-                        lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit
-                    )
-                    if bundle.calls_sent == 0:
-                        self._hold_empty_bundle(lead_id, bundle)
-                        continue
-                    self._bundles[lead_id] = (self.spec.spec_version, bundle.text)
-                    self._bundle_metadata[lead_id] = (
-                        bundle.calls_sent,
-                        len(bundle.calls_dropped),
-                        bundle.chars,
-                    )
-                except Exception as exc:
-                    self.deps.store.set_lead_status(
-                        self.job_id,
-                        lead_id,
-                        LeadStatus.held_back,
-                        f"masked bundle unavailable: {type(exc).__name__}: {exc}",
-                    )
+            try:
+                bundle = await asyncio.to_thread(
+                    build_bundle,
+                    lead_id,
+                    self._lead_calls(lead_id),
+                    self.spec.cap,
+                    self.deps.config.recipe.duration_unit,
+                )
+                if bundle.calls_sent == 0:
+                    self._hold_empty_bundle(lead_id, bundle)
                     continue
-            prompt = self.spec.instructions + "\n" + self._bundles[lead_id][1]
+                self._bundles[lead_id] = (self.spec.spec_version, None)
+                self._bundle_metadata[lead_id] = (
+                    bundle.calls_sent,
+                    len(bundle.calls_dropped),
+                    bundle.chars,
+                )
+            except Exception as exc:
+                self.deps.store.set_lead_status(
+                    self.job_id,
+                    lead_id,
+                    LeadStatus.held_back,
+                    f"masked bundle unavailable: {type(exc).__name__}: {exc}",
+                )
+                continue
+            prompt = self.spec.instructions + "\n" + bundle.text
             is_repair = str(next(row[1] for row in rows if str(row[0]) == lead_id)) == "quote_repair_pending"
             if is_repair:
                 answer, failures = self._quote_failures[lead_id]
                 prompt = (
-                    self.spec.instructions
-                    + "\n"
-                    + self._bundles[lead_id][1]
-                    + "\n"
-                    + repair_prompt(answer, failures, self.spec.instructions)
+                    self.spec.instructions + "\n" + bundle.text + "\n" + repair_prompt(answer, failures, "")
                 )
             result.append(
                 LeadTask(
@@ -619,14 +640,9 @@ class JobRunner:
         )
 
     async def _persist_pause(self, reason: str, resume_at: int | None) -> None:
-        if self._pause_reason is not None:
+        if self._pause_reason is not None and self._state() is JobState.paused:
             reason = self._pause_reason
-        else:
-            self._pause_reason = reason
-            self._pause_resume_at = resume_at
-            self._pause_finished = False
-        if self._pause_started is None:
-            self._pause_started = self._ts()
+            resume_at = self._pause_resume_at
         if reason in {item.value for item in PauseReason}:
             try:
                 pause(self.deps.store, self.job_id, PauseReason(reason), resume_at)
@@ -634,12 +650,32 @@ class JobRunner:
                 if self._state() is not JobState.paused:
                     raise
                 LOGGER.info("pause %s raced with another pause", reason)
+            row = self.deps.store.rows("SELECT pause_reason, resume_at FROM jobs WHERE id=?", (self.job_id,))
+            if row:
+                reason = str(row[0][0])
+                resume_at = int(row[0][1]) if row[0][1] is not None else None
+        self._pause_reason = reason
+        self._pause_resume_at = resume_at
+        self._pause_finished = False
+        if self._pause_started is None:
+            self._pause_started = self._ts()
+
+    async def _drain_persisted_pause(self, reason: str, resume_at: int | None) -> None:
+        pool = self._phase_pool
+        if pool is not None:
+            await pool.pause(reason)
+        await self._finish_pause(reason, resume_at)
 
     async def _finish_pause(self, reason: str, resume_at: int | None) -> None:
         if self._pause_finished:
             return
         self._pause_finished = True
-        reason = self._pause_reason or reason
+        row = self.deps.store.rows("SELECT pause_reason, resume_at FROM jobs WHERE id=?", (self.job_id,))
+        if row and row[0][0] is not None:
+            reason = str(row[0][0])
+            resume_at = int(row[0][1]) if row[0][1] is not None else None
+        elif self._pause_reason is not None:
+            reason = self._pause_reason
         resume_at = self._pause_resume_at if self._pause_reason is not None else resume_at
         now = self._ts()
         pause_started = self._pause_started or now
@@ -780,6 +816,21 @@ class JobRunner:
         try:
             while True:
                 await pool.run_until_idle()
+                if self._wake_requested and self._state() is JobState.paused:
+                    await self._finish_pause(
+                        self._pause_reason or PauseReason.sleep.value,
+                        self._pause_resume_at,
+                    )
+                    resume_job(self.deps.store, self.job_id)
+                    self._pause_started = None
+                    self._pause_reason = None
+                    self._pause_resume_at = None
+                    self._pause_finished = False
+                    if self._wake_network_unavailable:
+                        await self._persist_pause(PauseReason.network.value, None)
+                        await self._finish_pause(PauseReason.network.value, None)
+                    self._wake_requested = False
+                    self._wake_network_unavailable = False
                 if self._state() is JobState.paused:
                     await self._finish_pause(
                         self._pause_reason or PauseReason.error_storm.value,
@@ -810,7 +861,7 @@ class JobRunner:
                                     f"masking failed: {type(exc).__name__}: {exc}",
                                 )
                             raise
-                if self._state() is JobState.paused or self._phase_finished(sample):
+                if self._state() is not self._phase_state(sample) or self._phase_finished(sample):
                     break
                 if canary and callbacks.attempt_ended:
                     break
@@ -905,7 +956,7 @@ class JobRunner:
             path = self.deps.job_dir / "raw" / f"{lead_id}.jsonl.gz"
             if not path.is_file():
                 continue
-            self._bundles[lead_id] = (self.spec.spec_version, "")
+            self._bundles[lead_id] = (self.spec.spec_version, None)
 
     def _mask_sample(self) -> None:
         all_usable = [
@@ -972,7 +1023,7 @@ class JobRunner:
                 if bundle.calls_sent == 0:
                     self._hold_empty_bundle(lead_id, bundle)
                     continue
-                self._bundles[lead_id] = (self.spec.spec_version, bundle.text)
+                self._bundles[lead_id] = (self.spec.spec_version, None)
                 self._bundle_metadata[lead_id] = (
                     bundle.calls_sent,
                     len(bundle.calls_dropped),
@@ -1005,7 +1056,7 @@ class JobRunner:
         if self._masking_task is None:
             self._start_masking_worker(False)
         await self._run_phase(True)
-        if self._state() is JobState.paused:
+        if self._state() is not JobState.sample_running:
             return
         assert not counts(self.deps.store, self.job_id).in_flight
         transition(self.deps.store, self.job_id, JobState.sample_ready)
@@ -1040,7 +1091,7 @@ class JobRunner:
                 )
         self._start_masking_worker(False)
         await self._run_phase(False)
-        if self._state() is JobState.paused:
+        if self._state() is not JobState.full_running:
             return
         assert not counts(self.deps.store, self.job_id).in_flight
         transition(self.deps.store, self.job_id, JobState.quote_check)
@@ -1121,6 +1172,8 @@ class JobRunner:
             if self._state() is JobState.paused:
                 return
             await self.start_full_run()
+        elif state in {JobState.quote_check, JobState.building_output, JobState.verifying}:
+            await self._finish_output(state)
 
     def recover(self) -> int:
         state = self._state()

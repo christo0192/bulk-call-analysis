@@ -698,6 +698,8 @@ class ToolHost:
         existing = self.store.rows(
             "SELECT state FROM jobs WHERE id=? AND project_id=?", (spec.job_id, self.project_id)
         )
+        if existing and str(existing[0][0]) in {"sample_running", "full_running"}:
+            raise ToolHostError("Pause the job before editing its plan.")
         owner = self.store.rows("SELECT project_id FROM jobs WHERE id=?", (spec.job_id,))
         if owner and str(owner[0][0]) != self.project_id:
             raise ToolHostError("job id already in use")

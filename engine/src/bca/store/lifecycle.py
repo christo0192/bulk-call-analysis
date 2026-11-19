@@ -211,6 +211,11 @@ def edit_spec(store: Store, job_id: str, spec_version: int) -> None:
             "UPDATE leads SET status='queued', reason=NULL WHERE job_id=? AND status IN ('in_flight','queued','done','masked') AND in_sample=1",
             (job_id,),
         )
+        cur.execute(
+            "UPDATE leads SET status='queued', reason=NULL WHERE job_id=? AND status='held_back' "
+            "AND reason='every call exceeds the per-lead cap'",
+            (job_id,),
+        )
         cur.execute("DELETE FROM results WHERE job_id=?", (job_id,))
         _event(cur, job_id, current, JobState.plan_proposed, "spec edited")
 
