@@ -5,7 +5,6 @@ CLAUDE.local.md
 
 # Site-specific configuration (real names, paths, table ids)
 config/site.toml
-
 # Credentials and secrets: never commit
 .env
 .env.*
@@ -15,7 +14,6 @@ config/site.toml
 *credentials*
 auth.json
 gcp-keys/
-
 # Data: transcripts and outputs contain personal data
 data/
 output/
@@ -27,7 +25,6 @@ output/
 *.log
 *.log.*
 !engine/tests/fixtures/**/*.csv
-
 # Build and tooling
 node_modules/
 target/
@@ -52,3 +49,6 @@ engine/.manual*/
 uv-*.lock
 .pytest*/
 .tmp*/
+engine/.pytest_tmp_root/
+engine/.pytest_tmp_root2/
+engine/.pytest_tmp_alt/

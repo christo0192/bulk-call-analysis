@@ -3,9 +3,10 @@ from __future__ import annotations
 import csv
 import io
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from openpyxl import load_workbook
 
@@ -14,7 +15,7 @@ from bca.store import LeadStatus, Store
 from bca.store.spec import LeadSourceIds, LeadSourceSql
 
 from .queries import lead_source_sql
-from .runner import BqRunner
+from .runner import BqRunner, DryRun
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -116,11 +117,15 @@ def parse_id_list(path_or_text: str | Path) -> IdIntake:
     return parse_id_text(path_or_text)
 
 
+class QueryRunner(Protocol):
+    def dry_run(self, sql: str, params: Mapping[str, object] | None = None) -> DryRun: ...
+
+
 class LeadSourceError(ValueError):
     """Raised when a lead source cannot be safely consumed."""
 
 
-def check_single_id_column(runner: BqRunner, user_sql: str) -> None:
+def check_single_id_column(runner: QueryRunner, user_sql: str) -> None:
     result = runner.dry_run(user_sql.strip().removesuffix(";").rstrip(), {})
     if len(result.schema) != 1 or result.schema[0][1] != "STRING":
         raise LeadSourceError("lead source must return exactly one STRING lead_id column")
@@ -134,6 +139,7 @@ def resolve_lead_source(
     cfg: BigQueryConfig,
     job_id: str | None = None,
     approved_bytes: int | None = None,
+    persist: bool = True,
 ) -> IdIntake:
     effective_job = job_id or job_dir.name
     if isinstance(spec, LeadSourceIds):
@@ -148,15 +154,34 @@ def resolve_lead_source(
         for page in runner.iter_pages(sql, params, 1000):
             values.extend(row.get("lead_id", "") for row in page)
         intake = _intake(values)
+    if persist:
+        record_lead_intake(store, effective_job, intake)
+    return intake
+
+
+def record_lead_intake(
+    store: Store, job_id: str, intake: IdIntake, *, replace_existing: bool = False
+) -> None:
+    """Persist an already validated intake after its job row exists."""
     with store.transaction() as cur:
+        if replace_existing:
+            # The intake is the authoritative set on a pre-run re-proposal.
+            # Remove attempts before leads because attempts reference the lead pair.
+            cur.execute("DELETE FROM results WHERE job_id=?", (job_id,))
+            cur.execute("DELETE FROM attempts WHERE job_id=?", (job_id,))
+            cur.execute("DELETE FROM leads WHERE job_id=?", (job_id,))
         cur.execute(
             "INSERT OR REPLACE INTO id_intake(job_id, raw_count, distinct_count, duplicates, malformed) "
             "VALUES (?, ?, ?, ?, ?)",
-            (effective_job, intake.raw_count, len(intake.ids), intake.duplicates, len(intake.malformed)),
+            (job_id, intake.raw_count, len(intake.ids), intake.duplicates, len(intake.malformed)),
         )
         for lead_id in intake.ids:
             cur.execute(
                 "INSERT OR IGNORE INTO leads(job_id, lead_id, status) VALUES (?, ?, ?)",
-                (effective_job, lead_id, str(LeadStatus.pending)),
+                (job_id, lead_id, str(LeadStatus.pending)),
             )
-    return intake
+            if replace_existing:
+                cur.execute(
+                    "UPDATE leads SET status=?, reason=NULL, in_sample=0 WHERE job_id=? AND lead_id=?",
+                    (str(LeadStatus.pending), job_id, lead_id),
+                )

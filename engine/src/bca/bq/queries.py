@@ -73,6 +73,10 @@ def preflight_sql(
         count, seconds = usable_rule.min_calls_over
         over_rule = f", COUNTIF(duration >= {seconds}) AS over_calls"
         over_select = f"IF(over_calls >= {count}, usable_calls, 0) AS usable_calls"
+    usable_count = (
+        f"COUNTIF(chars >= {usable_rule.min_chars}{status_rule}{duration_rule}) "
+        f"AS usable_calls{status_count}{over_rule}"
+    )
     sql = f"""WITH selected AS (SELECT lead_id FROM UNNEST(@lead_ids) AS lead_id),
 calls AS (SELECT CAST(c.`{recipe.lead_id_column}` AS STRING) AS lead_id,
 LENGTH(t.`{recipe.transcript_text_column}`) AS chars{status}, {duration} AS duration,
@@ -82,11 +86,14 @@ ON c.`{recipe.call_id_column}` = t.`{recipe.call_id_column}`
 WHERE CAST(c.`{recipe.lead_id_column}` AS STRING) IN UNNEST(@lead_ids)
 {_window(scope, window, f"c.`{recipe.call_start_column}`")}),
 agg_base AS (SELECT lead_id, COUNT(DISTINCT call_id) AS calls,
+SUM(COALESCE(chars, 0)) AS transcript_chars,
 COUNTIF(chars IS NOT NULL AND chars > 0) AS transcript_calls,
-COUNTIF(chars >= {usable_rule.min_chars}{status_rule}{duration_rule}) AS usable_calls{status_count}{over_rule}
+{usable_count}
 FROM calls GROUP BY lead_id),
 agg AS (SELECT lead_id, calls, transcript_calls, {over_select}, transcription_failed FROM agg_base)
-SELECT selected.lead_id, COALESCE(agg.calls, 0) AS calls, COALESCE(agg.usable_calls, 0) AS usable_calls,
+SELECT selected.lead_id, COALESCE(agg.calls, 0) AS calls,
+COALESCE(agg.transcript_chars, 0) AS transcript_chars,
+COALESCE(agg.usable_calls, 0) AS usable_calls,
 COALESCE(agg.transcript_calls, 0) AS transcript_calls,
 agg.transcription_failed AS transcription_failed,
 COALESCE(agg.calls - agg.usable_calls, 0) AS too_short, agg.lead_id IS NOT NULL AS found

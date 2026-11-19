@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -24,8 +25,16 @@ class DryRun:
 class BqRunner(Protocol):
     def dry_run(self, sql: str, params: Mapping[str, object] | None = None) -> DryRun: ...
     def iter_pages(
-        self, sql: str, params: Mapping[str, object] | None = None, page_size: int = 1000
+        self,
+        sql: str,
+        params: Mapping[str, object] | None = None,
+        page_size: int = 1000,
+        timeout: float | None = None,
     ) -> Iterator[list[dict[str, object]]]: ...
+
+    def list_datasets(self) -> list[dict[str, object]]: ...
+    def list_tables(self, dataset: str) -> list[dict[str, object]]: ...
+    def describe_table(self, dataset: str, table: str) -> dict[str, object]: ...
 
 
 class GoogleBqRunner:
@@ -38,7 +47,7 @@ class GoogleBqRunner:
         self._cfg = cfg
 
     def _config(
-        self, params: Mapping[str, object] | None, *, dry_run: bool = False
+        self, params: Mapping[str, object] | None, *, dry_run: bool = False, timeout: float | None = None
     ) -> bigquery.QueryJobConfig:
         values = [] if params is None else list(params.items())
         query_parameters: list[Any] = []
@@ -56,6 +65,7 @@ class GoogleBqRunner:
             labels={"app": "bulk-call-analysis"},
             use_query_cache=True,
             dry_run=dry_run,
+            job_timeout_ms=max(1, int(timeout * 1000)) if timeout is not None else None,
         )
         assert_job_config_read_only(config)
         return config
@@ -71,17 +81,54 @@ class GoogleBqRunner:
         return DryRun(int(job.total_bytes_processed or 0), tables, schema, statement_type)
 
     def iter_pages(
-        self, sql: str, params: Mapping[str, object] | None = None, page_size: int = 1000
+        self,
+        sql: str,
+        params: Mapping[str, object] | None = None,
+        page_size: int = 1000,
+        timeout: float | None = None,
     ) -> Iterator[list[dict[str, object]]]:
         # Keep the check here: callers cannot execute a query without a fresh
         # dry-run of the exact text that will be sent to BigQuery.
         self.dry_run(sql, params)
-        result = self._client.query(sql, job_config=self._config(params)).result(page_size=page_size)
-        page: list[dict[str, object]] = []
-        for row in result:
-            page.append(dict(row.items()))
-            if len(page) == page_size:
+        job = self._client.query(sql, job_config=self._config(params, timeout=timeout))
+        completed = False
+        try:
+            result = job.result(page_size=page_size, timeout=timeout)
+            page: list[dict[str, object]] = []
+            for row in result:
+                page.append(dict(row.items()))
+                if len(page) == page_size:
+                    yield page
+                    page = []
+            if page:
                 yield page
-                page = []
-        if page:
-            yield page
+            completed = True
+        except TimeoutError:
+            raise
+        finally:
+            if not completed:
+                with suppress(Exception):
+                    job.cancel()
+
+    def list_datasets(self) -> list[dict[str, object]]:
+        return [
+            {"dataset_id": item.dataset_id, "location": item.location}
+            for item in self._client.list_datasets()
+        ]
+
+    def list_tables(self, dataset: str) -> list[dict[str, object]]:
+        return [
+            {"table_id": item.table_id, "dataset_id": item.dataset_id, "table_type": item.table_type}
+            for item in self._client.list_tables(dataset)
+        ]
+
+    def describe_table(self, dataset: str, table: str) -> dict[str, object]:
+        item = self._client.get_table(f"{self._cfg.project}.{dataset}.{table}")
+        return {
+            "dataset_id": item.dataset_id,
+            "table_id": item.table_id,
+            "num_rows": item.num_rows,
+            "schema": [
+                {"name": field.name, "type": field.field_type, "mode": field.mode} for field in item.schema
+            ],
+        }
