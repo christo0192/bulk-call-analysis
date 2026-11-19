@@ -30,6 +30,7 @@ from bca.outputs.excel import build_workbook
 from bca.outputs.quotes import QuoteCheck, check_answer, repair_prompt
 from bca.outputs.verify import verify_job
 from bca.store import (
+    ClaimError,
     JobState,
     LeadStatus,
     PauseReason,
@@ -111,10 +112,33 @@ class _Callbacks(PoolCallbacks):
                 return []
             if not self._tasks:
                 lead_ids = self.runner.deps.store.next_queued(self.runner.job_id, n, self.sample)
+                tasks = await self.runner._task_list(self.sample, lead_ids)
+                if self.runner._state() is not self.runner._phase_state(self.sample):
+                    return []
                 claimed = self.runner.deps.store.claim_queued(
-                    self.runner.job_id, lead_ids, self.sample, self.runner._bundle_metadata
+                    self.runner.job_id,
+                    [task.lead_id for task in tasks],
+                    self.sample,
+                    self.runner._bundle_metadata,
                 )
-                self._tasks = await self.runner._task_list(self.sample, list(claimed))
+                self._tasks = [task for task in tasks if task.lead_id in claimed]
+            if self._tasks:
+                queued_ids = [task.lead_id for task in self._tasks]
+                self.runner.deps.store.claim_queued(
+                    self.runner.job_id,
+                    queued_ids,
+                    self.sample,
+                    self.runner._bundle_metadata,
+                )
+                active = {
+                    str(row[0])
+                    for row in self.runner.deps.store.rows(
+                        "SELECT lead_id FROM leads WHERE job_id=? AND status='in_flight' "
+                        "AND lead_id IN ({})".format(",".join("?" for _ in queued_ids)),
+                        (self.runner.job_id, *queued_ids),
+                    )
+                }
+                self._tasks = [task for task in self._tasks if task.lead_id in active]
             if self._tasks:
                 limit = n if self._dispatch_limit is None else min(n, self._dispatch_limit)
                 tasks, self._tasks = self._tasks[:limit], self._tasks[limit:]
@@ -128,13 +152,24 @@ class _Callbacks(PoolCallbacks):
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(phase_event.wait(), 1.0)
 
-    async def on_started(self, task: LeadTask) -> None:
-        attempt = self.runner.deps.store.start_attempt(
-            self.runner.job_id, task.lead_id, task.model, counted=True, claimed=True
-        )
+    async def on_started(self, task: LeadTask) -> bool:
+        if self.runner._state() is not self.runner._phase_state(self.sample):
+            self.runner.deps.store.release_claim(self.runner.job_id, task.lead_id)
+            self.runner._closed_attempts.add(task.attempt_id)
+            return False
+        try:
+            attempt = self.runner.deps.store.start_attempt(
+                self.runner.job_id, task.lead_id, task.model, counted=True, claimed=True
+            )
+        except ClaimError:
+            # A pause or another outcome can release a lazy claim after the
+            # pool has selected the task but before its worker starts.
+            self.runner._closed_attempts.add(task.attempt_id)
+            return False
         self.runner._attempts[task.attempt_id] = attempt
         self.runner._publish("lead_started", {"lead_id": task.lead_id, "attempt_id": attempt})
         self.runner._liveness.lead_started(task.lead_id, self.runner._ts())
+        return True
 
     async def on_result(
         self, task: LeadTask, answer: dict[str, Any], model_used: str, usage: dict[str, Any] | None
@@ -142,6 +177,13 @@ class _Callbacks(PoolCallbacks):
         attempt = self.runner._attempts.get(task.attempt_id)
         if attempt is None:
             LOGGER.warning("ignoring result for closed attempt %s", task.attempt_id)
+            return
+        status = self.runner.deps.store.rows(
+            "SELECT status FROM leads WHERE job_id=? AND lead_id=?",
+            (self.runner.job_id, task.lead_id),
+        )
+        if not status or str(status[0][0]) != LeadStatus.in_flight:
+            self.runner._close_attempt(task.attempt_id)
             return
         self.runner._close_attempt(task.attempt_id)
         self.runner._refresh_spec()
@@ -191,6 +233,14 @@ class _Callbacks(PoolCallbacks):
                 self.runner.job_id, task.lead_id, LeadStatus.queued, "quote_repair_pending"
             )
             self.runner._quote_failures[task.lead_id] = (answer, [item for item in failures if not item.ok])
+            repair_tasks = await self.runner._task_list(self.sample, [task.lead_id])
+            claimed = self.runner.deps.store.claim_queued(
+                self.runner.job_id,
+                [item.lead_id for item in repair_tasks],
+                self.sample,
+                self.runner._bundle_metadata,
+            )
+            self._tasks[0:0] = [item for item in repair_tasks if item.lead_id in claimed]
         elif is_repair:
             self.runner.deps.store.set_lead_status(self.runner.job_id, task.lead_id, LeadStatus.done)
             self.runner._drop_lead_state(task.lead_id)

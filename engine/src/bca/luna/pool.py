@@ -39,7 +39,7 @@ class LeadTask:
 class PoolCallbacks(Protocol):
     async def next_tasks(self, n: int) -> list[LeadTask]: ...
 
-    async def on_started(self, task: LeadTask) -> None: ...
+    async def on_started(self, task: LeadTask) -> bool | None: ...
 
     async def on_result(
         self, task: LeadTask, answer: dict[str, Any], model_used: str, usage: dict[str, Any] | None
@@ -376,7 +376,9 @@ class LunaPool:
     async def _run_lead(self, lead: _Lead) -> None:
         task = lead.task
         try:
-            await self.callbacks.on_started(task)
+            callback_started = await self.callbacks.on_started(task)
+            if callback_started is False:
+                return
             if self._server is not None and self._server.returncode is not None:
                 await self._crash_or_failure(lead, f"app-server exited with code {self._server.returncode}")
                 return
