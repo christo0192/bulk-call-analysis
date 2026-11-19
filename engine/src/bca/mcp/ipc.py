@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
 from multiprocessing.connection import Client
 from pathlib import Path
@@ -44,10 +45,20 @@ def call_engine(
     family: str | None = None,
     project_id: str | None = None,
 ) -> object:
-    try:
-        connection = Client(address, family=family or ipc_family(), authkey=None)
-    except OSError as exc:
-        raise ToolHostError("engine is unavailable") from exc
+    connection = None
+    for attempt, delay in enumerate((0.0, 0.05, 0.1, 0.2)):
+        if delay:
+            time.sleep(delay)
+        try:
+            connection = Client(address, family=family or ipc_family(), authkey=None)
+            break
+        except (ConnectionRefusedError, FileNotFoundError) as exc:
+            if attempt == 3:
+                raise ToolHostError("engine is unavailable") from exc
+        except OSError as exc:
+            raise ToolHostError("engine is unavailable") from exc
+    if connection is None:
+        raise ToolHostError("engine is unavailable")
     try:
         request: dict[str, object] = {"tool": tool, "arguments": dict(arguments)}
         if project_id is not None:

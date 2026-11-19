@@ -53,12 +53,77 @@ def _has_forbidden_reconstruction(sql: str) -> bool:
         "CODE_POINTS_TO_BYTES",
         "TO_HEX",
         "FROM_HEX",
+        "TO_BASE64",
+        "FROM_BASE64",
+        "TO_BASE32",
+        "FROM_BASE32",
         "ASCII",
         "CHR",
         "UNICODE",
+        "REVERSE",
     }
-    scrubbed = re.sub(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"", "", sql)
-    return any(re.search(rf"\b{re.escape(word)}\s*\(", scrubbed, re.IGNORECASE) for word in words)
+    scrubbed, commentless = _sql_tokens(sql)
+    if any(re.search(rf"\b{re.escape(word)}\s*\(", scrubbed, re.IGNORECASE) for word in words):
+        return True
+    format_match = re.search(
+        r"\bFORMAT\s*\(\s*(['\"])(?:(?:\\.)|(?:\1\1)|(?!\1).)*%[xXoO]",
+        commentless,
+        re.IGNORECASE,
+    )
+    return (
+        format_match is not None
+        and scrubbed[format_match.start() : format_match.start() + 6].upper() == "FORMAT"
+    )
+
+
+def _sql_tokens(sql: str) -> tuple[str, str]:
+    """Return normalized SQL and a copy retaining only string literal text."""
+    normalized: list[str] = []
+    commentless: list[str] = []
+    index = 0
+    while index < len(sql):
+        if sql.startswith("--", index):
+            end = sql.find("\n", index + 2)
+            index = len(sql) if end < 0 else end + 1
+            normalized.append(" ")
+            commentless.append(" ")
+            continue
+        if sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            index = len(sql) if end < 0 else end + 2
+            normalized.append(" ")
+            commentless.append(" ")
+            continue
+        if sql[index] in "'\"`":
+            quote = sql[index]
+            normalized.append(" ")
+            commentless.append(quote)
+            literal = [quote]
+            index += 1
+            while index < len(sql):
+                literal.append(sql[index])
+                normalized.append(" ")
+                commentless.append(sql[index])
+                if sql[index] == "\\" and quote != "`" and index + 1 < len(sql):
+                    index += 1
+                    literal.append(sql[index])
+                    normalized.append(" ")
+                    commentless.append(sql[index])
+                elif sql[index] == quote:
+                    if index + 1 < len(sql) and sql[index + 1] == quote:
+                        index += 1
+                        literal.append(sql[index])
+                        normalized.append(" ")
+                        commentless.append(sql[index])
+                    else:
+                        index += 1
+                        break
+                index += 1
+            continue
+        normalized.append(sql[index])
+        commentless.append(sql[index])
+        index += 1
+    return "".join(normalized), "".join(commentless)
 
 
 class ToolHostError(RuntimeError):
@@ -74,26 +139,20 @@ class ListableRunner(Protocol):
 def _masked(
     value: object,
     context: MaskingContext,
-    *,
-    exempt_numbers: frozenset[str] = frozenset(),
-    exempt_number_value: bool = False,
 ) -> object:
     if isinstance(value, str):
+        if _is_sensitive_number(value):
+            return "[NUMBER]"
         return mask_text(value[:MAX_RESULT_CHARS], context).text
     if isinstance(value, list):
-        return [_masked(item, context, exempt_numbers=exempt_numbers) for item in value]
+        return [_masked(item, context) for item in value]
     if isinstance(value, tuple):
-        return [_masked(item, context, exempt_numbers=exempt_numbers) for item in value]
+        return [_masked(item, context) for item in value]
     if isinstance(value, dict):
         merged: dict[str, object] = {}
         for key, item in value.items():
-            masked_key = str(_masked(str(key), context, exempt_numbers=exempt_numbers))
-            masked_value = _masked(
-                item,
-                context,
-                exempt_numbers=exempt_numbers,
-                exempt_number_value=str(key) in exempt_numbers,
-            )
+            masked_key = str(_masked(str(key), context))
+            masked_value = _masked(item, context)
             if masked_key in merged and isinstance(merged[masked_key], int) and isinstance(masked_value, int):
                 merged[masked_key] = cast(int, merged[masked_key]) + masked_value
             else:
@@ -103,12 +162,15 @@ def _masked(
         return f"[BYTES {len(value)}]"
     if isinstance(value, int) and not isinstance(value, bool):
         digits = str(abs(value))
-        normalized = digits[2:] if digits.startswith("91") and len(digits) in (12, 13) else digits
-        normalized = normalized[1:] if normalized.startswith("0") else normalized
-        if 10 <= len(normalized) <= 13 and not exempt_number_value:
+        normalized = _normalized_number_digits(digits)
+        if 10 <= len(normalized) <= 13:
             return "[NUMBER]"
         return value
-    if value is None or isinstance(value, (float, bool)):
+    if isinstance(value, float):
+        if _is_sensitive_number(str(value)):
+            return "[NUMBER]"
+        return value
+    if value is None or isinstance(value, bool):
         return value
     return mask_text(str(value)[:MAX_RESULT_CHARS], context).text
 
@@ -118,9 +180,8 @@ def _cap(
     context: MaskingContext,
     *,
     unit: str = "characters",
-    exempt_numbers: frozenset[str] = frozenset(),
 ) -> object:
-    masked = _masked(value, context, exempt_numbers=exempt_numbers)
+    masked = _masked(value, context)
     if isinstance(masked, str) and len(masked) > MAX_RESULT_CHARS:
         omitted = len(masked) - MAX_RESULT_CHARS
         return masked[: MAX_RESULT_CHARS - 80] + f"\n[truncated: {omitted} {unit} omitted]"
@@ -152,6 +213,20 @@ def _cap(
         return {"items": kept, "truncated": f"{omitted} rows omitted; aggregate in SQL or page the result"}
     omitted = len(encoded) - MAX_RESULT_CHARS
     return encoded[: MAX_RESULT_CHARS - 80] + f"\n[truncated: {omitted} {unit} omitted]"
+
+
+def _normalized_number_digits(value: str) -> str:
+    digits = value.lstrip("+-")
+    if digits.startswith("91"):
+        return digits[2:]
+    if digits.startswith("0"):
+        return digits[1:]
+    return digits
+
+
+def _is_sensitive_number(value: str) -> bool:
+    match = re.fullmatch(r"[+-]?(\d+)(?:\.\d+)?", value)
+    return match is not None and 10 <= len(_normalized_number_digits(match.group(1))) <= 13
 
 
 def _safe_error(exc: BaseException, context: MaskingContext) -> ToolHostError:
@@ -226,16 +301,11 @@ class ToolHost:
         if method is None:
             raise ToolHostError("unknown tool")
         try:
-            return _cap(method(**args), self.mask_context, exempt_numbers=self._number_exemptions())
+            return _cap(method(**args), self.mask_context)
         except BaseException as exc:
             safe = _safe_error(exc, self.mask_context)
             _LOG.warning("MCP tool %s failed: %s", name, type(exc).__name__)
             raise safe from None
-
-    def _number_exemptions(self) -> frozenset[str]:
-        if self.recipe is None:
-            return frozenset()
-        return frozenset((self.recipe.lead_id_column, self.recipe.call_id_column))
 
     def _job_dir(self, job_id: str) -> Path:
         if _PATH_ID.fullmatch(job_id) is None:
@@ -304,7 +374,7 @@ class ToolHost:
                     break
                 masked = cast(
                     dict[str, object],
-                    _masked(row, self.mask_context, exempt_numbers=self._number_exemptions()),
+                    _masked(row, self.mask_context),
                 )
                 candidate = json.dumps(
                     {"bytes": dry.bytes, "rows": [*rows, masked]}, ensure_ascii=False, default=str
@@ -437,7 +507,6 @@ class ToolHost:
         }
         summary["preflight"] = {
             "buckets": preflight.buckets,
-            "per_lead": preflight.per_lead,
             "dry_run_bytes": preflight.dry_run_bytes,
             "capped_leads": preflight.capped_leads,
         }
@@ -502,23 +571,33 @@ class ToolHost:
             "WHERE r.job_id=? AND j.project_id=? AND l.in_sample=1 ORDER BY r.lead_id LIMIT ? OFFSET ?",
             (job_id, self.project_id, limit, offset),
         )
-        return [dict(row) for row in rows]
+        return [
+            {
+                "ref": f"S{offset + index + 1}",
+                **{key: row[key] for key in row.keys() if key != "lead_id"},  # noqa: SIM118
+            }
+            for index, row in enumerate(rows)
+        ]
 
-    def lead_transcript(self, job_id: str, lead_id: str, call_from: int = 1, call_to: int = 3) -> str:
+    def lead_transcript(self, job_id: str, ref: str, call_from: int = 1, call_to: int = 3) -> str:
         if call_from < 1 or call_to < call_from:
             raise ToolHostError("invalid call range")
         self._job_dir(job_id)
-        if _PATH_ID.fullmatch(lead_id) is None:
-            raise ToolHostError("invalid lead id")
+        match = re.fullmatch(r"S([1-9][0-9]*)", ref)
+        if match is None:
+            raise ToolHostError("invalid sample reference")
+        sample_index = int(match.group(1))
         row = self.store.rows(
-            "SELECT l.in_sample FROM leads l JOIN jobs j ON j.id=l.job_id "
-            "WHERE l.job_id=? AND l.lead_id=? AND j.project_id=?",
-            (job_id, lead_id, self.project_id),
+            "SELECT l.lead_id FROM leads l JOIN jobs j ON j.id=l.job_id "
+            "WHERE l.job_id=? AND j.project_id=? AND l.in_sample=1 AND l.status='masked' "
+            "ORDER BY l.lead_id LIMIT 1 OFFSET ?",
+            (job_id, self.project_id, sample_index - 1),
         )
-        if not row or not bool(row[0][0]):
-            raise ToolHostError("lead is not a sample lead")
+        if not row:
+            raise ToolHostError("sample reference is unavailable")
+        lead_id = str(row[0][0])
         spec, _ = load_latest_spec(self._job_dir(job_id))
-        path = self._job_dir(job_id) / "raw" / f"{lead_id}.jsonl.gz"
+        path = self._job_dir(job_id) / "cache" / "transcripts" / f"{lead_id}.jsonl.gz"
         if not path.is_file():
             raise ToolHostError("masked transcript not found")
         with gzip.open(path, "rt", encoding="utf-8") as handle:
@@ -604,7 +683,7 @@ def serve_ipc(
     if host._ipc_thread is None:
         host._ipc_thread = threading.current_thread()
     listener: Any
-    listener = Listener(address, family=selected_family, authkey=None)
+    listener = Listener(address, family=selected_family, backlog=16, authkey=None)
     host._ipc_listener = listener
     host._ipc_ready.set()
     if selected_family == "AF_UNIX":

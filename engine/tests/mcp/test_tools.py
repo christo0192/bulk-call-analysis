@@ -91,7 +91,7 @@ def test_propose_job_invalid_spec_is_tool_error(tmp_path: Path) -> None:
 def test_job_status_through_host(tmp_path: Path) -> None:
     host = make_host(tmp_path)
     host.store.create_job("job", "project", 1, "plan_proposed")
-    host.store.add_lead("job", "lead", LeadStatus.done, in_sample=1)
+    host.store.add_lead("job", "lead", LeadStatus.masked, in_sample=1)
     result = host.call("job_status", {"job_id": "job"})
     assert result["state"] == "plan_proposed"  # type: ignore[index]
 
@@ -126,10 +126,26 @@ def test_sample_results_excludes_non_sample_leads(tmp_path: Path) -> None:
     assert host.call("sample_results", {"job_id": "job"}) == []
 
 
+def test_sample_results_uses_opaque_stable_references(tmp_path: Path) -> None:
+    host = make_host(tmp_path)
+    host.store.create_job("job", "project", 1)
+    host.store.add_lead("job", "10000000001", LeadStatus.done, in_sample=1)
+    host.store.add_lead("job", "10000000002", LeadStatus.done, in_sample=1)
+    with host.store.transaction() as cur:
+        for lead_id in ("10000000001", "10000000002"):
+            cur.execute(
+                "INSERT INTO results VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("job", lead_id, "attempt", "{}", 1, "{}", "now", 1),
+            )
+    result = host.call("sample_results", {"job_id": "job"})
+    assert [item["ref"] for item in result] == ["S1", "S2"]  # type: ignore[index]
+    assert all("lead_id" not in item for item in result)  # type: ignore[union-attr]
+
+
 def test_lead_transcript_is_masked_and_capped(tmp_path: Path) -> None:
     host = make_host(tmp_path)
     host.store.create_job("job", "project", 1)
-    host.store.add_lead("job", "lead", LeadStatus.done, in_sample=1)
+    host.store.add_lead("job", "lead", LeadStatus.masked, in_sample=1)
     job_dir = tmp_path / "jobs" / "job"
     save_spec(
         JobSpec(
@@ -145,7 +161,7 @@ def test_lead_transcript_is_masked_and_capped(tmp_path: Path) -> None:
         ),
         job_dir,
     )
-    path = job_dir / "raw"
+    path = job_dir / "cache" / "transcripts"
     path.mkdir(parents=True)
     with gzip.open(path / "lead.jsonl.gz", "wt", encoding="utf-8") as handle:
         handle.write(
@@ -158,8 +174,13 @@ def test_lead_transcript_is_masked_and_capped(tmp_path: Path) -> None:
             )
             + "\n"
         )
-    result = host.call("lead_transcript", {"job_id": "job", "lead_id": "lead"})
+    raw_path = job_dir / "raw"
+    raw_path.mkdir(parents=True)
+    with gzip.open(raw_path / "lead.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps({"transcript_text": "raw-only-secret"}) + "\n")
+    result = host.call("lead_transcript", {"job_id": "job", "ref": "S1"})
     assert isinstance(result, str)
+    assert "raw-only-secret" not in result
     assert "[PHONE]" in result
     assert "[truncated:" in result
 
@@ -212,6 +233,11 @@ def test_tool_error_log_has_type_and_tool_without_exception_message(
         "ASCII",
         "CHR",
         "UNICODE",
+        "TO_BASE64",
+        "FROM_BASE64",
+        "TO_BASE32",
+        "FROM_BASE32",
+        "REVERSE",
     ],
 )
 def test_reconstruction_functions_are_rejected_but_string_literals_are_allowed(
@@ -222,6 +248,34 @@ def test_reconstruction_functions_are_rejected_but_string_literals_are_allowed(
         host.call("bq_query", {"sql": f"SELECT {function_name}(value)"})
     result = host.call("bq_query", {"sql": f"SELECT '{function_name}(value)'"})
     assert result["rows"] == []  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT CAST(phone AS FLOAT64)",
+        "SELECT CAST(phone AS INT64) AS lead_id",
+        "SELECT TO_HEX/**/(value)",
+        "SELECT 'a\\'', TO_HEX(value)",
+        "SELECT TO_BASE64(value)",
+        "SELECT FORMAT('%x', phone)",
+        "SELECT REVERSE(email)",
+    ],
+)
+def test_reconstruction_bypasses_are_rejected_or_masked(tmp_path: Path, sql: str) -> None:
+    host = make_host(tmp_path, FakeBqRunner(pages=[[{"value": 9876543210.0, "lead_id": 9876543210}]]))
+    if "FLOAT64" in sql or "INT64" in sql:
+        result = host.call("bq_query", {"sql": "SELECT 1"})
+        assert result["rows"][0] == {"value": "[NUMBER]", "lead_id": "[NUMBER]"}  # type: ignore[index]
+    else:
+        with pytest.raises(ToolHostError, match="reconstruct"):
+            host.call("bq_query", {"sql": sql})
+
+
+def test_numeric_strings_have_no_column_exemptions(tmp_path: Path) -> None:
+    runner = FakeBqRunner(pages=[[{"lead_id": "9876543210", "value": "012345678901"}]])
+    result = make_host(tmp_path, runner).call("bq_query", {"sql": "SELECT 1"})
+    assert result["rows"][0] == {"lead_id": "[NUMBER]", "value": "[NUMBER]"}  # type: ignore[index]
 
 
 def test_data_notes_uses_configured_app_data_path(tmp_path: Path) -> None:
@@ -303,7 +357,7 @@ def test_propose_job_runs_preflight_before_plan_state_and_returns_card(tmp_path:
     result = host.call("propose_job", {"spec_json": json.dumps(spec)})
     assert result["state"] == "plan_proposed"  # type: ignore[index]
     assert result["preflight"]["buckets"]["usable"] == 1  # type: ignore[index]
-    assert result["preflight"]["per_lead"]["1001"] == "usable"  # type: ignore[index]
+    assert "per_lead" not in result["preflight"]  # type: ignore[operator]
     assert result["lead_source_dry_run_bytes"] == 0  # type: ignore[index]
     assert [tuple(row) for row in host.store.rows("SELECT state, spec_version FROM jobs WHERE id='job'")] == [
         ("plan_proposed", 1)

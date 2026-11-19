@@ -124,8 +124,8 @@ def test_lead_transcript_rejects_non_sample_lead(tmp_path: Path) -> None:
     host = make_host(tmp_path)
     host.store.create_job("job", "project", 1)
     host.store.add_lead("job", "lead", LeadStatus.done, in_sample=0)
-    with pytest.raises(ToolHostError, match="sample lead"):
-        host.call("lead_transcript", {"job_id": "job", "lead_id": "lead"})
+    with pytest.raises(ToolHostError, match="sample reference"):
+        host.call("lead_transcript", {"job_id": "job", "ref": "S1"})
 
 
 def test_ipc_forwards_call_and_does_not_log_authkey(tmp_path: Path) -> None:

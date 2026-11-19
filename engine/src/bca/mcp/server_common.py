@@ -79,9 +79,9 @@ def build_server(name: str, address: str, tools: tuple[str, ...], project_id: st
         "sample_results": lambda job_id, offset=0, limit=20: invoke(
             "sample_results", {"job_id": job_id, "offset": offset, "limit": limit}
         ),
-        "lead_transcript": lambda job_id, lead_id, call_from=1, call_to=3: invoke(
+        "lead_transcript": lambda job_id, ref, call_from=1, call_to=3: invoke(
             "lead_transcript",
-            {"job_id": job_id, "lead_id": lead_id, "call_from": call_from, "call_to": call_to},
+            {"job_id": job_id, "ref": ref, "call_from": call_from, "call_to": call_to},
         ),
         "result_aggregates": lambda job_id, group_by=None: invoke(
             "result_aggregates", {"job_id": job_id, "group_by": group_by}
@@ -127,7 +127,7 @@ def build_server(name: str, address: str, tools: tuple[str, ...], project_id: st
         },
         "lead_transcript": {
             "job_id": _arg(str, "Job identifier."),
-            "lead_id": _arg(str, "Sample lead identifier."),
+            "ref": _arg(str, "Opaque sample reference returned by sample_results, such as S1."),
             "call_from": _arg(int, "First one-based call number."),
             "call_to": _arg(int, "Last one-based call number."),
             "return": str,
@@ -158,8 +158,10 @@ def build_server(name: str, address: str, tools: tuple[str, ...], project_id: st
             "and pre-flight is required."
         ),
         "job_status": "Return progress counts, checklist, ETA, quota state, and recent errors.",
-        "sample_results": "Read a bounded page of masked sample results.",
-        "lead_transcript": "Read transcript calls by call number, preserving call headers.",
+        "sample_results": (
+            "Read a bounded page of masked sample results identified by opaque refs such as S1."
+        ),
+        "lead_transcript": "Read only leak-scanned masked transcript calls for an opaque sample reference.",
         "result_aggregates": "Read masked result aggregates.",
         "write_file": "Write only plan.md or summary.md, with a 200k character cap.",
     }
