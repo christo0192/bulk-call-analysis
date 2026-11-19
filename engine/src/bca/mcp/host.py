@@ -218,7 +218,7 @@ class ToolHost:
             return _cap(method(**args), self.mask_context, exempt_numbers=self._number_exemptions())
         except BaseException as exc:
             safe = _safe_error(exc, self.mask_context)
-            _LOG.warning("MCP tool %s failed: %s", name, safe)
+            _LOG.warning("MCP tool %s failed: %s", name, type(exc).__name__)
             raise safe from None
 
     def _number_exemptions(self) -> frozenset[str]:

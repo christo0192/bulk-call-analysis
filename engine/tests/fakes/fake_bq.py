@@ -33,6 +33,14 @@ class FakeBqRunner:
         self.calls.append((sql, params, page_size))
         if self.error is not None:
             raise self.error
+        if params is not None and "lead_ids" in params:
+            lead_ids = params["lead_ids"]
+            if not isinstance(lead_ids, list):
+                raise TypeError("fake lead_ids parameter must be a list")
+            requested = {str(lead_id) for lead_id in lead_ids}
+            for page in self.pages:
+                yield [row for row in page if str(row.get("lead_id")) in requested]
+            return
         yield from self.pages
 
     def list_datasets(self) -> list[dict[str, object]]:

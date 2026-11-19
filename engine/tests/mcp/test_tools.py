@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -185,6 +186,21 @@ def test_tool_errors_are_short_and_phone_like_numbers_are_masked(tmp_path: Path)
     assert str(tmp_path) not in str(error.value)
 
 
+def test_tool_error_log_has_type_and_tool_without_exception_message(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "synthetic row data that must not be logged"
+    host = make_host(tmp_path, FakeBqRunner(error=RuntimeError(secret)))
+    caplog.set_level(logging.WARNING, logger="bca.mcp")
+
+    with pytest.raises(ToolHostError, match="tool failed"):
+        host.call("bq_query", {"sql": "SELECT 1"})
+
+    assert "RuntimeError" in caplog.text
+    assert "bq_query" in caplog.text
+    assert secret not in caplog.text
+
+
 @pytest.mark.parametrize(
     "function_name",
     [
@@ -238,13 +254,18 @@ def proposal_json(title: str = "title", *, model: str = "gpt-5.6-luna") -> str:
     )
 
 
-def proposal_host(tmp_path: Path, pages: list[list[dict[str, object]]]) -> ToolHost:
+def proposal_host(
+    tmp_path: Path,
+    pages: list[list[dict[str, object]]],
+    *,
+    runner: FakeBqRunner | None = None,
+) -> ToolHost:
     job_dir = tmp_path / "jobs" / "job"
     job_dir.mkdir(parents=True)
     (job_dir / "ids.txt").write_text("lead-1\n", encoding="utf-8")
     return make_host(
         tmp_path,
-        FakeBqRunner(pages=pages),
+        runner or FakeBqRunner(pages=pages),
         recipe=recipe_config(),
     )
 
@@ -299,7 +320,7 @@ def test_propose_job_reproposal_versions_and_running_job_is_refused(tmp_path: Pa
 
 
 def test_propose_job_preflight_failure_rolls_back_new_job_and_spec(tmp_path: Path) -> None:
-    host = proposal_host(tmp_path, [[{"lead_id": "other", "found": True}]])
+    host = proposal_host(tmp_path, [], runner=FakeBqRunner(error=ValueError("preflight failed")))
     with pytest.raises(ToolHostError, match="preflight"):
         host.call("propose_job", {"spec_json": proposal_json()})
     assert host.store.rows("SELECT id FROM jobs WHERE id='job'") == []
