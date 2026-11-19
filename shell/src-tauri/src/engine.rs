@@ -315,9 +315,13 @@ impl<R: Runtime> Engine<R> {
         if self.inner.shutting_down.swap(true, Ordering::AcqRel) {
             return;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(test, target_os = "macos"))]
+        let shutdown_budget = Duration::from_millis(250);
+        #[cfg(all(test, not(target_os = "macos")))]
+        let shutdown_budget = Duration::from_millis(250);
+        #[cfg(all(not(test), target_os = "macos"))]
         let shutdown_budget = Duration::from_secs(8);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(all(not(test), not(target_os = "macos")))]
         let shutdown_budget = Duration::from_secs(10);
         let deadline = tokio::time::Instant::now() + shutdown_budget;
         if let Some(rpc) = self.inner.rpc.lock().await.clone() {
@@ -340,7 +344,7 @@ impl<R: Runtime> Engine<R> {
                 #[cfg(target_os = "macos")]
                 let _ = tokio::task::spawn_blocking(move || {
                     drop(guard);
-                    procguard::terminate_group_with_grace(pid, Duration::from_secs(2));
+                    procguard::terminate_group_with_grace(pid, Duration::from_secs(1));
                 })
                 .await;
                 #[cfg(not(target_os = "macos"))]
@@ -424,10 +428,28 @@ pub fn job_event_requires_keep_awake(notification: &Value) -> Option<bool> {
     }
 }
 
-async fn health_ping<W, F, Fut>(
+async fn health_ping<W, F, Fut>(client: Arc<Client<W>>, target: Arc<dyn HealthKill>, on_success: F)
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    health_ping_with_intervals(
+        client,
+        target,
+        on_success,
+        Duration::from_secs(10),
+        Duration::from_secs(30),
+    )
+    .await;
+}
+
+async fn health_ping_with_intervals<W, F, Fut>(
     client: Arc<Client<W>>,
     target: Arc<dyn HealthKill>,
     mut on_success: F,
+    ping_timeout: Duration,
+    retry_delay: Duration,
 ) where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     F: FnMut() -> Fut,
@@ -436,8 +458,8 @@ async fn health_ping<W, F, Fut>(
     let mut failures = 0;
     loop {
         let ping = tokio::time::timeout(
-            Duration::from_secs(10),
-            client.request("health/ping", json!({}), Duration::from_secs(10)),
+            ping_timeout,
+            client.request("health/ping", json!({}), ping_timeout),
         )
         .await
         .unwrap_or(Err(RpcError::Timeout));
@@ -458,7 +480,7 @@ async fn health_ping<W, F, Fut>(
                 }
             }
         }
-        sleep(Duration::from_secs(30)).await;
+        sleep(retry_delay).await;
     }
 }
 
@@ -488,6 +510,27 @@ mod health_tests {
             });
             client.close().await;
             health_ping(client, target.clone(), || async {}).await;
+            assert_eq!(target.kills.load(Ordering::Relaxed), 1);
+        });
+    }
+
+    #[test]
+    fn health_ping_counts_a_stuck_writer_as_a_failure() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (writer, _reader) = tokio::io::duplex(1);
+            let client = Client::with_write_timeout(writer, Duration::from_millis(10));
+            let target = Arc::new(FakeSpawner {
+                kills: AtomicUsize::new(0),
+            });
+            health_ping_with_intervals(
+                client,
+                target.clone(),
+                || async {},
+                Duration::from_millis(25),
+                Duration::from_millis(1),
+            )
+            .await;
             assert_eq!(target.kills.load(Ordering::Relaxed), 1);
         });
     }
@@ -531,6 +574,42 @@ mod health_tests {
             assert_eq!(engine.status().await, "restarting");
             engine.set_status("stopped", None).await;
             assert_eq!(engine.status().await, "stopped");
+        });
+    }
+
+    #[test]
+    fn shutdown_kills_a_process_with_a_stuck_stdin() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut command = if cfg!(windows) {
+                let mut command = Command::new("cmd");
+                command.args(["/C", "ping -n 60 127.0.0.1 > NUL"]);
+                command
+            } else {
+                let mut command = Command::new("sleep");
+                command.arg("60");
+                command
+            };
+            let mut child = command
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid = child.id().unwrap();
+            let guard = Arc::new(procguard::attach(pid).unwrap());
+            let stdin = child.stdin.take().unwrap();
+            let engine = Engine::<tauri::Wry>::new_without_app();
+            *engine.inner.rpc.lock().await =
+                Some(Client::with_write_timeout(stdin, Duration::from_millis(20)));
+            *engine.inner.guard.lock().await = Some(guard);
+            engine.inner.active_pid.store(pid, Ordering::Release);
+
+            let started = std::time::Instant::now();
+            engine.shutdown().await;
+            assert!(started.elapsed() < Duration::from_secs(2));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(child.try_wait().unwrap().is_some());
         });
     }
 }

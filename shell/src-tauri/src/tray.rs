@@ -41,7 +41,10 @@ pub fn setup(app: &AppHandle, engine: Engine) -> tauri::Result<()> {
                 let _ = e.call("job/pause", json!({})).await;
             });
         }
-        "quit" => app.exit(0),
+        "quit" => {
+            let engine = engine.clone();
+            crate::handle_tray_quit(engine, || app.exit(0));
+        }
         _ => {}
     });
     Ok(())
