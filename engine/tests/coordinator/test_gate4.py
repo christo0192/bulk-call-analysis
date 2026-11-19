@@ -344,9 +344,95 @@ def test_user_pause_overrides_quota_pause(
     assert resume_at is not None
 
     _run(runner.pause("user"))
-    assert coordinator.store.rows("SELECT pause_reason, resume_at FROM jobs WHERE id='job'")[0] == (
-        "user",
-        None,
-    )
+    row = coordinator.store.rows("SELECT pause_reason, resume_at FROM jobs WHERE id='job'")[0]
+    assert tuple(row) == ("user", None)
     with pytest.raises(PermissionError):
         _run(runner.resume("automatic"))
+
+
+def test_poison_lead_crashing_appserver_is_bounded(
+    coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kills: list[int] = []
+    pools: list[LunaPool] = []
+    launches: list[int] = []
+
+    class PoisonPool(LunaPool):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["crash_window_s"] = 0.6
+            super().__init__(*args, **kwargs)
+            pools.append(self)
+
+        async def _launch_and_prepare(self) -> None:
+            launches.append(1)
+            await super()._launch_and_prepare()
+
+        async def _complete_from_events(self, lead: Any) -> None:
+            server = self._server
+            if lead.task.lead_id == "10" and server is not None and server.returncode is None:
+                kills.append(1)
+                server.process.kill()
+            await super()._complete_from_events(lead)
+
+    _real_pool(coordinator, tmp_path, monkeypatch, {"hangs": ["10"], "latency_ms": 20})
+    monkeypatch.setattr(runner_module, "LunaPool", PoisonPool)
+    coordinator.runner.deps = replace(coordinator.runner.deps, concurrency=4)
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample(), timeout=30)
+
+    assert pools
+    assert 2 <= len(launches) <= 5
+    assert 1 <= len(kills) <= 4
+    poison = tuple(
+        coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='10'")[0]
+    )
+    assert poison[0] in {"failed", "held_back"}
+    assert poison[1] == "appserver_crash_repeated"
+    assert (
+        coordinator.store.rows(
+            "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND lead_id='10' "
+            "AND error_code='appserver_crash_repeated' AND counted=1"
+        )[0][0]
+        >= 1
+    )
+    assert (
+        coordinator.store.rows(
+            "SELECT COUNT(*) FROM results r JOIN leads l ON l.job_id=r.job_id AND l.lead_id=r.lead_id "
+            "WHERE r.job_id='job' AND r.lead_id <> '10' AND l.in_sample=1"
+        )[0][0]
+        == 3
+    )
+    assert coordinator.runner._state() in {JobState.sample_ready, JobState.paused}
+    if coordinator.runner._state() is JobState.paused:
+        assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "error_storm"
+
+
+def test_failed_relaunch_pauses_job(
+    coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _real_pool(
+        coordinator,
+        tmp_path,
+        monkeypatch,
+        {"latency_ms": 20, "crash_after_turns": 1},
+    )
+    launches = 0
+    original = pool_module.LunaPool._launch_and_prepare
+
+    async def launch(self: LunaPool) -> None:
+        nonlocal launches
+        launches += 1
+        if launches == 2:
+            raise RuntimeError("synthetic relaunch failure")
+        await original(self)
+
+    monkeypatch.setattr(pool_module.LunaPool, "_launch_and_prepare", launch)
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample(), timeout=30)
+
+    assert launches == 2
+    assert coordinator.runner._state() is JobState.paused
+    assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "error_storm"
+    pool = coordinator.runner._phase_pool
+    assert pool is not None
+    assert not getattr(pool, "_leads", {})
