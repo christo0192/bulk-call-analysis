@@ -312,8 +312,8 @@ class LunaPool:
         return await server.client.request(method, params, timeout_s=self.rpc_timeout_s)
 
     async def _request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        async with self._restart_lock:
-            return await self._request_unlocked(method, params)
+        await self._wait_for_restart()
+        return await self._request_unlocked(method, params)
 
     @staticmethod
     def _model_names(result: dict[str, Any]) -> set[str]:
@@ -463,7 +463,11 @@ class LunaPool:
         finally:
             if lead.pending_action is not None:
                 await asyncio.gather(lead.pending_action, return_exceptions=True)
-            if lead.thread_id is not None and lead.server_generation == self._server_generation:
+            if (
+                lead.thread_id is not None
+                and lead.server_generation == self._server_generation
+                and not self._restart_lock.locked()
+            ):
                 with contextlib.suppress(ConnectionError, BrokenPipeError, RpcError, RpcTimeout):
                     await self._request("thread/unsubscribe", {"threadId": lead.thread_id})
             self._leads.pop(task.attempt_id, None)

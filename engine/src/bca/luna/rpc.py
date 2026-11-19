@@ -51,6 +51,8 @@ class AppServerClient:
     ) -> JsonObject:
         if method in FORBIDDEN_METHODS or "apiKey" in method:
             raise ForbiddenMethodError(f"forbidden outgoing method: {method}")
+        if self._closed:
+            raise ConnectionError("app-server connection closed")
         request_id = self._next_id
         self._next_id += 1
         future: asyncio.Future[JsonObject] = asyncio.get_running_loop().create_future()
@@ -106,9 +108,13 @@ class AppServerClient:
         except Exception:
             log.exception("app-server reader failed")
         finally:
-            for future in self._pending.values():
-                if not future.done():
-                    future.set_exception(ConnectionError("app-server connection closed"))
+            self._fail_pending()
+
+    def _fail_pending(self) -> None:
+        error = ConnectionError("app-server connection closed")
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(error)
 
     async def _dispatch(self, message: JsonObject) -> None:
         if "id" in message and ("result" in message or "error" in message):
@@ -151,6 +157,7 @@ class AppServerClient:
         if self._closed:
             return
         self._closed = True
+        self._fail_pending()
         self._reader_task.cancel()
         await asyncio.gather(self._reader_task, return_exceptions=True)
         self.writer.close()
