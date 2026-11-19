@@ -316,6 +316,66 @@ def test_cap_edit_after_background_masking_rebundles_full_run_leads(
     ) == (2, 0, sum(call_chars))
 
 
+def test_lead_with_all_calls_over_cap_is_held_back_not_sent(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held_back_lead = "20"
+    lead_calls = [call for call in coordinator.bq.pages[0] if str(call["lead_id"]) == held_back_lead]
+    assert lead_calls
+    for call in lead_calls:
+        call["transcript_text"] = "Synthetic Name says hello. " + ("x" * 500)
+
+    updated_spec = replace(coordinator.runner.spec, spec_version=2)
+    save_spec(updated_spec, coordinator.job_dir)
+    edit_spec(coordinator.store, "job", 2)
+
+    recorded: list[tuple[str, str]] = []
+
+    class RecordingPool(ScriptedPool):
+        async def run_until_idle(self) -> None:
+            while True:
+                tasks = await self.callbacks.next_tasks(self.concurrency)
+                if not tasks:
+                    return
+                for task in tasks:
+                    recorded.append((task.lead_id, task.prompt))
+                    await self.callbacks.on_started(task)
+                    await self.callbacks.on_result(task, {"ok": True}, task.model, None)
+
+    monkeypatch.setattr(runner_module, "LunaPool", partial(RecordingPool, control=Script()))
+    coordinator.runner.on_plan_approved(2)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(2)
+    _run(coordinator.runner.start_full_run())
+
+    row = coordinator.store.rows(
+        "SELECT status, reason, calls_sent, calls_dropped_cap FROM leads WHERE job_id='job' AND lead_id=?",
+        (held_back_lead,),
+    )[0]
+    assert tuple(row) == (
+        "held_back",
+        "every call exceeds the per-lead cap",
+        0,
+        len(lead_calls),
+    )
+    assert held_back_lead not in {lead_id for lead_id, _prompt in recorded}
+    assert not [prompt for lead_id, prompt in recorded if lead_id == held_back_lead]
+
+    preflight_pages = coordinator.bq.preflight_pages
+    assert preflight_pages is not None
+    eligible_leads = {str(row["lead_id"]) for row in preflight_pages[0] if int(str(row["usable_calls"])) > 0}
+    statuses = coordinator.store.rows(
+        "SELECT lead_id, status FROM leads WHERE job_id='job' AND lead_id IN "
+        "(SELECT lead_id FROM leads WHERE job_id='job' AND status != 'held_back')"
+    )
+    assert {
+        str(lead_id): str(status)
+        for lead_id, status in statuses
+        if str(lead_id) in eligible_leads - {held_back_lead}
+    } == {lead_id: "done" for lead_id in eligible_leads - {held_back_lead}}
+    assert coordinator.runner._state() in {JobState.done, JobState.done_with_issues}
+
+
 def test_repair_attempt_counted_failure_keeps_answer_with_flag(
     coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
