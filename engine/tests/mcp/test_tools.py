@@ -11,7 +11,7 @@ import pytest
 
 from bca.bq.guard import sql_tokens
 from bca.bq.runner import DryRun
-from bca.mcp.host import ToolHost, ToolHostError
+from bca.mcp.host import MAX_RESULT_CHARS, ToolHost, ToolHostError, _cap
 from bca.store import JobSpec, LeadSourceSql, LeadStatus, save_spec
 from tests.fakes.fake_bq import FakeBqRunner
 from tests.mcp.test_host import make_host, recipe_config
@@ -85,6 +85,49 @@ def test_bq_describe_table_cap_reconciles_schema_entries(tmp_path: Path) -> None
 def test_format_rejects_hex_and_octal_specifiers_anywhere(tmp_path: Path, format_sql: str) -> None:
     with pytest.raises(ToolHostError, match="reconstruct"):
         make_host(tmp_path).call("bq_query", {"sql": f"SELECT FORMAT({format_sql}, phone)"})
+
+
+@pytest.mark.parametrize(
+    "format_sql",
+    [r"'\x25x'", r"'\045x'", r"'\u0025x'", r"'%\x78'", r"'%\170'", r"'%\'x'"],
+)
+def test_format_rejects_non_raw_escape_sequences(tmp_path: Path, format_sql: str) -> None:
+    with pytest.raises(ToolHostError, match="FORMAT with escape sequences is not allowed in chat queries"):
+        make_host(tmp_path).call("bq_query", {"sql": f"SELECT FORMAT({format_sql}, phone)"})
+
+
+def test_aggregate_cap_marks_each_large_free_text_map_honestly(tmp_path: Path) -> None:
+    host = make_host(tmp_path)
+    fields = {
+        name: {f"value-{index}": "x" * 900 for index in range(51)}
+        for name in ("free_one", "free_two", "free_three")
+    }
+    result = cast(dict[str, object], _cap({"answer_fields": fields}, host.mask_context))
+    assert len(json.dumps(result, ensure_ascii=False)) <= MAX_RESULT_CHARS
+    markers = cast(dict[str, str], result["truncated"])
+    answer_fields = cast(dict[str, object], result["answer_fields"])
+    for name in fields:
+        kept = len(cast(dict[str, object], answer_fields[name]))
+        match = re.fullmatch(r"(\d+) of (\d+) values omitted", markers[f"answer_fields.{name}"])
+        assert match is not None
+        assert kept + int(match.group(1)) == int(match.group(2)) == 51
+    assert all(not key.endswith("_truncated") for key in answer_fields)
+
+
+def test_aggregate_cap_keeps_low_cardinality_fields_before_free_text(tmp_path: Path) -> None:
+    host = make_host(tmp_path)
+    fields: dict[str, dict[str, object]] = {
+        name: {f"value-{index}": "x" * 900 for index in range(51)} for name in ("free_one", "free_two")
+    }
+    fields.update({f"choice_{index}": {"yes": 200} for index in range(8)})
+    result = cast(dict[str, object], _cap({"answer_fields": fields}, host.mask_context))
+    assert len(json.dumps(result, ensure_ascii=False)) <= MAX_RESULT_CHARS
+    answer_fields = cast(dict[str, object], result["answer_fields"])
+    assert all(
+        cast(dict[str, object], answer_fields[f"choice_{index}"]) == {"yes": 200} for index in range(8)
+    )
+    markers = cast(dict[str, str], result["truncated"])
+    assert set(markers) == {"answer_fields.free_one", "answer_fields.free_two"}
 
 
 def test_raw_literals_skip_escaped_quote_for_reconstruction_checks(tmp_path: Path) -> None:

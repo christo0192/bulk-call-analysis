@@ -51,6 +51,26 @@ _VIEWS = {"TABLES", "COLUMNS", "VIEWS", "TABLE_OPTIONS", "COLUMN_FIELD_PATHS", "
 _FORMAT_SPECIFIER = re.compile(r"%[-+ #'0]*(\d+|\*)?(\.(\d+|\*))?[xXo]")
 
 
+def _format_has_escapes(sql: str) -> bool:
+    tokens = sql_tokens(sql)
+    for index, token in enumerate(tokens):
+        if token.kind != "word" or token.text.upper() != "FORMAT":
+            continue
+        if index + 2 >= len(tokens) or tokens[index + 1].text != "(":
+            continue
+        format_token = tokens[index + 2]
+        if format_token.kind != "literal":
+            continue
+        literal = _literal_contents(format_token.text)
+        if literal is None:
+            continue
+        prefix_match = re.match(r"(?i)(rb|br|r|b)?(?=['\"])", format_token.text)
+        prefix = (prefix_match.group(1) or "") if prefix_match is not None else ""
+        if "\\" in literal and not prefix.lower().startswith("r"):
+            return True
+    return False
+
+
 def _has_forbidden_reconstruction(sql: str) -> bool:
     return _has_forbidden_from_tokens(sql)
 
@@ -203,6 +223,11 @@ def _cap(
         omitted = len(masked) - low
         return {"items": masked[:low], "truncated": marker_template.format(omitted, len(masked))}
     if isinstance(masked, dict):
+        if any(
+            isinstance(parent, dict) and any(isinstance(child, dict) for child in parent.values())
+            for parent in masked.values()
+        ):
+            return _cap_nested_maps(masked)
         result = dict(masked)
         original_counts: dict[str, int] = {}
         while len(json.dumps(result, ensure_ascii=False, default=str)) > MAX_RESULT_CHARS:
@@ -269,6 +294,74 @@ def _cap(
         return encoded_result[: max(0, MAX_RESULT_CHARS - len(suffix) - 2)] + suffix
     omitted = len(encoded) - MAX_RESULT_CHARS
     return {"items": [], "truncated": f"{omitted} {unit} omitted"}
+
+
+def _cap_nested_maps(value: dict[object, object]) -> dict[object, object] | str:
+    """Cap aggregate maps without putting accounting data inside the maps."""
+    result = dict(value)
+    original_counts: dict[str, int] = {}
+    truncated: dict[str, str] = {}
+    floor = 5
+
+    def map_size(item: object) -> int:
+        return len(json.dumps(item, ensure_ascii=False, default=str))
+
+    def child_maps() -> list[tuple[str, dict[object, object]]]:
+        found: list[tuple[str, dict[object, object]]] = []
+        for parent_key, parent in result.items():
+            if parent_key == "truncated" or not isinstance(parent, dict):
+                continue
+            for child_key, child in parent.items():
+                if isinstance(child, dict):
+                    path = f"{parent_key}.{child_key}"
+                    original_counts.setdefault(path, len(child))
+                    found.append((path, child))
+        for key, item in result.items():
+            if (
+                key != "truncated"
+                and isinstance(item, dict)
+                and not any(isinstance(child, dict) for child in item.values())
+            ):
+                original_counts.setdefault(str(key), len(item))
+                found.append((str(key), item))
+        return found
+
+    while True:
+        result["truncated"] = truncated
+        if len(json.dumps(result, ensure_ascii=False, default=str)) <= MAX_RESULT_CHARS:
+            return result
+        candidates = [(map_size(item), path, item) for path, item in child_maps() if len(item) > floor]
+        if candidates:
+            _, path, item = max(candidates, key=lambda candidate: candidate[0])
+            parent_key, child_key = path.split(".", 1) if "." in path else (None, path)
+            if parent_key is None:
+                result[child_key] = dict(list(item.items())[:-1])
+            else:
+                parent = result[parent_key]
+                if isinstance(parent, dict):
+                    parent[child_key] = dict(list(item.items())[:-1])
+            kept = len(item) - 1
+            original = original_counts[path]
+            truncated[path] = f"{original - kept} of {original} values omitted"
+            continue
+
+        parents = [
+            (map_size(item), str(key), item)
+            for key, item in result.items()
+            if key != "truncated" and isinstance(item, (dict, list))
+        ]
+        if not parents:
+            break
+        _, key, _ = max(parents, key=lambda candidate: candidate[0])
+        result.pop(key)
+        truncated[key] = "1 of 1 parent entries omitted"
+
+    result["truncated"] = truncated
+    encoded_result = json.dumps(result, ensure_ascii=False, default=str)
+    if len(encoded_result) <= MAX_RESULT_CHARS:
+        return result
+    suffix = "\n[truncated result]"
+    return encoded_result[: max(0, MAX_RESULT_CHARS - len(suffix) - 2)] + suffix
 
 
 def _normalized_number_digits(value: str) -> str:
@@ -500,6 +593,8 @@ class ToolHost:
         if max_rows < 1 or max_rows > 1000:
             raise ToolHostError("max_rows must be between 1 and 1000")
         validate_select(sql)
+        if _format_has_escapes(sql):
+            raise ToolHostError("FORMAT with escape sequences is not allowed in chat queries")
         if _has_forbidden_reconstruction(sql):
             raise ToolHostError("query can reconstruct unmasked text")
         dry = self.runner.dry_run(sql)
