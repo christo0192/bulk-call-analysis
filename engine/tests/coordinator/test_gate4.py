@@ -243,6 +243,40 @@ def test_appserver_crash_with_four_in_flight_restarts_once(
     assert coordinator.runner._state() is JobState.sample_ready
 
 
+def test_main_loop_waits_for_restart_window(
+    coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    crash_once = tmp_path / "crashed-once.txt"
+    _real_pool(
+        coordinator,
+        tmp_path,
+        monkeypatch,
+        {"latency_ms": 50, "crash_after_turns": 1, "crash_once_file": str(crash_once)},
+    )
+
+    class SlowRestartPool(LunaPool):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["restart_backoff_s"] = 0.3
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "LunaPool", SlowRestartPool)
+    launches: list[str] = []
+    original = pool_module.LunaPool._launch_and_prepare
+
+    async def launch(self: LunaPool) -> None:
+        launches.append("launch")
+        await original(self)
+
+    monkeypatch.setattr(pool_module.LunaPool, "_launch_and_prepare", launch)
+    coordinator.runner.deps = replace(coordinator.runner.deps, concurrency=4)
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+
+    assert len(launches) == 2
+    assert _count(coordinator, "SELECT COUNT(*) FROM results WHERE job_id='job'") == 4
+    assert coordinator.runner._state() is JobState.sample_ready
+
+
 def test_sleep_with_parked_quota_pause_keeps_quota_deterministic(
     coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

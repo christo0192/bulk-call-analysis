@@ -22,7 +22,7 @@ from .quota import (
     merge_update,
     parse_rate_limits,
 )
-from .rpc import AppServerClient, RpcError, RpcTimeout
+from .rpc import RpcError, RpcTimeout
 
 
 @dataclass(frozen=True)
@@ -178,8 +178,9 @@ class LunaPool:
         heartbeat = asyncio.create_task(self._heartbeat())
         try:
             while not self._stopping and not self._paused:
-                if self._client.callback_error is not None:
-                    error = self._client.callback_error
+                await self._wait_for_restart()
+                error = self._notification_error()
+                if error is not None:
                     raise RuntimeError("app-server notification callback failed") from error
                 await self._check_quota()
                 if self._paused:
@@ -222,8 +223,9 @@ class LunaPool:
                     done, running = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
                     for completed in done:
                         await completed
-                if self._client.callback_error is not None:
-                    error = self._client.callback_error
+                await self._wait_for_restart()
+                error = self._notification_error()
+                if error is not None:
                     raise RuntimeError("app-server notification callback failed") from error
                 if self._needs_recycle and not running and not self._paused:
                     self._needs_recycle = False
@@ -277,29 +279,41 @@ class LunaPool:
     async def _launch_and_prepare(self) -> None:
         self._server = await self.launch_factory()
         self._server_generation += 1
-        client = self._client
+        server = self._server
+        if server is None:
+            raise RuntimeError("app-server launch returned no server")
+        client = server.client
         client.on_any_notification(self._notification)
-        rate = await self._request("account/rateLimits/read")
+        rate = await self._request_unlocked("account/rateLimits/read")
         self._rate_result = rate
-        models = await self._request("model/list", {"includeHidden": True})
+        models = await self._request_unlocked("model/list", {"includeHidden": True})
         self._models = self._model_names(models)
         cursor = models.get("nextCursor")
         while isinstance(cursor, str) and cursor:
-            models = await self._request("model/list", {"includeHidden": True, "cursor": cursor})
+            models = await self._request_unlocked("model/list", {"includeHidden": True, "cursor": cursor})
             self._models.update(self._model_names(models))
             cursor = models.get("nextCursor")
         model = self._model_for_setup(rate)
         self._snapshot = parse_rate_limits(rate, model)
         await self._report_quota()
 
-    @property
-    def _client(self) -> AppServerClient:
-        if self._server is None:
-            raise RuntimeError("Luna pool has no app-server")
-        return self._server.client
+    async def _wait_for_restart(self) -> None:
+        async with self._restart_lock:
+            return
+
+    def _notification_error(self) -> Exception | None:
+        server = self._server
+        return server.client.callback_error if server is not None else None
+
+    async def _request_unlocked(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        server = self._server
+        if server is None:
+            raise RuntimeError("Luna pool restart did not produce an app-server")
+        return await server.client.request(method, params, timeout_s=self.rpc_timeout_s)
 
     async def _request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await self._client.request(method, params, timeout_s=self.rpc_timeout_s)
+        async with self._restart_lock:
+            return await self._request_unlocked(method, params)
 
     @staticmethod
     def _model_names(result: dict[str, Any]) -> set[str]:
@@ -769,4 +783,11 @@ class LunaPool:
                 await self._fail(lead, reason, False, "app-server restarted")
             if self.restart_backoff_s:
                 await asyncio.sleep(self.restart_backoff_s)
-            await self._launch_and_prepare()
+            try:
+                await self._launch_and_prepare()
+            except Exception:
+                server = self._server
+                self._server = None
+                if server is not None:
+                    await server.stop()
+                await self._pause("appserver_restart_failed", None)
