@@ -86,6 +86,7 @@ class _Callbacks(PoolCallbacks):
         self._tasks: list[LeadTask] = []
         self._uncounted: dict[str, int] = {}
         self._dispatch_limit = dispatch_limit
+        self.attempt_ended = False
 
     def set_tasks(self, tasks: list[LeadTask]) -> None:
         self._tasks = tasks
@@ -158,6 +159,8 @@ class _Callbacks(PoolCallbacks):
             usage,
             clear_repair_pending=is_repair,
         )
+        self.attempt_ended = True
+        self.runner._phase_event.set()
         if not accepted:
             try:
                 self.runner.deps.store.fail_attempt(
@@ -184,6 +187,8 @@ class _Callbacks(PoolCallbacks):
         self.runner._eta.completed(self.runner._ts())
 
     async def on_failure(self, task: LeadTask, error_code: str, counted: bool, detail: str) -> None:
+        self.attempt_ended = True
+        self.runner._phase_event.set()
         attempt = self.runner._attempts.get(task.attempt_id)
         if attempt is not None:
             try:
@@ -625,6 +630,11 @@ class JobRunner:
                             raise
                 if self._state() is JobState.paused or self._phase_finished(sample):
                     break
+                if canary and callbacks.attempt_ended:
+                    break
+                self._phase_event.clear()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._phase_event.wait(), 1.0)
         finally:
             self._phase_event.set()
             if not canary and self._phase_pool is pool and self._state() is not JobState.paused:

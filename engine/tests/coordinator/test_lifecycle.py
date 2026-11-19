@@ -108,6 +108,47 @@ def test_quota_stop_then_canary_then_full_concurrency(coordinator: CoordinatorFi
     assert len(coordinator.store.rows("SELECT lead_id FROM results WHERE job_id=?", ("job",))) == 4
 
 
+def test_quota_resume_keeps_event_loop_live(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator.pool.used_percent = 94
+    coordinator.pool.quota_increment = 1
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    assert coordinator.runner._state() is JobState.paused
+    pool = coordinator.runner._phase_pool
+    assert pool is not None
+    run_until_idle = pool.run_until_idle
+
+    async def delayed_run_until_idle() -> None:
+        await run_until_idle()
+        await asyncio.sleep(0.25)
+
+    monkeypatch.setattr(pool, "run_until_idle", delayed_run_until_idle)
+
+    async def resume_with_ticker() -> int:
+        ticks = 0
+        running = True
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while running:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        task = asyncio.create_task(ticker())
+        try:
+            coordinator.pool.used_percent = 0
+            coordinator.pool.quota_increment = 0
+            await asyncio.wait_for(coordinator.runner.resume(), timeout=10)
+        finally:
+            running = False
+            await task
+        return ticks
+
+    assert _run(resume_with_ticker()) >= 20
+
+
 def test_credit_signal_interrupts_and_pauses_without_further_dispatch(
     coordinator: CoordinatorFixture,
 ) -> None:
