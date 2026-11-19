@@ -83,6 +83,7 @@ def test_bq_query_stops_a_bounded_page_producer(tmp_path: Path) -> None:
 
     class CountingRunner(FakeBqRunner):
         yielded_after_consumer_return = 0
+        producer_thread: threading.Thread | None = None
 
         def iter_pages(
             self,
@@ -91,6 +92,7 @@ def test_bq_query_stops_a_bounded_page_producer(tmp_path: Path) -> None:
             page_size: int = 1000,
             timeout: float | None = None,
         ) -> Iterator[list[dict[str, object]]]:
+            self.producer_thread = threading.current_thread()
             for index in range(100):
                 if released.is_set():
                     self.yielded_after_consumer_return += 1
@@ -100,11 +102,9 @@ def test_bq_query_stops_a_bounded_page_producer(tmp_path: Path) -> None:
     result = make_host(tmp_path, runner).call("bq_query", {"sql": "SELECT 1", "max_rows": 1})
     assert result["truncated"] is True  # type: ignore[index]
     released.set()
-    deadline = time.monotonic() + 1
-    while threading.active_count() > 0 and time.monotonic() < deadline:
-        if runner.yielded_after_consumer_return:
-            break
-        time.sleep(0.01)
+    assert runner.producer_thread is not None
+    runner.producer_thread.join(timeout=2)
+    assert not runner.producer_thread.is_alive()
     assert runner.yielded_after_consumer_return <= 3
 
 
@@ -117,6 +117,44 @@ def test_bq_query_serializes_non_finite_floats(tmp_path: Path, value: float, exp
         "bq_query", {"sql": "SELECT 1"}
     )
     assert result["rows"] == [{"value": expected}]  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (9876543210.5, "[NUMBER]"),
+        (-9876543210.5, "[NUMBER]"),
+        (1234567890123.9, "[NUMBER]"),
+        (98765432.5, 98765432.5),
+        (3.25, 3.25),
+    ],
+)
+def test_bq_query_masks_only_sensitive_float_sizes(tmp_path: Path, value: float, expected: object) -> None:
+    result = make_host(tmp_path, FakeBqRunner(pages=[[{"value": value}]])).call(
+        "bq_query", {"sql": "SELECT 1"}
+    )
+    assert result["rows"] == [{"value": expected}]  # type: ignore[index]
+
+
+def test_bq_query_deadline_cancels_a_blocking_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cancelled = threading.Event()
+
+    class BlockingRunner(FakeBqRunner):
+        def cancel(self) -> None:
+            cancelled.set()
+
+        def iter_pages(self, *args: Any, **kwargs: Any) -> Iterator[list[dict[str, object]]]:
+            time.sleep(4)
+            yield []
+
+    monkeypatch.setattr("bca.mcp.host.BQ_QUERY_DEADLINE_S", 1.0)
+    host = make_host(tmp_path, BlockingRunner())
+    started = time.monotonic()
+    with pytest.raises(ToolHostError, match="timed out"):
+        host.call("bq_query", {"sql": "SELECT 1"})
+    elapsed = time.monotonic() - started
+    assert elapsed <= 1.5
+    assert cancelled.is_set()
 
 
 def test_string_results_are_plain_text_with_original_character_count(tmp_path: Path) -> None:

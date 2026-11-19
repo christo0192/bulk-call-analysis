@@ -172,56 +172,101 @@ def _cap(
     if isinstance(masked, dict) and isinstance(masked.get("rows"), list):
         rows = cast(list[object], masked["rows"])
         prefix = {key: item for key, item in masked.items() if key != "rows"}
-        row_kept: list[object] = []
-        for item in rows:
-            candidate = json.dumps(prefix | {"rows": [*row_kept, item]}, ensure_ascii=False, default=str)
-            if len(candidate) > MAX_RESULT_CHARS:
-                break
-            row_kept.append(item)
-        if len(row_kept) < len(rows):
+        low, high = 0, len(rows)
+        while low < high:
+            middle = (low + high + 1) // 2
+            omitted = len(rows) - middle
+            candidate = prefix | {"rows": rows[:middle], "truncated": f"{omitted} rows omitted"}
+            if len(json.dumps(candidate, ensure_ascii=False, default=str)) <= MAX_RESULT_CHARS:
+                low = middle
+            else:
+                high = middle - 1
+        if low < len(rows):
             return prefix | {
-                "rows": row_kept,
-                "truncated": f"{len(rows) - len(row_kept)} rows omitted; aggregate in SQL or page the result",
+                "rows": rows[:low],
+                "truncated": f"{len(rows) - low} rows omitted; aggregate in SQL or page the result",
             }
     encoded = json.dumps(masked, ensure_ascii=False, default=str)
     if len(encoded) <= MAX_RESULT_CHARS:
         return masked
     if isinstance(masked, list):
-        kept: list[object] = []
-        for item in masked:
-            candidate = json.dumps([*kept, item], ensure_ascii=False, default=str)
-            if len(candidate) > MAX_RESULT_CHARS:
-                break
-            kept.append(item)
-        omitted = len(masked) - len(kept)
-        return {"items": kept, "truncated": f"{omitted} rows omitted; aggregate in SQL or page the result"}
+        marker_template = "{} of {} entries omitted"
+        low, high = 0, len(masked)
+        while low < high:
+            middle = (low + high + 1) // 2
+            omitted = len(masked) - middle
+            candidate = {"items": masked[:middle], "truncated": marker_template.format(omitted, len(masked))}
+            if len(json.dumps(candidate, ensure_ascii=False, default=str)) <= MAX_RESULT_CHARS:
+                low = middle
+            else:
+                high = middle - 1
+        omitted = len(masked) - low
+        return {"items": masked[:low], "truncated": marker_template.format(omitted, len(masked))}
     if isinstance(masked, dict):
         result = dict(masked)
         original_counts: dict[str, int] = {}
         while len(json.dumps(result, ensure_ascii=False, default=str)) > MAX_RESULT_CHARS:
-            candidates = [
-                (len(json.dumps(item, ensure_ascii=False, default=str)), key, item)
+            changed = False
+            # Aggregate cards contain maps of maps (for example, one value
+            # map per answer field). Reduce each member map before reducing
+            # the containing answer_fields/rule_results map.
+            for parent_key, parent in list(result.items()):
+                if parent_key.endswith("_truncated") or not isinstance(parent, dict):
+                    continue
+                for child_key, child in list(parent.items()):
+                    if child_key.endswith("_truncated") or not isinstance(child, (list, dict)) or not child:
+                        continue
+                    count_key = f"{parent_key}.{child_key}"
+                    original_count = original_counts.setdefault(count_key, len(child))
+                    kept_count = max(1, (len(child) * 3) // 4)
+                    if kept_count >= len(child):
+                        continue
+                    if isinstance(child, list):
+                        parent[child_key] = child[:kept_count]
+                    else:
+                        parent[child_key] = dict(list(child.items())[:kept_count])
+                    parent[f"{child_key}_truncated"] = (
+                        f"{original_count - kept_count} of {original_count} entries omitted"
+                    )
+                    changed = True
+            nested = [
+                (key, item)
                 for key, item in result.items()
-                if isinstance(item, (list, dict)) and item
+                if not key.endswith("_truncated") and isinstance(item, (list, dict)) and item
+            ]
+            for key, item in nested:
+                original_count = original_counts.setdefault(key, len(item))
+                kept_count = max(1, (len(item) * 3) // 4)
+                if kept_count >= len(item):
+                    continue
+                if isinstance(item, list):
+                    result[key] = item[:kept_count]
+                else:
+                    result[key] = dict(list(item.items())[:kept_count])
+                result[f"{key}_truncated"] = (
+                    f"{original_count - kept_count} of {original_count} entries omitted"
+                )
+                changed = True
+            if changed:
+                continue
+            # All nested values are at their minimum. Only now may a whole
+            # top-level member be removed.
+            candidates = [
+                (len(json.dumps(item, ensure_ascii=False, default=str)), key)
+                for key, item in result.items()
+                if not key.endswith("_truncated") and isinstance(item, (list, dict))
             ]
             if not candidates:
                 break
-            _, key, item = sorted(candidates)[-1]
-            if isinstance(item, list):
-                kept_count = len(item) // 2
-                original_count = original_counts.setdefault(key, len(item))
-                result[key] = item[:kept_count]
-            else:
-                entries = list(item.items())
-                kept_count = len(entries) // 2
-                original_count = original_counts.setdefault(key, len(entries))
-                result[key] = dict(entries[:kept_count])
-            result[f"{key}_truncated"] = f"{original_count - kept_count} of {original_count} entries omitted"
+            _, key = max(candidates)
+            result.pop(key)
+            result.pop(f"{key}_truncated", None)
         encoded_result = json.dumps(result, ensure_ascii=False, default=str)
         if len(encoded_result) <= MAX_RESULT_CHARS:
             return result
         # A single large scalar still needs a hard cap.
-        return encoded_result[: MAX_RESULT_CHARS - 80] + "\n[truncated result]"
+        suffix = "\n[truncated result]"
+        return encoded_result[: max(0, MAX_RESULT_CHARS - len(suffix) - 2)] + suffix
     omitted = len(encoded) - MAX_RESULT_CHARS
     return {"items": [], "truncated": f"{omitted} {unit} omitted"}
 
@@ -268,6 +313,7 @@ def _format_bytes(value: int) -> str:
 def _pages_until_deadline(runner: BqRunner, sql: str, deadline: float) -> Any:
     messages: Queue[object] = Queue(maxsize=2)
     stop = threading.Event()
+    timed_out = False
     finished = object()
 
     def produce() -> None:
@@ -309,10 +355,12 @@ def _pages_until_deadline(runner: BqRunner, sql: str, deadline: float) -> Any:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                timed_out = True
                 raise ToolHostError("BigQuery query timed out")
             try:
                 message = messages.get(timeout=remaining)
             except Empty:
+                timed_out = True
                 raise ToolHostError("BigQuery query timed out") from None
             if message is finished:
                 return
@@ -321,6 +369,11 @@ def _pages_until_deadline(runner: BqRunner, sql: str, deadline: float) -> Any:
             yield cast(list[dict[str, object]], message)
     finally:
         stop.set()
+        if timed_out:
+            cancel = getattr(runner, "cancel", None)
+            if callable(cancel):
+                with suppress(BaseException):
+                    cancel()
 
 
 def _safe_error(exc: BaseException, context: MaskingContext) -> ToolHostError:
@@ -395,7 +448,11 @@ class ToolHost:
         if method is None:
             raise ToolHostError("unknown tool")
         try:
-            return _cap(method(**args), self.mask_context, already_masked=name == "bq_query")
+            return _cap(
+                method(**args),
+                self.mask_context,
+                already_masked=name in {"bq_query", "bq_information_schema"},
+            )
         except BaseException as exc:
             safe = _safe_error(exc, self.mask_context)
             _LOG.warning("MCP tool %s failed: %s", name, type(exc).__name__)

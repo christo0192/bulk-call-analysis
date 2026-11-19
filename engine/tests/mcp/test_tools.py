@@ -30,6 +30,18 @@ def test_bq_list_tables_through_host(tmp_path: Path) -> None:
     ]
 
 
+def test_bq_list_tables_cap_includes_wrapper_and_marker(tmp_path: Path) -> None:
+    tables: list[dict[str, object]] = [
+        {"table_id": f"table_{index:04d}", "dataset": "analytics"} for index in range(3000)
+    ]
+    result = make_host(tmp_path, FakeBqRunner(tables={"analytics": tables})).call(
+        "bq_list_tables", {"dataset": "analytics"}
+    )
+    assert len(json.dumps(result, ensure_ascii=False)) <= 40_000
+    result_dict = cast(dict[str, object], result)
+    assert re.fullmatch(r"\d+ of 3000 entries omitted", str(result_dict["truncated"]))
+
+
 def test_bq_list_tables_rejects_invalid_identifier(tmp_path: Path) -> None:
     with pytest.raises(ToolHostError, match="invalid dataset"):
         make_host(tmp_path, FakeBqRunner()).call("bq_list_tables", {"dataset": "bad-name"})
@@ -80,9 +92,10 @@ def test_raw_literals_skip_escaped_quote_for_reconstruction_checks(tmp_path: Pat
     double = sql_tokens(r'SELECT r"\"" AS value, TO_BASE64(value)')
     assert single[1].text == r"r'\''"
     assert double[1].text == r'r"\""'
+    host = make_host(tmp_path)
     for sql in (r"SELECT r'\'' AS value, TO_HEX(value)", r'SELECT r"\"" AS value, TO_BASE64(value)'):
         with pytest.raises(ToolHostError, match="reconstruct"):
-            make_host(tmp_path).call("bq_query", {"sql": sql})
+            host.call("bq_query", {"sql": sql})
 
 
 def test_bq_dry_run_through_host(tmp_path: Path) -> None:
@@ -90,6 +103,93 @@ def test_bq_dry_run_through_host(tmp_path: Path) -> None:
         "bq_dry_run", {"sql": "SELECT 1"}
     )
     assert result == {"bytes": "12 B", "referenced_tables": ["events"], "schema": [["id", "INT64"]]}
+
+
+@pytest.mark.parametrize("bytes_used, expected", [(5 * 1024**3, "5.00 GiB"), (2 * 1024**4, "2.00 TiB")])
+def test_bq_readable_sizes_are_consistent(tmp_path: Path, bytes_used: int, expected: str) -> None:
+    runner = FakeBqRunner(dry=DryRun(bytes_used, [], []))
+    host = make_host(tmp_path, runner)
+    host.bq_config = host.bq_config.__class__("project", reject_bytes=3 * 1024**4)
+    assert host.call("bq_dry_run", {"sql": "SELECT 1"})["bytes"] == expected  # type: ignore[index]
+    assert host.call("bq_query", {"sql": "SELECT 1"})["bytes"] == expected  # type: ignore[index]
+
+
+@pytest.mark.parametrize("bytes_used, expected", [(5 * 1024**3, "5.00 GiB"), (2 * 1024**4, "2.00 TiB")])
+def test_propose_job_plan_card_formats_both_byte_fields(
+    tmp_path: Path, bytes_used: int, expected: str
+) -> None:
+    runner = FakeBqRunner(
+        pages_by_query_kind={
+            "lead_source": [[{"lead_id": "1001"}]],
+            "preflight": [
+                [
+                    {
+                        "lead_id": "1001",
+                        "found": True,
+                        "calls": 1,
+                        "transcript_calls": 1,
+                        "usable_calls": 1,
+                        "transcription_failed": 0,
+                    }
+                ]
+            ],
+        },
+        dry=DryRun(bytes_used, [], []),
+    )
+    host = proposal_host(tmp_path, [], runner=runner)
+    host.bq_config = host.bq_config.__class__("project", reject_bytes=3 * 1024**4)
+    spec = json.loads(proposal_json())
+    spec["lead_source"] = {"kind": "sql", "sql": "SELECT '1001' AS lead_id"}
+    card = cast(dict[str, object], host.call("propose_job", {"spec_json": json.dumps(spec)}))
+    preflight = cast(dict[str, object], card["preflight"])
+    assert card["lead_source_dry_run_bytes"] == expected
+    assert preflight["dry_run_bytes"] == expected
+
+
+def test_sample_reference_round_trip_keeps_the_same_masked_lead(tmp_path: Path) -> None:
+    host = make_host(tmp_path)
+    host.store.create_job("job", "project", 1)
+    save_spec(
+        JobSpec(1, "job", "project", "title", "question", LeadSourceSql("SELECT 1"), output_schema={}),
+        tmp_path / "jobs" / "job",
+    )
+    for lead_id, status in (
+        ("a", LeadStatus.masked),
+        ("b", LeadStatus.masked),
+        ("held", LeadStatus.held_back),
+    ):
+        host.store.add_lead("job", lead_id, status, in_sample=1)
+    with host.store.transaction() as cur:
+        for lead_id in ("a", "b"):
+            cur.execute(
+                "INSERT INTO results VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("job", lead_id, "attempt", "{}", 1, "{}", "now", 1),
+            )
+    transcript_dir = tmp_path / "jobs" / "job" / "cache" / "transcripts"
+    transcript_dir.mkdir(parents=True)
+    for lead_id in ("a", "b"):
+        with gzip.open(transcript_dir / f"{lead_id}.jsonl.gz", "wt", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps({"call_id": lead_id, "call_start": "2026-01-01", "transcript_text": lead_id})
+                + "\n"
+            )
+
+    rows = cast(
+        list[dict[str, object]], host.call("sample_results", {"job_id": "job", "offset": 0, "limit": 1})
+    )
+    assert rows[0]["ref"] == "S1"
+    before = host.call("lead_transcript", {"job_id": "job", "ref": "S1"})
+    host.store.set_lead_status("job", "a", LeadStatus.in_flight)
+    during = host.call("lead_transcript", {"job_id": "job", "ref": "S1"})
+    host.store.set_lead_status("job", "a", LeadStatus.done)
+    after = host.call("lead_transcript", {"job_id": "job", "ref": "S1"})
+    assert before == during == after
+    page_two = cast(
+        list[dict[str, object]], host.call("sample_results", {"job_id": "job", "offset": 1, "limit": 1})
+    )
+    assert page_two[0]["ref"] == "S2"
+    with pytest.raises(ToolHostError, match="unavailable"):
+        host.call("lead_transcript", {"job_id": "job", "ref": "S3"})
 
 
 def test_bq_query_rejects_more_than_1000_rows(tmp_path: Path) -> None:
@@ -294,6 +394,7 @@ def test_reconstruction_functions_are_rejected_but_string_literals_are_allowed(
         "SELECT CAST(phone AS FLOAT64)",
         "SELECT CAST(phone AS INT64) AS lead_id",
         "SELECT TO_HEX/**/(value)",
+        "SELECT SAFE.TO_HEX(value)",
         "SELECT 'a\\'', TO_HEX(value)",
         "SELECT TO_BASE64(value)",
         "SELECT FORMAT('%x', phone)",
@@ -310,10 +411,32 @@ def test_reconstruction_bypasses_are_rejected_or_masked(tmp_path: Path, sql: str
             host.call("bq_query", {"sql": sql})
 
 
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1 # TO_HEX(value)",
+        "SELECT '''TO_HEX(value)'''",
+        "SELECT r'TO_HEX(value)'",
+        "SELECT b'TO_HEX(value)'",
+        "SELECT rb'TO_HEX(value)'",
+    ],
+)
+def test_reconstruction_tokens_in_comments_and_literals_are_ignored(tmp_path: Path, sql: str) -> None:
+    assert make_host(tmp_path).call("bq_query", {"sql": sql})["rows"] == []  # type: ignore[index]
+
+
 def test_numeric_strings_have_no_column_exemptions(tmp_path: Path) -> None:
-    runner = FakeBqRunner(pages=[[{"lead_id": "9876543210", "value": "012345678901"}]])
-    result = make_host(tmp_path, runner).call("bq_query", {"sql": "SELECT 1"})
+    runner = FakeBqRunner(
+        pages=[[{"lead_id": "9876543210", "value": "012345678901"}]],
+        table_details={("analytics", "events"): {"num_rows": 1234567890123, "schema": []}},
+    )
+    host = make_host(tmp_path, runner)
+    result = host.call("bq_query", {"sql": "SELECT 1"})
     assert result["rows"][0] == {"lead_id": "[NUMBER]", "value": "[NUMBER]"}  # type: ignore[index]
+    described = cast(
+        dict[str, object], host.call("bq_describe_table", {"dataset": "analytics", "table": "events"})
+    )
+    assert described["num_rows"] == "[NUMBER]"
 
 
 def test_data_notes_uses_configured_app_data_path(tmp_path: Path) -> None:
