@@ -15,6 +15,9 @@ class FakeBqRunner:
     dry: DryRun = field(default_factory=lambda: DryRun(0, [], []))
     error: BaseException | None = None
     calls: list[tuple[str, Mapping[str, object] | None, int]] = field(default_factory=list)
+    datasets: list[dict[str, object]] = field(default_factory=list)
+    tables: dict[str, list[dict[str, object]]] = field(default_factory=dict)
+    table_details: dict[tuple[str, str], dict[str, object]] = field(default_factory=dict)
 
     def dry_run(self, sql: str, params: Mapping[str, object] | None = None) -> DryRun:
         validate_select(sql)
@@ -31,3 +34,16 @@ class FakeBqRunner:
         if self.error is not None:
             raise self.error
         yield from self.pages
+
+    def list_datasets(self) -> list[dict[str, object]]:
+        return list(self.datasets)
+
+    def list_tables(self, dataset: str) -> list[dict[str, object]]:
+        return list(self.tables.get(dataset, []))
+
+    def describe_table(self, dataset: str, table: str) -> dict[str, object]:
+        return dict(
+            self.table_details.get(
+                (dataset, table), {"dataset_id": dataset, "table_id": table, "num_rows": 0, "schema": []}
+            )
+        )

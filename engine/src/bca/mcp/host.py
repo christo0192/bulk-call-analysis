@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import re
@@ -16,14 +17,17 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from bca.bq.guard import validate_select
-from bca.bq.leads import resolve_lead_source
-from bca.bq.pull import run_preflight
+from bca.bq.leads import record_lead_intake, resolve_lead_source
+from bca.bq.pull import build_bundle, run_preflight
 from bca.bq.runner import BqRunner
-from bca.config import BigQueryConfig, RecipeConfig
+from bca.config import BigQueryConfig, ModelsConfig, RecipeConfig
 from bca.mask.masker import MaskingContext, _NoopNer, mask_text
+from bca.monitor.eta import EtaEstimator
+from bca.monitor.progress import counts as progress_counts
 from bca.outputs.aggregates import aggregates
 from bca.outputs.rules import validate_rules
-from bca.store import JobSpec, Store, load_latest_spec, save_spec
+from bca.store import JobSpec, LeadStatus, Store, load_latest_spec, save_spec
+from bca.store.lifecycle import JobState, edit_spec, transition
 
 MAX_RESULT_CHARS = 40_000
 _LOG = logging.getLogger("bca.mcp")
@@ -107,6 +111,9 @@ def _cap(
     exempt_numbers: frozenset[str] = frozenset(),
 ) -> object:
     masked = _masked(value, context, exempt_numbers=exempt_numbers)
+    if isinstance(masked, str) and len(masked) > MAX_RESULT_CHARS:
+        omitted = len(masked) - MAX_RESULT_CHARS
+        return masked[: MAX_RESULT_CHARS - 80] + f"\n[truncated: {omitted} {unit} omitted]"
     if isinstance(masked, dict) and isinstance(masked.get("rows"), list):
         rows = cast(list[object], masked["rows"])
         prefix = {key: item for key, item in masked.items() if key != "rows"}
@@ -134,10 +141,7 @@ def _cap(
         omitted = len(masked) - len(kept)
         return {"items": kept, "truncated": f"{omitted} rows omitted; aggregate in SQL or page the result"}
     omitted = len(encoded) - MAX_RESULT_CHARS
-    return {
-        "value": encoded[:MAX_RESULT_CHARS],
-        "truncated": f"{omitted} {unit} omitted; aggregate in SQL or page the result",
-    }
+    return encoded[: MAX_RESULT_CHARS - 80] + f"\n[truncated: {omitted} {unit} omitted]"
 
 
 def _safe_error(exc: BaseException, context: MaskingContext) -> ToolHostError:
@@ -167,6 +171,8 @@ class ToolHost:
         mask_context: MaskingContext,
         project_id: str = "project",
         recipe: RecipeConfig | None = None,
+        models: ModelsConfig | None = None,
+        notes_path: Path | None = None,
     ) -> None:
         self.runner = runner
         self.store = store
@@ -177,6 +183,8 @@ class ToolHost:
         self.mask_context = mask_context
         self.project_id = project_id
         self.recipe = recipe
+        self.models = models or ModelsConfig()
+        self.notes_path = notes_path or (project_dir / "notes.md")
         self._ipc_stop = threading.Event()
         self._ipc_listener: object | None = None
         self._ipc_thread: threading.Thread | None = None
@@ -267,7 +275,9 @@ class ToolHost:
         rows: list[dict[str, object]] = []
         omitted_rows = 0
         omitted_chars = 0
-        for page in self.runner.iter_pages(sql, page_size=min(max_rows, 1000)):
+        # Fetch one row at a time so a large text row cannot fill an unbounded
+        # driver page before the result budget is checked.
+        for page in self.runner.iter_pages(sql, page_size=1):
             for row in page:
                 if len(rows) >= max_rows:
                     omitted_rows += 1
@@ -311,7 +321,7 @@ class ToolHost:
         return self.project_dir / name
 
     def data_notes(self) -> str:
-        path = self._project_file("notes.md")
+        path = self.notes_path
         return path.read_text(encoding="utf-8") if path.is_file() else "no notes yet"
 
     def brief_read(self) -> str:
@@ -327,30 +337,43 @@ class ToolHost:
     def propose_job(self, spec_json: str) -> object:
         raw = json.loads(spec_json)
         spec = replace(JobSpec.from_dict(raw), project_id=self.project_id)
+        if self.recipe is None:
+            raise ToolHostError("a recipe and pre-flight are required before proposing a job")
+        if (spec.luna_model, spec.luna_effort) != (self.models.luna_model, self.models.luna_effort):
+            raise ToolHostError("luna model and effort must match configured models")
         validate_rules(spec.rules, spec.output_schema)
         job_dir = self._job_dir(spec.job_id)
         if hasattr(spec.lead_source, "ids_file"):
             ids_file = Path(str(cast(Any, spec.lead_source).ids_file))
             if ids_file.is_absolute() or ids_file.name != str(ids_file) or ".." in ids_file.parts:
                 raise ToolHostError("invalid lead source path")
-        path = save_spec(spec, job_dir)
-        self.store.create_job(spec.job_id, spec.project_id, spec.spec_version, "plan_proposed")
-        intake = resolve_lead_source(
-            spec.lead_source, self.runner, self.store, job_dir, self.bq_config, spec.job_id
+        lead_source_dry_run_bytes = 0
+        if hasattr(spec.lead_source, "sql"):
+            lead_source_dry_run_bytes = self.runner.dry_run(str(cast(Any, spec.lead_source).sql)).bytes
+        existing = self.store.rows(
+            "SELECT state FROM jobs WHERE id=? AND project_id=?", (spec.job_id, self.project_id)
         )
-        summary: dict[str, object] = {
-            "job_id": spec.job_id,
-            "spec": path.name,
-            "state": "plan_proposed",
-            "lead_counts": {
-                "raw": intake.raw_count,
-                "distinct": len(intake.ids),
-                "duplicates": intake.duplicates,
-                "malformed": len(intake.malformed),
-            },
-            "rules": [r.to_dict() for r in spec.rules],
-        }
-        if self.recipe is not None:
+        created = not existing
+        if existing and str(existing[0][0]) in {
+            "full_running",
+            "quote_check",
+            "building_output",
+            "verifying",
+            "done",
+            "done_with_issues",
+        }:
+            raise ToolHostError("spec cannot be edited after the full run starts")
+        saved_path: Path | None = None
+        try:
+            intake = resolve_lead_source(
+                spec.lead_source,
+                self.runner,
+                self.store,
+                job_dir,
+                self.bq_config,
+                spec.job_id,
+                persist=False,
+            )
             window = (spec.window_start, spec.window_end) if spec.calls_scope == "window" else None
             preflight = run_preflight(
                 self.recipe,
@@ -362,8 +385,52 @@ class ToolHost:
                 self.store,
                 spec.job_id,
                 self.bq_config,
+                persist=False,
+                cap=spec.cap,
             )
-            summary["preflight"] = {"buckets": preflight.buckets, "dry_run_bytes": preflight.dry_run_bytes}
+            saved_path = save_spec(spec, job_dir)
+            version = int(saved_path.stem.removeprefix("spec.v"))
+            if created:
+                self.store.create_job(spec.job_id, spec.project_id, version, "draft")
+                record_lead_intake(self.store, spec.job_id, intake)
+                for lead_id, bucket in preflight.per_lead.items():
+                    if bucket != "usable":
+                        self.store.set_lead_status(spec.job_id, lead_id, LeadStatus(bucket))
+                transition(self.store, spec.job_id, JobState.plan_proposed, "plan proposed")
+            else:
+                edit_spec(self.store, spec.job_id, version)
+                record_lead_intake(self.store, spec.job_id, intake)
+                for lead_id, bucket in preflight.per_lead.items():
+                    if bucket != "usable":
+                        self.store.set_lead_status(spec.job_id, lead_id, LeadStatus(bucket))
+        except BaseException:
+            if saved_path is not None:
+                saved_path.unlink(missing_ok=True)
+            if created:
+                with self.store.transaction() as cur:
+                    cur.execute("DELETE FROM leads WHERE job_id=?", (spec.job_id,))
+                    cur.execute("DELETE FROM id_intake WHERE job_id=?", (spec.job_id,))
+                    cur.execute("DELETE FROM jobs WHERE id=?", (spec.job_id,))
+            raise
+        summary: dict[str, object] = {
+            "job_id": spec.job_id,
+            "spec": saved_path.name if saved_path is not None else "",
+            "state": "plan_proposed",
+            "lead_counts": {
+                "raw": intake.raw_count,
+                "distinct": len(intake.ids),
+                "duplicates": intake.duplicates,
+                "malformed": len(intake.malformed),
+            },
+            "rules": [r.to_dict() for r in spec.rules],
+        }
+        summary["preflight"] = {
+            "buckets": preflight.buckets,
+            "dry_run_bytes": preflight.dry_run_bytes,
+            "capped_leads": preflight.capped_leads,
+        }
+        summary["capped_leads"] = preflight.capped_leads
+        summary["lead_source_dry_run_bytes"] = lead_source_dry_run_bytes
         return summary
 
     def job_status(self, job_id: str) -> object:
@@ -373,21 +440,43 @@ class ToolHost:
         )
         if not rows:
             raise ToolHostError("job not found")
-        counts = self.store.rows(
-            "SELECT l.status, COUNT(*) AS count FROM leads l JOIN jobs j ON j.id=l.job_id "
-            "WHERE l.job_id=? AND j.project_id=? GROUP BY l.status",
-            (job_id, self.project_id),
-        )
+        progress = progress_counts(self.store, job_id)
         errors = self.store.rows(
             "SELECT e.kind, e.data_json FROM job_events e JOIN jobs j ON j.id=e.job_id "
-            "WHERE e.job_id=? AND j.project_id=? ORDER BY e.id DESC LIMIT 10",
+            "WHERE e.job_id=? AND j.project_id=? AND e.kind IN "
+            "('error','lead_error','lead_failed','tool_error') ORDER BY e.id DESC LIMIT 10",
             (job_id, self.project_id),
         )
+        quota_rows = self.store.rows(
+            "SELECT data_json FROM job_events WHERE job_id=? AND kind='quota' ORDER BY id DESC LIMIT 1",
+            (job_id,),
+        )
+        quota: object = {"state": "unknown"}
+        if quota_rows:
+            with suppress(TypeError, json.JSONDecodeError):
+                quota = json.loads(str(quota_rows[0][0]))
+        counts = {
+            "done": progress.done,
+            "in_flight": progress.in_flight,
+            "retrying": progress.retrying,
+            "failed": progress.failed,
+            "held_back": progress.held_back,
+            "no_transcript": progress.no_transcript,
+            "transcription_failed": progress.transcription_failed,
+            "too_short": progress.too_short,
+            "capped": progress.capped,
+            "not_found": progress.not_found,
+            "not_started": progress.not_started,
+            "remaining": progress.remaining,
+        }
         return {
             "job_id": job_id,
             "state": str(rows[0][0]),
             "spec_version": rows[0][1],
-            "counts": {str(r[0]): r[1] for r in counts},
+            "counts": counts,
+            "checklist": [{"name": item.name, "status": item.status} for item in progress.checklist],
+            "eta": EtaEstimator().estimate(time.time(), progress.remaining).__dict__,
+            "quota": quota,
             "recent_errors": [dict(r) for r in errors],
         }
 
@@ -416,11 +505,16 @@ class ToolHost:
         )
         if not row or not bool(row[0][0]):
             raise ToolHostError("lead is not a sample lead")
-        path = self._job_dir(job_id) / "masked" / f"{lead_id}.txt"
+        spec, _ = load_latest_spec(self._job_dir(job_id))
+        path = self._job_dir(job_id) / "raw" / f"{lead_id}.jsonl.gz"
         if not path.is_file():
             raise ToolHostError("masked transcript not found")
-        calls = path.read_text(encoding="utf-8").split("=== CALL ")
-        return "=== CALL ".join(calls[call_from : call_to + 1])
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            calls = [cast(dict[str, object], json.loads(line)) for line in handle if line.strip()]
+        bundle = build_bundle(lead_id, calls, spec.cap)
+        blocks = re.findall(r"(?ms)^=== CALL .*?(?=\n\n=== CALL |\Z)", bundle.text)
+        selected = blocks[call_from - 1 : call_to]
+        return "\n\n".join(selected) or "no calls in requested range"
 
     def result_aggregates(self, job_id: str, group_by: list[str] | None = None) -> object:
         self._job_dir(job_id)
@@ -493,7 +587,16 @@ def serve_ipc(
     host._ipc_authkey = authkey
     if host._ipc_thread is None:
         host._ipc_thread = threading.current_thread()
-    listener = Listener(address, family=selected_family, authkey=authkey)
+    listener: Any
+    if selected_family == "AF_PIPE" and sys.platform == "win32":
+        from .windows_pipe import OwnerOnlyPipeListener
+
+        listener = OwnerOnlyPipeListener(address)
+    else:
+        # Authentication is performed in a short-lived worker.  Listener.accept
+        # performs it inline, which lets a peer that never answers the challenge
+        # block every subsequent client.
+        listener = Listener(address, family=selected_family, authkey=None)
     host._ipc_listener = listener
     if selected_family == "AF_UNIX":
         with suppress(OSError):
@@ -501,13 +604,45 @@ def serve_ipc(
     accepted: deque[object | BaseException] = deque()
     accepted_lock = threading.Lock()
 
-    def accept_one() -> None:
+    def queue_authenticated(connection: Any) -> None:
+        timer = threading.Timer(1.0, connection.close)
+        timer.daemon = True
         try:
-            item: object | BaseException = listener.accept()
+            from multiprocessing.connection import answer_challenge, deliver_challenge
+
+            timer.start()
+            deliver_challenge(connection, authkey)
+            answer_challenge(connection, authkey)
+            with accepted_lock:
+                accepted.append(connection)
         except (OSError, EOFError, AuthenticationError) as exc:
-            item = exc
-        with accepted_lock:
-            accepted.append(item)
+            with accepted_lock:
+                accepted.append(exc)
+            with suppress(OSError, EOFError):
+                connection.close()
+        finally:
+            timer.cancel()
+
+    def accept_one() -> None:
+        item: object | BaseException
+        try:
+            if selected_family == "AF_UNIX":
+                raw_listener = cast(Any, listener)._listener
+                sock, _ = raw_listener._socket.accept()
+                from multiprocessing.connection import Connection
+
+                connection = Connection(sock.detach())
+            else:
+                item = listener.accept()
+                connection = cast(Any, item)
+        except (OSError, EOFError, AuthenticationError) as exc:
+            with accepted_lock:
+                accepted.append(exc)
+        else:
+            threading.Thread(target=queue_authenticated, args=(connection,), daemon=True).start()
+        finally:
+            if not stopping.is_set():
+                start_accept()
 
     def handle(connection: Any) -> None:
         try:
@@ -516,6 +651,9 @@ def serve_ipc(
             request = connection.recv()
             if not isinstance(request, dict):
                 raise ToolHostError("invalid IPC request")
+            requested_project = request.get("project_id")
+            if requested_project is not None and requested_project != host.project_id:
+                raise ToolHostError("project is not authorized for this engine")
             result = host.call(
                 str(request.get("tool", "")), cast(Mapping[str, object], request.get("arguments", {}))
             )
@@ -553,7 +691,6 @@ def serve_ipc(
                 start_accept()
                 continue
             threading.Thread(target=handle, args=(item,), daemon=True).start()
-            start_accept()
     finally:
         listener.close()
         host._ipc_listener = None

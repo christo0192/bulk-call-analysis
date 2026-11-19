@@ -134,6 +134,7 @@ def resolve_lead_source(
     cfg: BigQueryConfig,
     job_id: str | None = None,
     approved_bytes: int | None = None,
+    persist: bool = True,
 ) -> IdIntake:
     effective_job = job_id or job_dir.name
     if isinstance(spec, LeadSourceIds):
@@ -148,15 +149,21 @@ def resolve_lead_source(
         for page in runner.iter_pages(sql, params, 1000):
             values.extend(row.get("lead_id", "") for row in page)
         intake = _intake(values)
+    if persist:
+        record_lead_intake(store, effective_job, intake)
+    return intake
+
+
+def record_lead_intake(store: Store, job_id: str, intake: IdIntake) -> None:
+    """Persist an already validated intake after its job row exists."""
     with store.transaction() as cur:
         cur.execute(
             "INSERT OR REPLACE INTO id_intake(job_id, raw_count, distinct_count, duplicates, malformed) "
             "VALUES (?, ?, ?, ?, ?)",
-            (effective_job, intake.raw_count, len(intake.ids), intake.duplicates, len(intake.malformed)),
+            (job_id, intake.raw_count, len(intake.ids), intake.duplicates, len(intake.malformed)),
         )
         for lead_id in intake.ids:
             cur.execute(
                 "INSERT OR IGNORE INTO leads(job_id, lead_id, status) VALUES (?, ?, ?)",
-                (effective_job, lead_id, str(LeadStatus.pending)),
+                (job_id, lead_id, str(LeadStatus.pending)),
             )
-    return intake

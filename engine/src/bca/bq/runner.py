@@ -27,6 +27,10 @@ class BqRunner(Protocol):
         self, sql: str, params: Mapping[str, object] | None = None, page_size: int = 1000
     ) -> Iterator[list[dict[str, object]]]: ...
 
+    def list_datasets(self) -> list[dict[str, object]]: ...
+    def list_tables(self, dataset: str) -> list[dict[str, object]]: ...
+    def describe_table(self, dataset: str, table: str) -> dict[str, object]: ...
+
 
 class GoogleBqRunner:
     def __init__(self, cfg: BigQueryConfig) -> None:
@@ -85,3 +89,26 @@ class GoogleBqRunner:
                 page = []
         if page:
             yield page
+
+    def list_datasets(self) -> list[dict[str, object]]:
+        return [
+            {"dataset_id": item.dataset_id, "location": item.location}
+            for item in self._client.list_datasets()
+        ]
+
+    def list_tables(self, dataset: str) -> list[dict[str, object]]:
+        return [
+            {"table_id": item.table_id, "dataset_id": item.dataset_id, "table_type": item.table_type}
+            for item in self._client.list_tables(dataset)
+        ]
+
+    def describe_table(self, dataset: str, table: str) -> dict[str, object]:
+        item = self._client.get_table(f"{self._cfg.project}.{dataset}.{table}")
+        return {
+            "dataset_id": item.dataset_id,
+            "table_id": item.table_id,
+            "num_rows": item.num_rows,
+            "schema": [
+                {"name": field.name, "type": field.field_type, "mode": field.mode} for field in item.schema
+            ],
+        }

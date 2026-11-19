@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import socket
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
 from bca.bq.runner import DryRun
-from bca.config import BigQueryConfig
+from bca.config import BigQueryConfig, ModelsConfig, RecipeConfig
 from bca.mask.masker import MaskingContext
 from bca.mask.names import Span
 from bca.mcp.host import MAX_RESULT_CHARS, ToolHost, ToolHostError, start_ipc_thread
@@ -21,7 +23,27 @@ class FakeNer:
         return []
 
 
-def make_host(tmp_path: Path, runner: FakeBqRunner | None = None) -> ToolHost:
+def recipe_config() -> RecipeConfig:
+    return RecipeConfig(
+        transcripts_table="dataset.transcripts",
+        calls_table="dataset.calls",
+        lead_id_column="lead_id",
+        call_id_column="call_id",
+        transcript_text_column="transcript_text",
+        call_start_column="call_start",
+        call_duration_column="duration",
+        speaker_labels={"learner": ("learner",), "advisor": ("advisor",)},
+    )
+
+
+def make_host(
+    tmp_path: Path,
+    runner: FakeBqRunner | None = None,
+    *,
+    recipe: RecipeConfig | None = None,
+    models: ModelsConfig | None = None,
+    notes_path: Path | None = None,
+) -> ToolHost:
     store = open_store(tmp_path / "store.sqlite")
     store.create_project("project", "Project")
     return ToolHost(
@@ -31,6 +53,9 @@ def make_host(tmp_path: Path, runner: FakeBqRunner | None = None) -> ToolHost:
         bq_config=BigQueryConfig("project", reject_bytes=100),
         mask_context=MaskingContext(ner=FakeNer()),
         project_id="project",
+        recipe=recipe,
+        models=models,
+        notes_path=notes_path,
     )
 
 
@@ -122,6 +147,61 @@ def test_ipc_close_without_client_stops_thread(tmp_path: Path) -> None:
     assert not thread.is_alive()
 
 
+def test_ipc_client_disconnect_does_not_kill_listener(tmp_path: Path) -> None:
+    host = make_host(tmp_path)
+    address, family = new_ipc_address()
+    authkey = b"c" * 32
+    thread = start_ipc_thread(host, address, authkey)
+    try:
+        from multiprocessing.connection import Client
+
+        connection = Client(address, family=family, authkey=authkey)
+        connection.send({"tool": "data_notes", "arguments": {}})
+        connection.close()
+        time.sleep(0.1)
+        assert call_engine(address, authkey, "data_notes", {}, family) == "no notes yet"
+    finally:
+        host.close()
+    assert not thread.is_alive()
+
+
+def test_ipc_bad_authkey_does_not_kill_listener(tmp_path: Path) -> None:
+    host = make_host(tmp_path)
+    address, family = new_ipc_address()
+    authkey = b"d" * 32
+    thread = start_ipc_thread(host, address, authkey)
+    try:
+        from multiprocessing import AuthenticationError
+        from multiprocessing.connection import Client
+
+        with pytest.raises(AuthenticationError):
+            Client(address, family=family, authkey=b"wrong")
+        assert call_engine(address, authkey, "data_notes", {}, family) == "no notes yet"
+    finally:
+        host.close()
+    assert not thread.is_alive()
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="raw silent-client test is POSIX-only")
+def test_ipc_silent_client_does_not_block_calls_or_close(tmp_path: Path) -> None:
+    host = make_host(tmp_path)
+    address, family = new_ipc_address()
+    authkey = b"e" * 32
+    thread = start_ipc_thread(host, address, authkey)
+    silent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        silent.connect(address)
+        started = time.monotonic()
+        assert call_engine(address, authkey, "data_notes", {}, family) == "no notes yet"
+        assert time.monotonic() - started < 5
+    finally:
+        silent.close()
+        started = time.monotonic()
+        host.close()
+        assert time.monotonic() - started < 5
+    assert not thread.is_alive()
+
+
 def test_new_ipc_address_is_private_and_uses_posix_socket_on_posix() -> None:
     address, family = new_ipc_address()
     if family == "AF_UNIX":
@@ -131,3 +211,69 @@ def test_new_ipc_address_is_private_and_uses_posix_socket_on_posix() -> None:
     else:
         assert address.startswith(r"\\.\pipe\bca-")
         assert len(address.rsplit("-", 1)[1]) == 32
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows named-pipe ACL test")
+def test_windows_pipe_dacl_has_only_current_user(tmp_path: Path) -> None:
+    import ctypes
+    from ctypes import wintypes
+    from multiprocessing.connection import Client
+
+    from bca.mcp.windows_pipe import _current_user_sid
+
+    host = make_host(tmp_path)
+    address, family = new_ipc_address()
+    authkey = b"f" * 32
+    thread = start_ipc_thread(host, address, authkey)
+    connection = Client(address, family=family, authkey=authkey)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    GetSecurityInfo = advapi32.GetSecurityInfo
+    GetSecurityInfo.restype = wintypes.DWORD
+    GetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+    ]
+    descriptor = wintypes.LPVOID()
+    dacl = wintypes.LPVOID()
+    owner = wintypes.LPVOID()
+
+    class ACL(ctypes.Structure):
+        _fields_ = [
+            ("revision", ctypes.c_ubyte),
+            ("sbz1", ctypes.c_ubyte),
+            ("size", wintypes.WORD),
+            ("ace_count", wintypes.WORD),
+            ("sbz2", wintypes.WORD),
+        ]
+
+    sid_text = wintypes.LPWSTR()
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
+    try:
+        result = GetSecurityInfo(
+            connection._handle,  # type: ignore[attr-defined]
+            6,
+            4,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
+        )
+        assert result == 0
+        assert advapi32.ConvertSidToStringSidW(owner, ctypes.byref(sid_text))
+        assert sid_text.value == _current_user_sid()
+        assert dacl.value
+        assert ctypes.cast(dacl, ctypes.POINTER(ACL)).contents.ace_count == 1
+    finally:
+        if sid_text:
+            advapi32.LocalFree(sid_text)
+        connection.close()
+        host.close()
+    assert not thread.is_alive()

@@ -23,6 +23,7 @@ class Preflight:
     buckets: dict[str, int]
     per_lead: dict[str, str]
     dry_run_bytes: int
+    capped_leads: int
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,8 @@ def run_preflight(
     job_id: str,
     cfg: BigQueryConfig,
     approved_bytes: int | None = None,
+    persist: bool = True,
+    cap: CapRule | None = None,
 ) -> Preflight:
     sql, params, _ = preflight_sql(recipe, usable_rule, scope, window)
     params["lead_ids"] = lead_ids
@@ -76,6 +79,7 @@ def run_preflight(
         name: 0 for name in ("usable", "no_transcript", "transcription_failed", "too_short", "not_found")
     }
     per_lead: dict[str, str] = {}
+    capped_leads = 0
     for lead_id in lead_ids:
         row = by_id[lead_id]
         found = bool(row.get("found"))
@@ -96,12 +100,14 @@ def run_preflight(
         )
         buckets[bucket] += 1
         per_lead[lead_id] = bucket
-        if bucket != "usable":
+        if cap is not None and _number(row.get("transcript_chars")) > cap.max_chars:
+            capped_leads += 1
+        if bucket != "usable" and persist:
             status = LeadStatus(bucket)
             store.set_lead_status(job_id, lead_id, status)
     if sum(buckets.values()) != len(lead_ids):
         raise RuntimeError("preflight bucket counts do not reconcile")
-    return Preflight(buckets, per_lead, dry.bytes)
+    return Preflight(buckets, per_lead, dry.bytes, capped_leads)
 
 
 def pull_transcripts(

@@ -82,11 +82,14 @@ ON c.`{recipe.call_id_column}` = t.`{recipe.call_id_column}`
 WHERE CAST(c.`{recipe.lead_id_column}` AS STRING) IN UNNEST(@lead_ids)
 {_window(scope, window, f"c.`{recipe.call_start_column}`")}),
 agg_base AS (SELECT lead_id, COUNT(DISTINCT call_id) AS calls,
+SUM(COALESCE(chars, 0)) AS transcript_chars,
 COUNTIF(chars IS NOT NULL AND chars > 0) AS transcript_calls,
 COUNTIF(chars >= {usable_rule.min_chars}{status_rule}{duration_rule}) AS usable_calls{status_count}{over_rule}
 FROM calls GROUP BY lead_id),
 agg AS (SELECT lead_id, calls, transcript_calls, {over_select}, transcription_failed FROM agg_base)
-SELECT selected.lead_id, COALESCE(agg.calls, 0) AS calls, COALESCE(agg.usable_calls, 0) AS usable_calls,
+SELECT selected.lead_id, COALESCE(agg.calls, 0) AS calls,
+COALESCE(agg.transcript_chars, 0) AS transcript_chars,
+COALESCE(agg.usable_calls, 0) AS usable_calls,
 COALESCE(agg.transcript_calls, 0) AS transcript_calls,
 agg.transcription_failed AS transcription_failed,
 COALESCE(agg.calls - agg.usable_calls, 0) AS too_short, agg.lead_id IS NOT NULL AS found

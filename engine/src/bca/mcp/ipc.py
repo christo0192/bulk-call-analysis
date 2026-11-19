@@ -24,11 +24,19 @@ def new_ipc_address() -> tuple[str, str]:
 
 
 def call_engine(
-    address: str, authkey: bytes, tool: str, arguments: Mapping[str, object], family: str | None = None
+    address: str,
+    authkey: bytes,
+    tool: str,
+    arguments: Mapping[str, object],
+    family: str | None = None,
+    project_id: str | None = None,
 ) -> object:
     connection = Client(address, family=family or ipc_family(), authkey=authkey)
     try:
-        connection.send({"tool": tool, "arguments": dict(arguments)})
+        request: dict[str, object] = {"tool": tool, "arguments": dict(arguments)}
+        if project_id is not None:
+            request["project_id"] = project_id
+        connection.send(request)
         response = connection.recv()
         if not isinstance(response, dict) or not response.get("ok"):
             reason = (
