@@ -262,7 +262,7 @@ def proposal_host(
 ) -> ToolHost:
     job_dir = tmp_path / "jobs" / "job"
     job_dir.mkdir(parents=True)
-    (job_dir / "ids.txt").write_text("lead-1\n", encoding="utf-8")
+    (job_dir / "ids.txt").write_text("1001\n", encoding="utf-8")
     return make_host(
         tmp_path,
         runner or FakeBqRunner(pages=pages),
@@ -274,11 +274,11 @@ def test_propose_job_runs_preflight_before_plan_state_and_returns_card(tmp_path:
     # propose_job runs lead-source dry runs/intake, then the preflight dry run/page fetch.
     runner = FakeBqRunner(
         pages_by_query_kind={
-            "lead_source": [[{"lead_id": "lead-1"}]],
+            "lead_source": [[{"lead_id": "1001"}]],
             "preflight": [
                 [
                     {
-                        "lead_id": "lead-1",
+                        "lead_id": "1001",
                         "found": True,
                         "calls": 1,
                         "call_id": "call-1",
@@ -294,7 +294,7 @@ def test_propose_job_runs_preflight_before_plan_state_and_returns_card(tmp_path:
         dry=DryRun(0, [], [("lead_id", "STRING")]),
     )
     spec = json.loads(proposal_json())
-    spec["lead_source"] = {"kind": "sql", "sql": "SELECT 'lead-1' AS lead_id"}
+    spec["lead_source"] = {"kind": "sql", "sql": "SELECT '1001' AS lead_id"}
     host = proposal_host(
         tmp_path,
         [],
@@ -303,7 +303,7 @@ def test_propose_job_runs_preflight_before_plan_state_and_returns_card(tmp_path:
     result = host.call("propose_job", {"spec_json": json.dumps(spec)})
     assert result["state"] == "plan_proposed"  # type: ignore[index]
     assert result["preflight"]["buckets"]["usable"] == 1  # type: ignore[index]
-    assert result["preflight"]["per_lead"]["lead-1"] == "usable"  # type: ignore[index]
+    assert result["preflight"]["per_lead"]["1001"] == "usable"  # type: ignore[index]
     assert result["lead_source_dry_run_bytes"] == 0  # type: ignore[index]
     assert host.store.rows("SELECT state, spec_version FROM jobs WHERE id='job'") == [("plan_proposed", 1)]
 
@@ -314,7 +314,7 @@ def test_propose_job_reproposal_versions_and_running_job_is_refused(tmp_path: Pa
         [
             [
                 {
-                    "lead_id": "lead-1",
+                    "lead_id": "1001",
                     "found": True,
                     "calls": 1,
                     "call_id": "call-1",
