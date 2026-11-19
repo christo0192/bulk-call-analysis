@@ -242,7 +242,7 @@ class _Callbacks(PoolCallbacks):
                 JobState.done_with_issues,
             }:
                 if self.runner._phase_pool is not None:
-                    await self.runner._phase_pool.interrupt_all("sleep gap")
+                    await self.runner._phase_pool.pause(PauseReason.sleep.value)
                 else:
                     self.runner.deps.store.requeue_in_flight(self.runner.job_id, "sleep gap")
                 self.runner._liveness.sleep_detected(ts)
@@ -250,7 +250,7 @@ class _Callbacks(PoolCallbacks):
                 if isinstance(start, (int, float)):
                     self.runner._eta.sleep_gap(float(start), ts)
                 self.runner._pause_started = ts
-                pause(self.runner.deps.store, self.runner.job_id, PauseReason.sleep)
+                await self.on_pause(PauseReason.sleep.value, None)
             elif event.kind == "wake":
                 if not self.runner._sleep.wait_for_network():
                     row = self.runner.deps.store.rows(
@@ -329,6 +329,7 @@ class _Callbacks(PoolCallbacks):
             float(resume_at) if resume_at is not None else now,
         )
         self.runner._publish("pause", {"reason": reason, "resume_at": resume_at})
+        await self.runner._pause_phase_pool(reason)
 
 
 class JobRunner:
@@ -510,6 +511,11 @@ class JobRunner:
             or str(reason) == "quote_repair_pending"
             for status, reason in rows
         )
+
+    async def _pause_phase_pool(self, reason: str) -> None:
+        pool = self._phase_pool
+        if pool is not None:
+            await pool.pause(reason)
 
     def _masking_needed(self, sample: bool) -> bool:
         rows = self.deps.store.rows(

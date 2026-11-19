@@ -95,12 +95,17 @@ class DeterministicPool:
         self.callbacks = callbacks
         self.concurrency = concurrency
         self.control = control
+        self.paused = False
 
     def set_concurrency(self, n: int) -> None:
         self.concurrency = max(1, n)
 
     async def stop(self) -> None:
         return
+
+    async def pause(self, reason: str) -> None:
+        if not self.paused:
+            self.paused = True
 
     async def run_until_idle(self) -> None:
         callbacks = self.callbacks

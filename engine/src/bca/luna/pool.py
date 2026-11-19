@@ -124,9 +124,23 @@ class LunaPool:
         self._dispatch_closed = False
         self._server_generation = 0
         self._pending_pause: tuple[str, int | None] | None = None
+        self._next_tasks: asyncio.Task[list[LeadTask]] | None = None
 
     def set_concurrency(self, n: int) -> None:
         self.concurrency = max(1, n)
+
+    async def pause(self, reason: str) -> None:
+        """Stop dispatching and, for interrupting reasons, stop active turns."""
+        if self._paused:
+            return
+        self._paused = True
+        self._dispatch_closed = True
+        next_tasks = self._next_tasks
+        if next_tasks is not None and next_tasks is not asyncio.current_task() and not next_tasks.done():
+            next_tasks.cancel()
+            await asyncio.gather(next_tasks, return_exceptions=True)
+        if reason != "model_unavailable":
+            await self._interrupt_all(reason)
 
     async def run_until_idle(self) -> None:
         self._stopping = False
@@ -152,7 +166,17 @@ class LunaPool:
                 if room > 0:
                     if self._dispatch_closed:
                         break
-                    tasks = await self.callbacks.next_tasks(room)
+                    next_tasks = asyncio.create_task(self.callbacks.next_tasks(room))
+                    self._next_tasks = next_tasks
+                    try:
+                        tasks = await next_tasks
+                    except asyncio.CancelledError:
+                        if not self._paused:
+                            raise
+                        tasks = []
+                    finally:
+                        if self._next_tasks is next_tasks:
+                            self._next_tasks = None
                     for index, task in enumerate(tasks):
                         if len(running) >= self.concurrency:
                             await asyncio.gather(*(self._fail_unstarted(item) for item in tasks[index:]))
@@ -167,6 +191,8 @@ class LunaPool:
                         lead = _Lead(task, server_generation=self._server_generation)
                         self._leads[task.attempt_id] = lead
                         running.add(asyncio.create_task(self._run_lead(lead)))
+                if not running and not tasks and (self._paused or self._stopping):
+                    break
                 if not running and not tasks:
                     break
                 if running:
