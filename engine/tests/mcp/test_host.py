@@ -6,6 +6,7 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,7 +17,12 @@ from bca.config import BigQueryConfig, ModelsConfig, RecipeConfig
 from bca.logsetup import setup_logging
 from bca.mask.masker import MaskingContext
 from bca.mask.names import Span
-from bca.mcp.host import MAX_RESULT_CHARS, ToolHost, ToolHostError, start_ipc_thread
+from bca.mcp.host import (
+    MAX_RESULT_CHARS,
+    ToolHost,
+    ToolHostError,
+    start_ipc_thread,
+)
 from bca.mcp.ipc import call_engine, new_ipc_address
 from bca.mcp.wire import OK, expected_mac
 from bca.store import LeadStatus, open_store
@@ -70,6 +76,47 @@ def test_bq_query_masks_phone_numbers(tmp_path: Path) -> None:
     result = make_host(tmp_path, runner).call("bq_query", {"sql": "SELECT 1"})
     assert result == {"bytes": "0 B", "rows": [{"phone": "Call [PHONE]"}], "truncated": False}
     assert runner.calls[-1][2] == 500
+
+
+def test_bq_query_stops_a_bounded_page_producer(tmp_path: Path) -> None:
+    released = threading.Event()
+
+    class CountingRunner(FakeBqRunner):
+        yielded_after_consumer_return = 0
+
+        def iter_pages(
+            self,
+            sql: str,
+            params: Mapping[str, object] | None = None,
+            page_size: int = 1000,
+            timeout: float | None = None,
+        ) -> Iterator[list[dict[str, object]]]:
+            for index in range(100):
+                if released.is_set():
+                    self.yielded_after_consumer_return += 1
+                yield [{"value": index}]
+
+    runner = CountingRunner()
+    result = make_host(tmp_path, runner).call("bq_query", {"sql": "SELECT 1", "max_rows": 1})
+    assert result["truncated"] is True  # type: ignore[index]
+    released.set()
+    deadline = time.monotonic() + 1
+    while threading.active_count() > 0 and time.monotonic() < deadline:
+        if runner.yielded_after_consumer_return:
+            break
+        time.sleep(0.01)
+    assert runner.yielded_after_consumer_return <= 3
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [(float("nan"), "NaN"), (float("inf"), "Infinity"), (float("-inf"), "-Infinity")],
+)
+def test_bq_query_serializes_non_finite_floats(tmp_path: Path, value: float, expected: str) -> None:
+    result = make_host(tmp_path, FakeBqRunner(pages=[[{"value": value}]])).call(
+        "bq_query", {"sql": "SELECT 1"}
+    )
+    assert result["rows"] == [{"value": expected}]  # type: ignore[index]
 
 
 def test_string_results_are_plain_text_with_original_character_count(tmp_path: Path) -> None:

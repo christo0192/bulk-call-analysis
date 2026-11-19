@@ -4,16 +4,17 @@ import gzip
 import hmac
 import json
 import logging
+import math
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from typing import Any, Protocol, cast
 
 from bca.bq.guard import sql_tokens, validate_select
@@ -47,6 +48,7 @@ _LOG = logging.getLogger("bca.mcp")
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PATH_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$", re.ASCII)
 _VIEWS = {"TABLES", "COLUMNS", "VIEWS", "TABLE_OPTIONS", "COLUMN_FIELD_PATHS", "PARTITIONS"}
+_FORMAT_SPECIFIER = re.compile(r"%[-+ #'0]*(\d+|\*)?(\.(\d+|\*))?[xXo]")
 
 
 def _has_forbidden_reconstruction(sql: str) -> bool:
@@ -86,10 +88,10 @@ def _has_forbidden_from_tokens(sql: str) -> bool:
                 return True
             if index + 3 >= len(tokens) or tokens[index + 3].text != ",":
                 return True
-            literal = format_token.text
-            if len(literal) < 2 or literal[0] not in "'\"" or not literal.endswith(literal[0]):
+            literal = _literal_contents(format_token.text)
+            if literal is None:
                 return True
-            if re.fullmatch(r"%[-+# 0]*\d*(?:\.\d+)?[xXoO]", literal[1:-1]):
+            if _FORMAT_SPECIFIER.search(literal):
                 return True
     return False
 
@@ -135,6 +137,8 @@ def _masked(
             return "[NUMBER]"
         return value
     if isinstance(value, float):
+        if not math.isfinite(value):
+            return "NaN" if math.isnan(value) else ("Infinity" if value > 0 else "-Infinity")
         if _is_sensitive_number(str(int(value))):
             return "[NUMBER]"
         return value
@@ -193,6 +197,7 @@ def _cap(
         return {"items": kept, "truncated": f"{omitted} rows omitted; aggregate in SQL or page the result"}
     if isinstance(masked, dict):
         result = dict(masked)
+        original_counts: dict[str, int] = {}
         while len(json.dumps(result, ensure_ascii=False, default=str)) > MAX_RESULT_CHARS:
             candidates = [
                 (len(json.dumps(item, ensure_ascii=False, default=str)), key, item)
@@ -204,14 +209,14 @@ def _cap(
             _, key, item = sorted(candidates)[-1]
             if isinstance(item, list):
                 kept_count = len(item) // 2
-                dropped = len(item) - kept_count
+                original_count = original_counts.setdefault(key, len(item))
                 result[key] = item[:kept_count]
             else:
                 entries = list(item.items())
                 kept_count = len(entries) // 2
-                dropped = len(entries) - kept_count
+                original_count = original_counts.setdefault(key, len(entries))
                 result[key] = dict(entries[:kept_count])
-            result[f"{key}_truncated"] = f"{dropped} entries omitted"
+            result[f"{key}_truncated"] = f"{original_count - kept_count} of {original_count} entries omitted"
         encoded_result = json.dumps(result, ensure_ascii=False, default=str)
         if len(encoded_result) <= MAX_RESULT_CHARS:
             return result
@@ -239,6 +244,16 @@ def _is_pure_numeric(value: str) -> bool:
     return re.fullmatch(r"[+-]?[\d][\d\s,._-]*(?:\.\d+)?", value) is not None
 
 
+def _literal_contents(token: str) -> str | None:
+    match = re.match(r"(?i)(?:rb|br|r|b)?(['\"]{1,3})", token)
+    if match is None:
+        return None
+    delimiter = match.group(1)
+    if not token.endswith(delimiter) or len(token) < len(delimiter) * 2:
+        return None
+    return token[len(match.group(0)) : -len(delimiter)]
+
+
 def _format_bytes(value: int) -> str:
     units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
     amount = float(value)
@@ -251,35 +266,61 @@ def _format_bytes(value: int) -> str:
 
 
 def _pages_until_deadline(runner: BqRunner, sql: str, deadline: float) -> Any:
-    messages: Queue[object] = Queue()
+    messages: Queue[object] = Queue(maxsize=2)
+    stop = threading.Event()
     finished = object()
 
     def produce() -> None:
+        iterator: Iterator[list[dict[str, object]]] | None = None
         try:
-            remaining = deadline - time.monotonic()
-            remaining = remaining if remaining > 0 else 0.0
-            for page in runner.iter_pages(sql, page_size=500, timeout=remaining):
-                messages.put(page)
+            iterator = iter(
+                runner.iter_pages(sql, page_size=500, timeout=max(0.0, deadline - time.monotonic()))
+            )
+            for page in iterator:
+                while not stop.is_set():
+                    try:
+                        messages.put(page, timeout=0.05)
+                        break
+                    except Full:
+                        continue
+                if stop.is_set():
+                    break
         except BaseException as exc:
-            messages.put(exc)
+            while not stop.is_set():
+                try:
+                    messages.put(exc, timeout=0.05)
+                    break
+                except Full:
+                    continue
         finally:
-            messages.put(finished)
+            if iterator is not None:
+                with suppress(BaseException):
+                    iterator.close()  # type: ignore[attr-defined]
+            while not stop.is_set():
+                try:
+                    messages.put(finished, timeout=0.05)
+                    break
+                except Full:
+                    continue
 
     thread = threading.Thread(target=produce, name="bca-bq-query", daemon=True)
     thread.start()
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise ToolHostError("BigQuery query timed out")
-        try:
-            message = messages.get(timeout=remaining)
-        except Empty:
-            raise ToolHostError("BigQuery query timed out") from None
-        if message is finished:
-            return
-        if isinstance(message, BaseException):
-            raise message
-        yield cast(list[dict[str, object]], message)
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ToolHostError("BigQuery query timed out")
+            try:
+                message = messages.get(timeout=remaining)
+            except Empty:
+                raise ToolHostError("BigQuery query timed out") from None
+            if message is finished:
+                return
+            if isinstance(message, BaseException):
+                raise message
+            yield cast(list[dict[str, object]], message)
+    finally:
+        stop.set()
 
 
 def _safe_error(exc: BaseException, context: MaskingContext) -> ToolHostError:

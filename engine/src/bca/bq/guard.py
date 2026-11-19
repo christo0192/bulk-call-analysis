@@ -42,10 +42,9 @@ def sql_tokens(sql: str) -> list[SqlToken]:
         if quote_index < length and sql[quote_index] in "'\"`":
             quote = sql[quote_index]
             delimiter = quote * 3 if sql.startswith(quote * 3, quote_index) else quote
-            raw = "r" in prefix.lower()
             cursor = quote_index + len(delimiter)
             while cursor < length:
-                if not raw and sql[cursor] == "\\":
+                if sql[cursor] == "\\":
                     cursor += 2
                     continue
                 if sql.startswith(delimiter, cursor):

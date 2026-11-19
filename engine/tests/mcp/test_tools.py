@@ -3,11 +3,13 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import re
 from pathlib import Path
 from typing import cast
 
 import pytest
 
+from bca.bq.guard import sql_tokens
 from bca.bq.runner import DryRun
 from bca.mcp.host import ToolHost, ToolHostError
 from bca.store import JobSpec, LeadSourceSql, LeadStatus, save_spec
@@ -48,6 +50,39 @@ def test_bq_describe_table_through_host(tmp_path: Path) -> None:
         ),
     ).call("bq_describe_table", {"dataset": "analytics", "table": "events"})
     assert result == {"dataset": "analytics", "table": "events", "schema": [], "num_rows": 7}
+
+
+def test_bq_describe_table_cap_reconciles_schema_entries(tmp_path: Path) -> None:
+    schema = [{"name": f"column_{index}", "type": "STRING", "mode": "NULLABLE"} for index in range(1200)]
+    result = make_host(
+        tmp_path,
+        FakeBqRunner(table_details={("analytics", "events"): {"schema": schema}}),
+    ).call("bq_describe_table", {"dataset": "analytics", "table": "events"})
+    result_dict = cast(dict[str, object], result)
+    kept = cast(list[object], result_dict["schema"])
+    marker = str(result_dict["schema_truncated"])
+    match = re.fullmatch(r"(\d+) of (\d+) entries omitted", marker)
+    assert match is not None
+    assert len(kept) + int(match.group(1)) == int(match.group(2)) == 1200
+
+
+@pytest.mark.parametrize(
+    "format_sql",
+    ["'id=%x'", "'%x '", "'%d-%x'", "'''%x'''", '"%\'x"', "'%*x'"],
+)
+def test_format_rejects_hex_and_octal_specifiers_anywhere(tmp_path: Path, format_sql: str) -> None:
+    with pytest.raises(ToolHostError, match="reconstruct"):
+        make_host(tmp_path).call("bq_query", {"sql": f"SELECT FORMAT({format_sql}, phone)"})
+
+
+def test_raw_literals_skip_escaped_quote_for_reconstruction_checks(tmp_path: Path) -> None:
+    single = sql_tokens(r"SELECT r'\'' AS value, TO_HEX(value)")
+    double = sql_tokens(r'SELECT r"\"" AS value, TO_BASE64(value)')
+    assert single[1].text == r"r'\''"
+    assert double[1].text == r'r"\""'
+    for sql in (r"SELECT r'\'' AS value, TO_HEX(value)", r'SELECT r"\"" AS value, TO_BASE64(value)'):
+        with pytest.raises(ToolHostError, match="reconstruct"):
+            make_host(tmp_path).call("bq_query", {"sql": sql})
 
 
 def test_bq_dry_run_through_host(tmp_path: Path) -> None:

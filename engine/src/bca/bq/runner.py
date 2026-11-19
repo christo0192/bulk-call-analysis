@@ -91,20 +91,24 @@ class GoogleBqRunner:
         # dry-run of the exact text that will be sent to BigQuery.
         self.dry_run(sql, params)
         job = self._client.query(sql, job_config=self._config(params, timeout=timeout))
+        completed = False
         try:
             result = job.result(page_size=page_size, timeout=timeout)
-        except TimeoutError:
-            with suppress(Exception):
-                job.cancel()
-            raise
-        page: list[dict[str, object]] = []
-        for row in result:
-            page.append(dict(row.items()))
-            if len(page) == page_size:
+            page: list[dict[str, object]] = []
+            for row in result:
+                page.append(dict(row.items()))
+                if len(page) == page_size:
+                    yield page
+                    page = []
+            if page:
                 yield page
-                page = []
-        if page:
-            yield page
+            completed = True
+        except TimeoutError:
+            raise
+        finally:
+            if not completed:
+                with suppress(Exception):
+                    job.cancel()
 
     def list_datasets(self) -> list[dict[str, object]]:
         return [
