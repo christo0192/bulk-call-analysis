@@ -350,6 +350,29 @@ def test_user_pause_overrides_quota_pause(
         _run(runner.resume("automatic"))
 
 
+def test_error_storm_pause_is_persisted_and_phase_ends(
+    coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _real_pool(coordinator, tmp_path, monkeypatch, {"errors": {"10": "badRequest"}, "latency_ms": 20})
+
+    class ErrorStormPool(LunaPool):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["max_consecutive_failures"] = 1
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "LunaPool", ErrorStormPool)
+    runner = coordinator.runner
+    runner.on_plan_approved(1)
+    _run(runner.run_sample())
+
+    assert runner._state() is JobState.paused
+    assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "error_storm"
+    assert not runner._phase_running
+    pool = runner._phase_pool
+    assert pool is not None
+    assert pool.pending_pause is None
+
+
 def test_poison_lead_crashing_appserver_is_bounded(
     coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

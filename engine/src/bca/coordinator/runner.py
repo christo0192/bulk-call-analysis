@@ -102,6 +102,7 @@ class _Callbacks(PoolCallbacks):
         self._tasks: list[LeadTask] = []
         self._claimed: set[str] = set()
         self._uncounted: dict[str, int] = {}
+        self._isolation_leads: set[str] = set()
         self._dispatch_limit = dispatch_limit
         self.attempt_ended = False
 
@@ -335,7 +336,7 @@ class _Callbacks(PoolCallbacks):
                 return
             if error_code == "appserver_crash" and not counted:
                 crash_count = self.runner.deps.store.count_appserver_crashes(self.runner.job_id, task.lead_id)
-                if crash_count >= 2:
+                if crash_count >= 1:
                     error_code = "appserver_crash_repeated"
                     counted = True
             self.runner._close_attempt(task.attempt_id)

@@ -129,6 +129,7 @@ class LunaPool:
         self._next_tasks: asyncio.Task[list[LeadTask]] | None = None
         self._interrupt_task: asyncio.Task[None] | None = None
         self._isolation_leads: set[str] = set()
+        self._restarted_crash_generations: set[int] = set()
 
     def set_concurrency(self, n: int) -> None:
         self.concurrency = max(1, n)
@@ -785,8 +786,6 @@ class LunaPool:
         async with self._restart_lock:
             if server_generation is not None and server_generation != self._server_generation:
                 return
-            if not hasattr(self, "_restarted_crash_generations"):
-                self._restarted_crash_generations: set[int] = set()
             if crash and server_generation in self._restarted_crash_generations:
                 return
             if crash and server_generation is not None:
