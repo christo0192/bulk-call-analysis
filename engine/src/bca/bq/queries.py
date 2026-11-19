@@ -67,11 +67,6 @@ def preflight_sql(
         if usable_rule.min_call_seconds is not None
         else ""
     )
-    # A usable call must also survive the configured short-call filter.  The
-    # duration expression is normalized above, so this remains correct for
-    # both millisecond and second source columns; chars > 0 already requires
-    # non-empty transcript text.
-    drop_short_rule = f" AND {duration} >= {recipe.drop_calls_shorter_than_s}"
     over_rule = ", NULL AS over_calls"
     over_select = "usable_calls AS usable_calls"
     if usable_rule.min_calls_over is not None:
@@ -79,7 +74,7 @@ def preflight_sql(
         over_rule = f", COUNTIF(duration >= {seconds}) AS over_calls"
         over_select = f"IF(over_calls >= {count}, usable_calls, 0) AS usable_calls"
     usable_count = (
-        f"COUNTIF(chars >= {usable_rule.min_chars}{status_rule}{duration_rule}{drop_short_rule}) "
+        f"COUNTIF(chars >= {usable_rule.min_chars}{status_rule}{duration_rule}) "
         f"AS usable_calls{status_count}{over_rule}"
     )
     sql = f"""WITH selected AS (SELECT lead_id FROM UNNEST(@lead_ids) AS lead_id),

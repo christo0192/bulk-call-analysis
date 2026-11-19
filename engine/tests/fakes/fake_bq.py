@@ -13,6 +13,7 @@ class FakeBqRunner:
 
     pages: list[list[dict[str, object]]] = field(default_factory=list)
     dry: DryRun = field(default_factory=lambda: DryRun(0, [], []))
+    pages_by_query_kind: dict[str, list[list[dict[str, object]]]] = field(default_factory=dict)
     error: BaseException | None = None
     calls: list[tuple[str, Mapping[str, object] | None, int]] = field(default_factory=list)
     datasets: list[dict[str, object]] = field(default_factory=list)
@@ -33,15 +34,26 @@ class FakeBqRunner:
         self.calls.append((sql, params, page_size))
         if self.error is not None:
             raise self.error
+        pages = self.pages_by_query_kind.get(self._query_kind(sql), self.pages)
         if params is not None and "lead_ids" in params:
             lead_ids = params["lead_ids"]
             if not isinstance(lead_ids, list):
                 raise TypeError("fake lead_ids parameter must be a list")
             requested = {str(lead_id) for lead_id in lead_ids}
-            for page in self.pages:
+            for page in pages:
                 yield [row for row in page if str(row.get("lead_id")) in requested]
             return
-        yield from self.pages
+        yield from pages
+
+    @staticmethod
+    def _query_kind(sql: str) -> str:
+        if "FROM selected LEFT JOIN agg USING (lead_id)" in sql:
+            return "preflight"
+        if "CAST(lead_id AS STRING) AS lead_id FROM (" in sql:
+            return "lead_source"
+        if sql.lstrip().startswith("WITH transcripts AS"):
+            return "pull"
+        return "other"
 
     def list_datasets(self) -> list[dict[str, object]]:
         return list(self.datasets)

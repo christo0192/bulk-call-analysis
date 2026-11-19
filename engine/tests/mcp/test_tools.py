@@ -271,27 +271,39 @@ def proposal_host(
 
 
 def test_propose_job_runs_preflight_before_plan_state_and_returns_card(tmp_path: Path) -> None:
+    # propose_job runs lead-source dry runs/intake, then the preflight dry run/page fetch.
+    runner = FakeBqRunner(
+        pages_by_query_kind={
+            "lead_source": [[{"lead_id": "lead-1"}]],
+            "preflight": [
+                [
+                    {
+                        "lead_id": "lead-1",
+                        "found": True,
+                        "calls": 1,
+                        "call_id": "call-1",
+                        "transcript_text": "synthetic transcript",
+                        "duration": 600_000,
+                        "transcript_calls": 1,
+                        "usable_calls": 1,
+                        "transcription_failed": 0,
+                    }
+                ]
+            ],
+        },
+        dry=DryRun(0, [], [("lead_id", "STRING")]),
+    )
+    spec = json.loads(proposal_json())
+    spec["lead_source"] = {"kind": "sql", "sql": "SELECT 'lead-1' AS lead_id"}
     host = proposal_host(
         tmp_path,
-        [
-            [
-                {
-                    "lead_id": "lead-1",
-                    "found": True,
-                    "calls": 1,
-                    "call_id": "call-1",
-                    "transcript_text": "synthetic transcript",
-                    "duration": 600_000,
-                    "transcript_calls": 1,
-                    "usable_calls": 1,
-                    "transcription_failed": 0,
-                }
-            ]
-        ],
+        [],
+        runner=runner,
     )
-    result = host.call("propose_job", {"spec_json": proposal_json()})
+    result = host.call("propose_job", {"spec_json": json.dumps(spec)})
     assert result["state"] == "plan_proposed"  # type: ignore[index]
     assert result["preflight"]["buckets"]["usable"] == 1  # type: ignore[index]
+    assert result["preflight"]["per_lead"]["lead-1"] == "usable"  # type: ignore[index]
     assert result["lead_source_dry_run_bytes"] == 0  # type: ignore[index]
     assert host.store.rows("SELECT state, spec_version FROM jobs WHERE id='job'") == [("plan_proposed", 1)]
 

@@ -437,6 +437,7 @@ class ToolHost:
         }
         summary["preflight"] = {
             "buckets": preflight.buckets,
+            "per_lead": preflight.per_lead,
             "dry_run_bytes": preflight.dry_run_bytes,
             "capped_leads": preflight.capped_leads,
         }
