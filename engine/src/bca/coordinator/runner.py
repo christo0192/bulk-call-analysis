@@ -55,6 +55,18 @@ class AsyncLaunch(Protocol):
     def __call__(self) -> Awaitable[Any]: ...
 
 
+class CoordinatorPool(Protocol):
+    callbacks: PoolCallbacks
+
+    def set_concurrency(self, n: int) -> None: ...
+
+    async def pause(self, reason: str) -> None: ...
+
+    async def wait_for_drain(self) -> None: ...
+
+    async def run_until_idle(self) -> None: ...
+
+
 MaskerFactory = Callable[..., MaskingContext]
 MAX_UNCOUNTED_FAILURES = 4
 LOGGER = logging.getLogger(__name__)
@@ -328,11 +340,7 @@ class _Callbacks(PoolCallbacks):
         self.runner._publish("notice", {"lead_id": task.lead_id, "rerouted_to": to_model})
 
     async def on_pause(self, reason: str, resume_at: int | None) -> None:
-        if self.runner._state() is JobState.paused:
-            LOGGER.info("keeping existing pause while ignoring later pause %s", reason)
-            return
-        await self.runner._pause_phase_pool(reason)
-        await self.runner._record_pause(reason, resume_at)
+        await self.runner._pause_with_pool(reason, resume_at)
 
 
 class JobRunner:
@@ -351,7 +359,7 @@ class JobRunner:
         self._masking_task: asyncio.Task[None] | None = None
         self._phase_event: asyncio.Event | None = None
         self._phase_loop: asyncio.AbstractEventLoop | None = None
-        self._phase_pool: LunaPool | None = None
+        self._phase_pool: CoordinatorPool | None = None
         self._pause_started: float | None = None
         self._pause_task: asyncio.Task[None] | None = None
         row = deps.store.rows("SELECT quota_baseline FROM jobs WHERE id=?", (job_id,))
@@ -361,7 +369,7 @@ class JobRunner:
 
             baseline = Decimal(str(row[0][0]))
         self._quota_guard = QuotaGuard(deps.config.limits.codex_stop_percent, baseline)
-        self._phase_lock = asyncio.Lock()
+        self._phase_lock: asyncio.Lock | None = None
 
     def _ts(self) -> float:
         return self.deps.clock.now() if self.deps.clock is not None else time.time()
@@ -387,6 +395,15 @@ class JobRunner:
             event = asyncio.Event()
             self._phase_event = event
         return event
+
+    def _get_phase_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        lock = self._phase_lock
+        lock_loop = getattr(cast(Any, lock), "_loop", None) if lock is not None else None
+        if lock is None or (lock_loop is not None and lock_loop is not loop):
+            lock = asyncio.Lock()
+            self._phase_lock = lock
+        return lock
 
     def _publish(self, kind: EventKind, data: dict[str, object]) -> None:
         self.deps.event_bus.publish(Event(kind, self.job_id, self._ts(), data))
@@ -542,15 +559,20 @@ class JobRunner:
             for status, reason in rows
         )
 
-    async def _pause_phase_pool(self, reason: str) -> None:
-        pool = self._phase_pool
-        if pool is not None:
-            await pool.pause(reason)
-
-    async def _record_pause(self, reason: str, resume_at: int | None) -> None:
-        now = self._ts()
+    async def _persist_pause(self, reason: str, resume_at: int | None) -> None:
         if self._pause_started is None:
-            self._pause_started = now
+            self._pause_started = self._ts()
+        if reason in {item.value for item in PauseReason}:
+            try:
+                pause(self.deps.store, self.job_id, PauseReason(reason), resume_at)
+            except TransitionError:
+                if self._state() is not JobState.paused:
+                    raise
+                LOGGER.info("pause %s raced with another pause", reason)
+
+    async def _finish_pause(self, reason: str, resume_at: int | None) -> None:
+        now = self._ts()
+        pause_started = self._pause_started or now
         if reason != PauseReason.model_unavailable.value:
             self.deps.store.requeue_in_flight(self.job_id, reason, outcome="interrupted")
             self._closed_attempts.update(self._attempts)
@@ -562,27 +584,26 @@ class JobRunner:
             ):
                 self.deps.store.release_claim(self.job_id, str(lead_id))
         self._get_phase_event().set()
-        if reason in {item.value for item in PauseReason}:
-            try:
-                pause(self.deps.store, self.job_id, PauseReason(reason), resume_at)
-            except TransitionError:
-                if self._state() is not JobState.paused:
-                    raise
-                LOGGER.info("pause %s raced with another pause", reason)
         self._eta.pause(
-            self._pause_started,
+            pause_started,
             float(resume_at) if resume_at is not None else now,
         )
         self._publish("pause", {"reason": reason, "resume_at": resume_at})
 
-    async def pause(self, reason: str) -> None:
-        """Pause through the active pool, then persist the pause after draining."""
+    async def _pause_with_pool(self, reason: str, resume_at: int | None) -> None:
+        if self._state() is JobState.paused:
+            LOGGER.info("keeping existing pause while ignoring later pause %s", reason)
+            return
+        await self._persist_pause(reason, resume_at)
         pool = self._phase_pool
         if pool is not None:
             await pool.pause(reason)
             await pool.wait_for_drain()
-        if self._state() is not JobState.paused:
-            await self._record_pause(reason, None)
+        await self._finish_pause(reason, resume_at)
+
+    async def pause(self, reason: str) -> None:
+        """Persist a pause, drain the active pool, then requeue in-flight work."""
+        await self._pause_with_pool(reason, None)
 
     def _masking_needed(self, sample: bool) -> bool:
         rows = self.deps.store.rows(
@@ -654,7 +675,7 @@ class JobRunner:
             self._quote_failures[key] = (answer, failures)
 
     async def _run_phase(self, sample: bool, canary: bool = False) -> None:
-        async with self._phase_lock:
+        async with self._get_phase_lock():
             await self._run_phase_locked(sample, canary)
 
     async def _run_phase_locked(self, sample: bool, canary: bool = False) -> None:
@@ -978,9 +999,7 @@ class JobRunner:
             self.deps.store.append_event(self.job_id, "reroute_baseline", {})
         # Requeue while the job is still paused so an interrupted repair stays
         # marked as an uncounted, reusable repair attempt before dispatch resumes.
-        async with self._phase_lock:
-            if self._phase_pool is not None:
-                await self._phase_pool.wait_for_drain()
+        async with self._get_phase_lock():
             self.deps.store.requeue_in_flight(self.job_id, "resume")
             self._closed_attempts.update(self._attempts)
             self._attempts.clear()
