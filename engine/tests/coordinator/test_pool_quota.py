@@ -20,7 +20,7 @@ from tests.fakes import fake_codex
 
 
 def _run(awaitable: Any) -> Any:
-    return asyncio.run(awaitable)
+    return asyncio.run(asyncio.wait_for(awaitable, timeout=15))
 
 
 def _real_pool(

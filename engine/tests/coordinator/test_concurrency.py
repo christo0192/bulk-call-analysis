@@ -10,7 +10,7 @@ from tests.coordinator.test_pool_quota import _approve_plan, _real_pool
 
 
 def _run(awaitable: Any) -> Any:
-    return asyncio.run(awaitable)
+    return asyncio.run(asyncio.wait_for(awaitable, timeout=15))
 
 
 def _assert_sample_results(coordinator: CoordinatorFixture) -> None:
@@ -72,7 +72,7 @@ def test_parked_quota_pause_after_runner_pause_does_not_raise(
     assert coordinator.runner._state() is JobState.paused
 
 
-def test_network_bound_during_model_unavailable_drain(
+def test_network_bound_during_model_unavailable_drain_does_not_raise(
     coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: Any
 ) -> None:
     _sample(coordinator, tmp_path, monkeypatch, {"errors": {"10": "rateLimitExceeded"}})

@@ -62,8 +62,6 @@ class CoordinatorPool(Protocol):
 
     async def pause(self, reason: str) -> None: ...
 
-    async def wait_for_drain(self) -> None: ...
-
     async def run_until_idle(self) -> None: ...
 
 
@@ -340,7 +338,7 @@ class _Callbacks(PoolCallbacks):
         self.runner._publish("notice", {"lead_id": task.lead_id, "rerouted_to": to_model})
 
     async def on_pause(self, reason: str, resume_at: int | None) -> None:
-        await self.runner._pause_with_pool(reason, resume_at)
+        await self.runner._pause_with_pool(reason, resume_at, wait_for_phase=False)
 
 
 class JobRunner:
@@ -370,6 +368,11 @@ class JobRunner:
             baseline = Decimal(str(row[0][0]))
         self._quota_guard = QuotaGuard(deps.config.limits.codex_stop_percent, baseline)
         self._phase_lock: asyncio.Lock | None = None
+        self._phase_done: asyncio.Event | None = None
+        self._phase_running = False
+        self._pause_reason: str | None = None
+        self._pause_resume_at: int | None = None
+        self._pause_finished = False
 
     def _ts(self) -> float:
         return self.deps.clock.now() if self.deps.clock is not None else time.time()
@@ -560,6 +563,12 @@ class JobRunner:
         )
 
     async def _persist_pause(self, reason: str, resume_at: int | None) -> None:
+        if self._pause_reason is not None:
+            reason = self._pause_reason
+        else:
+            self._pause_reason = reason
+            self._pause_resume_at = resume_at
+            self._pause_finished = False
         if self._pause_started is None:
             self._pause_started = self._ts()
         if reason in {item.value for item in PauseReason}:
@@ -571,6 +580,11 @@ class JobRunner:
                 LOGGER.info("pause %s raced with another pause", reason)
 
     async def _finish_pause(self, reason: str, resume_at: int | None) -> None:
+        if self._pause_finished:
+            return
+        self._pause_finished = True
+        reason = self._pause_reason or reason
+        resume_at = self._pause_resume_at if self._pause_reason is not None else resume_at
         now = self._ts()
         pause_started = self._pause_started or now
         if reason != PauseReason.model_unavailable.value:
@@ -590,20 +604,26 @@ class JobRunner:
         )
         self._publish("pause", {"reason": reason, "resume_at": resume_at})
 
-    async def _pause_with_pool(self, reason: str, resume_at: int | None) -> None:
+    async def _pause_with_pool(self, reason: str, resume_at: int | None, *, wait_for_phase: bool) -> None:
         if self._state() is JobState.paused:
             LOGGER.info("keeping existing pause while ignoring later pause %s", reason)
+            if wait_for_phase and self._phase_running and self._phase_done is not None:
+                await self._phase_done.wait()
             return
         await self._persist_pause(reason, resume_at)
         pool = self._phase_pool
         if pool is not None:
             await pool.pause(reason)
-            await pool.wait_for_drain()
-        await self._finish_pause(reason, resume_at)
+            if wait_for_phase and self._phase_running:
+                phase_done = self._phase_done
+                if phase_done is not None:
+                    await phase_done.wait()
+                return
+        await self._finish_pause(self._pause_reason or reason, resume_at)
 
     async def pause(self, reason: str) -> None:
         """Persist a pause, drain the active pool, then requeue in-flight work."""
-        await self._pause_with_pool(reason, None)
+        await self._pause_with_pool(reason, None, wait_for_phase=True)
 
     def _masking_needed(self, sample: bool) -> bool:
         rows = self.deps.store.rows(
@@ -681,6 +701,8 @@ class JobRunner:
     async def _run_phase_locked(self, sample: bool, canary: bool = False) -> None:
         """Run one store-driven phase with one pool and one termination rule."""
         self._phase_loop = asyncio.get_running_loop()
+        self._phase_running = True
+        self._phase_done = asyncio.Event()
         phase_event = self._get_phase_event()
         phase_event.set()
         callbacks = _Callbacks(self, sample, 1 if canary else None)
@@ -702,6 +724,11 @@ class JobRunner:
         try:
             while True:
                 await pool.run_until_idle()
+                if self._state() is JobState.paused:
+                    await self._finish_pause(
+                        self._pause_reason or PauseReason.error_storm.value,
+                        None,
+                    )
                 if self._masking_task is not None and self._masking_task.done():
                     masking_task = self._masking_task
                     self._masking_task = None
@@ -737,6 +764,9 @@ class JobRunner:
                     await asyncio.wait_for(phase_event.wait(), 1.0)
         finally:
             self._get_phase_event().set()
+            self._phase_running = False
+            if self._phase_done is not None:
+                self._phase_done.set()
             if not canary and self._phase_pool is pool and self._state() is not JobState.paused:
                 self._phase_pool = None
 
@@ -1005,6 +1035,9 @@ class JobRunner:
             self._attempts.clear()
             resume_job(self.deps.store, self.job_id)
             self._pause_started = None
+            self._pause_reason = None
+            self._pause_resume_at = None
+            self._pause_finished = False
             state = self._state()
         if state is JobState.sample_running:
             await self._run_phase(True, canary=True)

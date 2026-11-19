@@ -107,9 +107,6 @@ class DeterministicPool:
         if not self.paused:
             self.paused = True
 
-    async def wait_for_drain(self) -> None:
-        return
-
     async def run_until_idle(self) -> None:
         callbacks = self.callbacks
         while True:

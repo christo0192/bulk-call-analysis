@@ -26,7 +26,7 @@ from tests.coordinator.conftest import CoordinatorFixture
 
 
 def _run(awaitable: Any) -> Any:
-    return asyncio.run(awaitable)
+    return asyncio.run(asyncio.wait_for(awaitable, timeout=15))
 
 
 @dataclass
@@ -62,9 +62,6 @@ class ScriptedPool:
     async def pause(self, reason: str) -> None:
         del reason
         self.paused = True
-
-    async def wait_for_drain(self) -> None:
-        return
 
     async def run_until_idle(self) -> None:
         while True:
@@ -139,6 +136,7 @@ def test_pause_is_idempotent_and_late_result_is_ignored(coordinator: Coordinator
     callbacks = _Callbacks(coordinator.runner, sample=True)
     task = _run(callbacks.next_tasks(1))[0]
     _run(callbacks.on_started(task))
+    store_attempt_id = coordinator.runner._attempts[task.attempt_id]
 
     _run(callbacks.on_pause("sleep", None))
     _run(callbacks.on_pause("quota", None))
@@ -152,7 +150,7 @@ def test_pause_is_idempotent_and_late_result_is_ignored(coordinator: Coordinator
         == "queued"
     )
     assert coordinator.store.rows(
-        "SELECT counted, outcome FROM attempts WHERE job_id=? AND attempt_id=?", ("job", task.attempt_id)
+        "SELECT counted, outcome FROM attempts WHERE job_id=? AND attempt_id=?", ("job", store_attempt_id)
     ) == [(0, "interrupted")]
     assert (
         coordinator.store.rows(

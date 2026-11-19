@@ -126,6 +126,7 @@ class LunaPool:
         self._server_generation = 0
         self._pending_pause: tuple[str, int | None] | None = None
         self._next_tasks: asyncio.Task[list[LeadTask]] | None = None
+        self._interrupt_task: asyncio.Task[None] | None = None
 
     def set_concurrency(self, n: int) -> None:
         self.concurrency = max(1, n)
@@ -134,21 +135,20 @@ class LunaPool:
         """Stop dispatching and, for interrupting reasons, stop active turns."""
         if self._paused:
             if reason != "model_unavailable" and self._leads:
-                await self._interrupt_all(reason)
+                self._schedule_interrupt(reason)
             return
         self._paused = True
         self._dispatch_closed = True
         next_tasks = self._next_tasks
         if next_tasks is not None and next_tasks is not asyncio.current_task() and not next_tasks.done():
             next_tasks.cancel()
-            await asyncio.gather(next_tasks, return_exceptions=True)
         if reason != "model_unavailable":
-            await self._interrupt_all(reason)
+            self._schedule_interrupt(reason)
 
-    async def wait_for_drain(self) -> None:
-        """Wait until interrupted turns have finished unwinding."""
-        while self._leads:
-            await asyncio.sleep(0.01)
+    def _schedule_interrupt(self, reason: str) -> None:
+        task = self._interrupt_task
+        if task is None or task.done():
+            self._interrupt_task = asyncio.create_task(self._interrupt_all(reason))
 
     async def run_until_idle(self) -> None:
         loop = asyncio.get_running_loop()
