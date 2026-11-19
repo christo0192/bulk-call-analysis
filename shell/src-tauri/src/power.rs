@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::sync::Mutex;
 use thiserror::Error;
 
@@ -19,6 +17,18 @@ pub trait PowerOs: Send + Sync {
     fn hold(&self) -> Result<(), PowerError>;
     fn release(&self) -> Result<(), PowerError>;
     fn status(&self) -> PowerStatus;
+}
+
+impl<T: PowerOs + ?Sized> PowerOs for Box<T> {
+    fn hold(&self) -> Result<(), PowerError> {
+        (**self).hold()
+    }
+    fn release(&self) -> Result<(), PowerError> {
+        (**self).release()
+    }
+    fn status(&self) -> PowerStatus {
+        (**self).status()
+    }
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -153,6 +163,19 @@ fn mac_status(kind: Option<&str>, percent: Option<u8>) -> PowerStatus {
 }
 
 #[cfg(target_os = "macos")]
+fn mac_power_source_status(
+    kind: Option<&str>,
+    current: Option<i32>,
+    maximum: Option<i32>,
+) -> PowerStatus {
+    let percent = current
+        .zip(maximum)
+        .filter(|(_, maximum)| *maximum > 0)
+        .map(|(current, maximum)| (current * 100 / maximum).clamp(0, 100) as u8);
+    mac_status(kind, percent)
+}
+
+#[cfg(target_os = "macos")]
 impl PowerOs for PlatformPower {
     fn hold(&self) -> Result<(), PowerError> {
         use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
@@ -233,6 +256,9 @@ impl<P: PowerOs> KeepAwake<P> {
         }
         Ok(())
     }
+    pub fn status(&self) -> PowerStatus {
+        self.power.status()
+    }
 }
 impl<P: PowerOs> Drop for KeepAwake<P> {
     fn drop(&mut self) {
@@ -244,18 +270,18 @@ impl<P: PowerOs> Drop for KeepAwake<P> {
     }
 }
 
-pub fn platform() -> KeepAwake<impl PowerOs> {
+pub fn platform() -> KeepAwake<Box<dyn PowerOs>> {
     #[cfg(target_os = "macos")]
-    return KeepAwake::new(PlatformPower {
+    return KeepAwake::new(Box::new(PlatformPower {
         assertion: Mutex::new(None),
         app_nap_activity: Mutex::new(None),
-    });
+    }));
     #[cfg(windows)]
-    return KeepAwake::new(PlatformPower {
+    return KeepAwake::new(Box::new(PlatformPower {
         request: Mutex::new(None),
-    });
+    }));
     #[cfg(not(any(windows, target_os = "macos")))]
-    KeepAwake::new(PlatformPower)
+    KeepAwake::new(Box::new(PlatformPower))
 }
 
 #[cfg(target_os = "macos")]
@@ -274,8 +300,11 @@ unsafe extern "C" {
     fn IOPMAssertionRelease(id: u32) -> i32;
     fn IOPSCopyPowerSourcesInfo() -> CFTypeRef;
     fn IOPSGetProvidingPowerSourceType(info: CFTypeRef) -> CFStringRef;
-    fn IOPSCopyPowerSourcesList(info: CFTypeRef, count: *mut i64) -> *const CFTypeRef;
+    fn IOPSCopyPowerSourcesList(info: CFTypeRef) -> CFTypeRef;
     fn IOPSGetPowerSourceDescription(info: CFTypeRef, source: CFTypeRef) -> CFTypeRef;
+    static kIOPSCurrentCapacityKey: CFStringRef;
+    static kIOPSMaxCapacityKey: CFStringRef;
+    static kIOPSPowerSourceStateKey: CFStringRef;
 }
 #[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -294,6 +323,8 @@ unsafe extern "C" {
     ) -> bool;
     fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
     fn CFNumberGetValue(number: CFTypeRef, type_code: i32, value: *mut std::ffi::c_void) -> bool;
+    fn CFArrayGetCount(array: CFTypeRef) -> isize;
+    fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
 }
 #[cfg(target_os = "macos")]
 fn cf_string(value: &str) -> Result<CFStringRef, PowerError> {
@@ -316,53 +347,67 @@ fn mac_power_status() -> Result<PowerStatus, PowerError> {
             percent: None,
         });
     }
-    let result = (|| {
+    let result = {
         let kind_ref = unsafe { IOPSGetProvidingPowerSourceType(info) };
         let kind = if kind_ref.is_null() {
             None
         } else {
             let mut buf = [0i8; 64];
-            unsafe {
-                CFStringGetCString(kind_ref, buf.as_mut_ptr(), buf.len() as i64, 0x0800_0100);
-            }
-            Some(
+            let copied = unsafe {
+                CFStringGetCString(kind_ref, buf.as_mut_ptr(), buf.len() as i64, 0x0800_0100)
+            };
+            copied.then(|| {
                 unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
                     .to_string_lossy()
-                    .into_owned(),
-            )
+                    .into_owned()
+            })
         };
-        let key = cf_string("Current Capacity")?;
-        let max_key = cf_string("Max Capacity")?;
-        let mut count = 0;
-        let list = unsafe { IOPSCopyPowerSourcesList(info, &mut count) };
-        let percent = if count > 0 && !list.is_null() {
-            let desc = unsafe { IOPSGetPowerSourceDescription(info, *list) };
-            let mut current = 0i32;
-            let mut maximum = 0i32;
-            let ok = unsafe {
-                CFNumberGetValue(
-                    CFDictionaryGetValue(desc, key),
-                    3,
-                    &mut current as *mut _ as _,
-                ) && CFNumberGetValue(
-                    CFDictionaryGetValue(desc, max_key),
-                    3,
-                    &mut maximum as *mut _ as _,
-                )
-            };
-            (ok && maximum > 0).then(|| (current * 100 / maximum).clamp(0, 100) as u8)
-        } else {
-            None
-        };
-        unsafe {
-            CFRelease(key);
-            CFRelease(max_key);
-            if !list.is_null() {
-                CFRelease(list as _);
+        let list = unsafe { IOPSCopyPowerSourcesList(info) };
+        let power_status = if !list.is_null() && unsafe { CFArrayGetCount(list) } > 0 {
+            let source = unsafe { CFArrayGetValueAtIndex(list, 0) };
+            let desc = unsafe { IOPSGetPowerSourceDescription(info, source) };
+            if desc.is_null() {
+                unsafe { CFRelease(list) };
+                mac_status(kind.as_deref(), None)
+            } else {
+                let state_ref = unsafe { CFDictionaryGetValue(desc, kIOPSPowerSourceStateKey) };
+                let state = if state_ref.is_null() {
+                    None
+                } else {
+                    let mut buf = [0i8; 64];
+                    let copied = unsafe {
+                        CFStringGetCString(
+                            state_ref,
+                            buf.as_mut_ptr(),
+                            buf.len() as i64,
+                            0x0800_0100,
+                        )
+                    };
+                    copied.then(|| {
+                        unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                };
+                let mut current = 0i32;
+                let mut maximum = 0i32;
+                let current_ref = unsafe { CFDictionaryGetValue(desc, kIOPSCurrentCapacityKey) };
+                let maximum_ref = unsafe { CFDictionaryGetValue(desc, kIOPSMaxCapacityKey) };
+                let current = (!current_ref.is_null()
+                    && unsafe { CFNumberGetValue(current_ref, 3, &mut current as *mut _ as _) })
+                .then_some(current);
+                let maximum = (!maximum_ref.is_null()
+                    && unsafe { CFNumberGetValue(maximum_ref, 3, &mut maximum as *mut _ as _) })
+                .then_some(maximum);
+                let result = mac_power_source_status(state.as_deref(), current, maximum);
+                unsafe { CFRelease(list) };
+                result
             }
-        }
-        Ok(mac_status(kind.as_deref(), percent))
-    })();
+        } else {
+            mac_status(kind.as_deref(), None)
+        };
+        Ok(power_status)
+    };
     unsafe {
         CFRelease(info);
     }
@@ -438,6 +483,13 @@ mod tests {
             PowerStatus {
                 on_ac: Some(true),
                 percent: None
+            }
+        );
+        assert_eq!(
+            mac_power_source_status(Some("Battery Power"), Some(10), Some(40)),
+            PowerStatus {
+                on_ac: Some(false),
+                percent: Some(25)
             }
         );
         assert_eq!(

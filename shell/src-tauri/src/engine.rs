@@ -1,3 +1,4 @@
+use crate::power::{self, KeepAwake, PowerStatus};
 use crate::procguard;
 use crate::rpc::{self, Client, RpcError};
 use log::{error, warn};
@@ -8,7 +9,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
@@ -16,17 +17,28 @@ use tokio::{
     time::sleep,
 };
 
-pub struct Engine {
-    inner: Arc<Inner>,
+pub struct Engine<R: Runtime = tauri::Wry> {
+    inner: Arc<Inner<R>>,
 }
-struct Inner {
-    app: AppHandle,
+
+trait HealthKill: Send + Sync {
+    fn terminate(&self);
+}
+
+impl HealthKill for procguard::Guard {
+    fn terminate(&self) {
+        procguard::Guard::terminate(self);
+    }
+}
+struct Inner<R: Runtime> {
+    app: Option<AppHandle<R>>,
     rpc: Mutex<Option<Arc<Client<tokio::process::ChildStdin>>>>,
     status: Mutex<String>,
     restarts: Mutex<RestartTracker>,
     active_pid: AtomicU32,
     shutting_down: AtomicBool,
     guard: Mutex<Option<Arc<procguard::Guard>>>,
+    power: KeepAwake<Box<dyn power::PowerOs>>,
 }
 
 #[derive(Debug)]
@@ -61,7 +73,7 @@ impl RestartTracker {
     }
 }
 
-impl Clone for Engine {
+impl<R: Runtime> Clone for Engine<R> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -69,24 +81,45 @@ impl Clone for Engine {
     }
 }
 
-impl Engine {
-    pub fn new(app: AppHandle) -> Self {
+impl<R: Runtime> Engine<R> {
+    pub fn new(app: AppHandle<R>) -> Self {
         Self {
             inner: Arc::new(Inner {
-                app,
+                app: Some(app),
                 rpc: Mutex::new(None),
                 status: Mutex::new("starting".into()),
                 restarts: Mutex::new(RestartTracker::new()),
                 active_pid: AtomicU32::new(0),
                 shutting_down: AtomicBool::new(false),
                 guard: Mutex::new(None),
+                power: power::platform(),
+            }),
+        }
+    }
+    #[doc(hidden)]
+    pub fn new_without_app() -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                app: None,
+                rpc: Mutex::new(None),
+                status: Mutex::new("starting".into()),
+                restarts: Mutex::new(RestartTracker::new()),
+                active_pid: AtomicU32::new(0),
+                shutting_down: AtomicBool::new(false),
+                guard: Mutex::new(None),
+                power: power::platform(),
             }),
         }
     }
     pub fn start(&self) {
         let this = self.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
+            this.set_status("starting", None).await;
             this.supervise().await;
+        });
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.power_status_loop().await;
         });
     }
     async fn supervise(&self) {
@@ -101,7 +134,7 @@ impl Engine {
                         break;
                     }
                     error!("engine stopped: {e}");
-                    *self.inner.status.lock().await = "error".into();
+                    self.set_status("error", Some(short_reason(&e))).await;
                     let now = Instant::now();
                     let mut tracker = self.inner.restarts.lock().await;
                     if !tracker.allow(now) {
@@ -113,13 +146,15 @@ impl Engine {
                     }
                     let wait = tracker.delay();
                     drop(tracker);
+                    self.set_status("restarting", None).await;
                     sleep(wait).await;
                 }
             }
         }
+        self.set_status("stopped", None).await;
     }
     async fn spawn_once(&self) -> Result<(), RpcError> {
-        let (program, args) = command_line(&self.inner.app);
+        let (program, args) = command_line(self.inner.app.as_ref());
         let mut command = configured_command(program, args);
         let mut child = command
             .stdout(std::process::Stdio::piped())
@@ -172,57 +207,54 @@ impl Engine {
                     }
                 }
                 let line = String::from_utf8_lossy(&bytes);
-                if let Ok(path) = app.path().app_log_dir() {
-                    let _ = std::fs::create_dir_all(&path);
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(path.join("engine.log"))
-                        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+                if let Some(app) = &app {
+                    if let Ok(path) = app.path().app_log_dir() {
+                        let _ = std::fs::create_dir_all(&path);
+                        let _ = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path.join("engine.log"))
+                            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+                    }
                 }
             }
         });
-        let ping = client.clone();
         let ping_engine = self.clone();
-        tokio::spawn(async move {
-            let mut failures = 0;
-            loop {
-                if ping
-                    .request("health/ping", json!({}), Duration::from_secs(10))
-                    .await
-                    .is_ok()
-                {
-                    failures = 0;
-                    if *ping_engine.inner.status.lock().await != "ready" {
-                        *ping_engine.inner.status.lock().await = "ready".into();
-                        ping_engine.emit("engine/status", json!({"status":"ready"}));
-                    }
-                } else {
-                    failures += 1;
-                    if failures >= 3 {
-                        procguard::terminate_process(pid);
-                        break;
-                    }
+        let ping_guard: Arc<dyn HealthKill> = guard.clone();
+        let ping_task = tokio::spawn(health_ping(client.clone(), ping_guard, move || {
+            let ping_engine = ping_engine.clone();
+            async move {
+                if *ping_engine.inner.status.lock().await != "ready" {
+                    ping_engine.set_status("ready", None).await;
                 }
-                sleep(Duration::from_secs(30)).await;
             }
-        });
+        }));
         while let Some(notification) = rx.recv().await {
-            if notification.get("method").and_then(Value::as_str) == Some("job/progress") {
-                if let Some(tray) = self.inner.app.tray_by_id("main") {
-                    let params = notification.get("params").cloned().unwrap_or_default();
-                    let done = params.get("done").and_then(Value::as_u64).unwrap_or(0);
-                    let total = params.get("total").and_then(Value::as_u64).unwrap_or(0);
-                    let remaining = params
-                        .get("remaining")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    let _ =
-                        tray.set_tooltip(Some(format_tooltip(done, total, remaining.to_owned())));
+            self.update_power_for_notification(&notification).await;
+            if notification.get("method").and_then(Value::as_str) == Some("job/progress")
+                && !self.inner.shutting_down.load(Ordering::Acquire)
+            {
+                if let Some(app) = &self.inner.app {
+                    if let Some(tray) = app.tray_by_id("main") {
+                        let params = notification.get("params").cloned().unwrap_or_default();
+                        let done = params.get("done").and_then(Value::as_u64).unwrap_or(0);
+                        let total = params.get("total").and_then(Value::as_u64).unwrap_or(0);
+                        let remaining = params
+                            .get("remaining")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let _ = tray.set_tooltip(Some(format_tooltip(
+                            done,
+                            total,
+                            remaining.to_owned(),
+                        )));
+                    }
                 }
             }
             self.emit("engine-event", notification);
         }
+        ping_task.abort();
+        let _ = ping_task.await;
         client.close().await;
         #[cfg(unix)]
         procguard::terminate_group(child.id().unwrap_or_default());
@@ -232,6 +264,7 @@ impl Engine {
         self.inner.active_pid.store(0, Ordering::Release);
         *self.inner.guard.lock().await = None;
         *self.inner.rpc.lock().await = None;
+        let _ = self.inner.power.release();
         Err(RpcError::Closed)
     }
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
@@ -242,7 +275,13 @@ impl Engine {
             .await
             .clone()
             .ok_or(RpcError::Closed)?;
-        rpc.request(method, params, Duration::from_secs(30)).await
+        let result = rpc.request(method, params, Duration::from_secs(30)).await;
+        if matches!(result, Err(RpcError::Timeout | RpcError::Io(_))) {
+            if let Some(guard) = self.inner.guard.lock().await.clone() {
+                let _ = tokio::task::spawn_blocking(move || guard.terminate()).await;
+            }
+        }
+        result
     }
     pub async fn status(&self) -> String {
         self.inner.status.lock().await.clone()
@@ -257,16 +296,25 @@ impl Engine {
             .ok_or(RpcError::Closed)?;
         rpc.notify(method, params).await
     }
+    pub async fn send_power_status(&self) -> Result<(), RpcError> {
+        let status = self.power_status();
+        self.notify(
+            "os/powerStatus",
+            json!({"onAc": status.on_ac, "percent": status.percent}),
+        )
+        .await
+    }
     pub async fn shutdown(&self) {
         if self.inner.shutting_down.swap(true, Ordering::AcqRel) {
             return;
         }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         if let Some(rpc) = self.inner.rpc.lock().await.clone() {
-            let _ = rpc
-                .request("shutdown", json!({}), Duration::from_secs(10))
-                .await;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let _ = rpc.request("shutdown", json!({}), remaining).await;
         }
-        let stopped = tokio::time::timeout(Duration::from_secs(10), async {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let stopped = tokio::time::timeout(remaining, async {
             while self.inner.active_pid.load(Ordering::Acquire) != 0 {
                 sleep(Duration::from_millis(25)).await;
             }
@@ -278,82 +326,180 @@ impl Engine {
                 let _ = tokio::task::spawn_blocking(move || guard.terminate()).await;
             }
         }
+        let _ = self.inner.power.release();
+        self.set_status("stopped", None).await;
     }
-    fn emit(&self, event: &str, payload: Value) {
-        let _ = self.inner.app.emit(event, payload);
+    async fn set_status(&self, status: &str, reason: Option<String>) {
+        let mut current = self.inner.status.lock().await;
+        if *current == status && reason.is_none() {
+            return;
+        }
+        *current = status.into();
+        let mut payload = json!({"status": status});
+        if let Some(reason) = reason {
+            payload["reason"] = json!(reason);
+        }
+        self.emit("engine/status", payload);
     }
-}
-
-#[doc(hidden)]
-pub struct TestEngine {
-    client: Arc<Client<tokio::process::ChildStdin>>,
-    child: tokio::process::Child,
-    guard: Arc<procguard::Guard>,
-    reader: tokio::task::JoinHandle<()>,
-}
-
-#[doc(hidden)]
-pub async fn spawn_for_test(program: String, args: Vec<String>) -> Result<TestEngine, RpcError> {
-    let mut child = configured_command(program, args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .stdin(std::process::Stdio::piped())
-        .spawn()?;
-    let pid = child.id().ok_or(RpcError::Closed)?;
-    let guard = Arc::new(procguard::attach(pid)?);
-    let stdout = child.stdout.take().ok_or(RpcError::Closed)?;
-    let stdin = child.stdin.take().ok_or(RpcError::Closed)?;
-    let client = Client::new(stdin);
-    let reader_client = client.clone();
-    let reader = tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout);
-        let mut line = Vec::new();
-        let notifications = mpsc::channel(1).0;
-        while let Ok(size) = reader.read_until(b'\n', &mut line).await {
-            if size == 0 {
+    async fn power_status_loop(&self) {
+        loop {
+            if self.inner.shutting_down.load(Ordering::Acquire) {
                 break;
             }
-            if let Ok(value) = rpc::decode(&line) {
-                reader_client.dispatch(value, &notifications).await;
+            if let Err(error) = self.send_power_status().await {
+                log::debug!("could not send power status: {error}");
             }
-            line.clear();
+            sleep(Duration::from_secs(30)).await;
         }
-        reader_client.close().await;
-    });
-    Ok(TestEngine {
-        client,
-        child,
-        guard,
-        reader,
-    })
+    }
+    async fn update_power_for_notification(&self, notification: &Value) {
+        match job_event_requires_keep_awake(notification) {
+            Some(true) => {
+                if let Err(error) = self.inner.power.hold() {
+                    log::warn!("failed to hold system awake: {error}");
+                }
+            }
+            Some(false) => {
+                if let Err(error) = self.inner.power.release() {
+                    log::warn!("failed to release system awake hold: {error}");
+                }
+            }
+            None => {}
+        }
+    }
+    fn power_status(&self) -> PowerStatus {
+        self.inner.power.status()
+    }
+    fn emit(&self, event: &str, payload: Value) {
+        if let Some(app) = &self.inner.app {
+            let _ = app.emit(event, payload);
+        }
+    }
 }
 
-impl TestEngine {
-    pub fn pid(&self) -> u32 {
-        self.child.id().unwrap_or_default()
-    }
+fn short_reason(error: &RpcError) -> String {
+    let reason = error.to_string();
+    reason.chars().take(120).collect()
+}
 
-    pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-        self.client
-            .request(method, params, Duration::from_secs(20))
-            .await
-    }
+pub fn is_running_job_state(state: &str) -> bool {
+    matches!(state, "starting" | "running" | "active" | "in_progress")
+}
 
-    pub async fn shutdown(mut self) {
-        let _ = self
-            .client
-            .request("shutdown", json!({}), Duration::from_secs(20))
-            .await;
-        if tokio::time::timeout(Duration::from_secs(10), self.child.wait())
+pub fn job_event_requires_keep_awake(notification: &Value) -> Option<bool> {
+    match notification.get("method").and_then(Value::as_str) {
+        Some("job/progress") => Some(true),
+        Some("job/state" | "job/status") => notification
+            .get("params")
+            .and_then(|params| params.get("status").or_else(|| params.get("state")))
+            .and_then(Value::as_str)
+            .map(is_running_job_state),
+        _ => None,
+    }
+}
+
+async fn health_ping<W, F, Fut>(
+    client: Arc<Client<W>>,
+    target: Arc<dyn HealthKill>,
+    mut on_success: F,
+) where
+    W: tokio::io::AsyncWrite + Unpin + Send,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut failures = 0;
+    loop {
+        match client
+            .request("health/ping", json!({}), Duration::from_secs(10))
             .await
-            .is_err()
         {
-            self.guard.terminate();
-            let _ = self.child.wait().await;
-        } else {
-            self.guard.terminate();
+            Ok(_) => {
+                failures = 0;
+                on_success().await;
+            }
+            Err(RpcError::Closed) => break,
+            Err(_) => {
+                failures += 1;
+                if failures >= 3 {
+                    target.terminate();
+                    break;
+                }
+            }
         }
-        let _ = self.reader.await;
+        sleep(Duration::from_secs(30)).await;
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct FakeSpawner {
+        kills: AtomicUsize,
+    }
+
+    impl HealthKill for FakeSpawner {
+        fn terminate(&self) {
+            self.kills.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn health_ping_does_not_kill_after_instance_ends() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (writer, _reader) = tokio::io::duplex(1024);
+            let client = Client::new(writer);
+            let target = Arc::new(FakeSpawner {
+                kills: AtomicUsize::new(0),
+            });
+            client.close().await;
+            health_ping(client, target.clone(), || async {}).await;
+            assert_eq!(target.kills.load(Ordering::Relaxed), 0);
+        });
+    }
+
+    #[test]
+    fn job_events_hold_and_release_power() {
+        assert_eq!(
+            job_event_requires_keep_awake(&json!({"method":"job/progress"})),
+            Some(true)
+        );
+        assert_eq!(
+            job_event_requires_keep_awake(
+                &json!({"method":"job/state","params":{"status":"running"}})
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            job_event_requires_keep_awake(
+                &json!({"method":"job/state","params":{"status":"done"}})
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            job_event_requires_keep_awake(&json!({"method":"other"})),
+            None
+        );
+    }
+
+    #[test]
+    fn status_transitions_update_engine_state() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let engine = Engine::<tauri::Wry>::new_without_app();
+            engine.set_status("starting", None).await;
+            assert_eq!(engine.status().await, "starting");
+            engine.set_status("ready", None).await;
+            assert_eq!(engine.status().await, "ready");
+            engine.set_status("error", Some("closed".into())).await;
+            assert_eq!(engine.status().await, "error");
+            engine.set_status("restarting", None).await;
+            assert_eq!(engine.status().await, "restarting");
+            engine.set_status("stopped", None).await;
+            assert_eq!(engine.status().await, "stopped");
+        });
     }
 }
 
@@ -368,7 +514,7 @@ fn configured_command(program: String, args: Vec<String>) -> Command {
     command
 }
 
-pub fn command_line(app: &AppHandle) -> (String, Vec<String>) {
+pub fn command_line<R: Runtime>(app: Option<&AppHandle<R>>) -> (String, Vec<String>) {
     if let Ok(program) = std::env::var("BCA_ENGINE_PROGRAM") {
         let args = std::env::var("BCA_ENGINE_ARGS")
             .ok()
@@ -377,6 +523,7 @@ pub fn command_line(app: &AppHandle) -> (String, Vec<String>) {
         return (program, args);
     }
     let root = app
+        .expect("an app handle is required when BCA_ENGINE_PROGRAM is unset")
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."));

@@ -84,7 +84,9 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
                 .await
                 .map_err(RpcError::from)
         };
-        if let Err(error) = timeout(wait, write).await.unwrap_or(Err(RpcError::Timeout)) {
+        let write_result = timeout(wait, write).await.unwrap_or(Err(RpcError::Timeout));
+        if let Err(error) = write_result {
+            self.close().await;
             self.pending.lock().await.remove(&id);
             return Err(error);
         }
@@ -126,7 +128,20 @@ impl<W: AsyncWrite + Unpin + Send> Client<W> {
             return;
         };
         if object.get("method").is_some() {
-            let _ = notifications.send(message).await;
+            if let Some(id) = object.get("id") {
+                let response = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {"code": -32601, "message": "Method not found"}
+                });
+                if let Ok(bytes) = encode(&response) {
+                    if self.writer.lock().await.write_all(&bytes).await.is_err() {
+                        self.close().await;
+                    }
+                }
+            } else {
+                let _ = notifications.send(message).await;
+            }
         } else if let Some(id) = object.get("id").and_then(Value::as_u64) {
             if let Some(sender) = self.pending.lock().await.remove(&id) {
                 let result = if let Some(error) = object.get("error") {
@@ -266,16 +281,43 @@ mod tests {
     }
 
     #[test]
-    fn request_with_id_and_method_is_not_response() {
+    fn request_with_id_and_method_gets_method_not_found_reply() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let (client_io, _server_io) = tokio::io::duplex(1024);
+            let (client_io, server_io) = tokio::io::duplex(1024);
             let client = Client::new(client_io);
-            let (notifications, mut received) = mpsc::channel(1);
+            let (notifications, _) = mpsc::channel(1);
             client
                 .dispatch(json!({"id": 1, "method": "callback"}), &notifications)
                 .await;
-            assert_eq!(received.recv().await.unwrap()["method"], "callback");
+            let mut server = BufReader::new(server_io);
+            let mut line = String::new();
+            server.read_line(&mut line).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).unwrap(),
+                json!({
+                    "jsonrpc":"2.0","id":1,
+                    "error":{"code":-32601,"message":"Method not found"}
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn timed_out_write_breaks_connection() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, _server_io) = tokio::io::duplex(1);
+            let client = Client::new(client_io);
+            let result = client
+                .request(
+                    "large",
+                    json!({"data": "x".repeat(4096)}),
+                    Duration::from_millis(1),
+                )
+                .await;
+            assert!(matches!(result, Err(RpcError::Timeout)));
+            assert!(client.closed.load(Ordering::Acquire));
         });
     }
 }

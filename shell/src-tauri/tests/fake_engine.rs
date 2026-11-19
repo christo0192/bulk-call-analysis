@@ -1,7 +1,6 @@
-use bulk_call_analysis_lib::spawn_for_test;
+use bulk_call_analysis_lib::Engine;
 use serde_json::json;
-use std::process::Command;
-use std::time::Duration;
+use std::{fs, process::Command, time::Duration};
 
 #[cfg(unix)]
 fn process_exists(pid: u32) -> bool {
@@ -17,7 +16,7 @@ fn process_exists(pid: u32) -> bool {
 }
 
 #[test]
-fn real_child_rpc_round_trip_and_shutdown() {
+fn real_engine_supervises_restarts_and_kills_process_tree() {
     let python = ["python", "python3"].into_iter().find(|candidate| {
         Command::new(candidate)
             .arg("--version")
@@ -30,36 +29,65 @@ fn real_child_rpc_round_trip_and_shutdown() {
         }
         return;
     };
+    let marker = std::env::temp_dir().join(format!(
+        "bca-engine-test-{}-{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let script = r#"import json, os, subprocess, sys
-grandchild = None
+marker = sys.argv[1]
+count = 0
 for line in sys.stdin:
     message = json.loads(line)
-    if message.get('method') == 'health/ping' and grandchild is None:
-        grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
-    print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'method':message['method'],'engine':os.getpid(),'grandchild':grandchild.pid}}), flush=True)
-    if message.get('method') == 'shutdown':
+    if message.get('method') == 'health/ping':
+        count += 1
+        grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(marker, 'a', encoding='utf-8') as output:
+            output.write(f'{os.getpid()} {grandchild.pid}\n')
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'ok':True}}), flush=True)
+        if count == 1:
+            break
+    elif message.get('method') == 'shutdown':
         break
 "#;
+    let args = json!(vec!["-u", "-c", script, marker.to_string_lossy().as_ref()]).to_string();
+    std::env::set_var("BCA_ENGINE_PROGRAM", python);
+    std::env::set_var("BCA_ENGINE_ARGS", args);
+
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    let engine = Engine::<tauri::Wry>::new_without_app();
     runtime.block_on(async {
-        let engine = spawn_for_test(
-            python.to_owned(),
-            vec!["-u".into(), "-c".into(), script.into()],
-        )
-        .await
-        .unwrap();
-        let response = engine.call("health/ping", json!({})).await.unwrap();
-        assert_eq!(response["method"], "health/ping");
-        let engine_pid = engine.pid();
-        let grandchild = response["grandchild"].as_u64().unwrap() as u32;
+        engine.start();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let lines = fs::read_to_string(&marker).unwrap_or_default();
+            if lines.lines().count() >= 2 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "engine did not restart"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let pids: Vec<u32> = fs::read_to_string(&marker)
+            .unwrap()
+            .lines()
+            .flat_map(|line| line.split_whitespace())
+            .map(|pid| pid.parse().unwrap())
+            .collect();
         engine.shutdown().await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while (process_exists(engine_pid) || process_exists(grandchild))
-            && tokio::time::Instant::now() < deadline
+        while pids.iter().any(|pid| process_exists(*pid)) && tokio::time::Instant::now() < deadline
         {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        assert!(!process_exists(engine_pid));
-        assert!(!process_exists(grandchild));
+        assert!(pids.iter().all(|pid| !process_exists(*pid)));
     });
+    let _ = fs::remove_file(marker);
+    std::env::remove_var("BCA_ENGINE_PROGRAM");
+    std::env::remove_var("BCA_ENGINE_ARGS");
 }

@@ -6,10 +6,13 @@ const SLEEP_GAP: Duration = Duration::from_secs(2);
 
 #[cfg(windows)]
 pub fn power_message_hint(message: u32) -> Option<&'static str> {
-    use windows::Win32::UI::WindowsAndMessaging::{PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND,
+    };
     match message {
         PBT_APMSUSPEND => Some("os/suspendHint"),
         PBT_APMRESUMEAUTOMATIC => Some("os/resumeHint"),
+        PBT_APMPOWERSTATUSCHANGE => Some("os/powerStatusChanged"),
         _ => None,
     }
 }
@@ -21,6 +24,19 @@ pub fn gap_hints(previous: SystemTime, now: SystemTime, threshold: Duration) -> 
     }
 }
 
+pub fn gap_hints_unless_os_hint(
+    previous: SystemTime,
+    now: SystemTime,
+    threshold: Duration,
+    os_hint_seen: bool,
+) -> Vec<&'static str> {
+    if os_hint_seen {
+        Vec::new()
+    } else {
+        gap_hints(previous, now, threshold)
+    }
+}
+
 pub fn start(engine: Engine) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     #[cfg(windows)]
@@ -29,15 +45,25 @@ pub fn start(engine: Engine) {
     start_macos(tx.clone());
     tauri::async_runtime::spawn(async move {
         let mut previous = SystemTime::now();
+        let mut os_hint_seen = false;
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let now = SystemTime::now();
-            for method in gap_hints(previous, now, SLEEP_GAP) {
-                let _ = engine.notify(method, json!({})).await;
-            }
-            previous = now;
-            while let Ok(method) = rx.try_recv() {
-                let _ = engine.notify(method, json!({})).await;
+            match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+                Ok(Some(method)) => {
+                    if method == "os/powerStatusChanged" {
+                        let _ = engine.send_power_status().await;
+                    } else {
+                        os_hint_seen = true;
+                        let _ = engine.notify(method, json!({})).await;
+                    }
+                }
+                Ok(None) | Err(_) => {
+                    let now = SystemTime::now();
+                    for method in gap_hints_unless_os_hint(previous, now, SLEEP_GAP, os_hint_seen) {
+                        let _ = engine.notify(method, json!({})).await;
+                    }
+                    previous = now;
+                    os_hint_seen = false;
+                }
             }
         }
     });
@@ -69,6 +95,7 @@ fn start_windows(sender: tokio::sync::mpsc::UnboundedSender<&'static str>) {
         let _ = SENDER.set(sender);
         unsafe {
             use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+            use windows::Win32::System::Power::RegisterSuspendResumeNotification;
             let instance = GetModuleHandleW(None).unwrap_or_default();
             let class_name = w!("BcaPowerMessageWindow");
             let class = WNDCLASSEXW {
@@ -79,25 +106,45 @@ fn start_windows(sender: tokio::sync::mpsc::UnboundedSender<&'static str>) {
                 ..Default::default()
             };
             RegisterClassExW(&class);
-            let _window = CreateWindowExW(
+            let window = match CreateWindowExW(
                 Default::default(),
                 class_name,
                 w!(""),
-                Default::default(),
+                WS_POPUP,
                 0,
                 0,
                 0,
                 0,
-                HWND_MESSAGE,
+                None,
                 None,
                 instance,
                 None,
-            );
+            ) {
+                Ok(window) => window,
+                Err(error) => {
+                    log::error!("failed to create suspend/resume window: {error}");
+                    return;
+                }
+            };
+            let registration = match RegisterSuspendResumeNotification(
+                windows::Win32::Foundation::HANDLE(window.0),
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            ) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    log::error!("failed to register suspend/resume notifications: {error}");
+                    let _ = DestroyWindow(window);
+                    return;
+                }
+            };
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+            let _ =
+                windows::Win32::System::Power::UnregisterSuspendResumeNotification(registration);
+            let _ = DestroyWindow(window);
         }
     });
 }
@@ -160,16 +207,29 @@ mod tests {
             Duration::from_secs(2)
         )
         .is_empty());
+        assert!(gap_hints_unless_os_hint(
+            start,
+            start + Duration::from_secs(3),
+            Duration::from_secs(2),
+            true
+        )
+        .is_empty());
     }
     #[cfg(windows)]
     #[test]
     fn power_messages_map_to_engine_hints() {
-        use windows::Win32::UI::WindowsAndMessaging::{PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND,
+        };
         assert_eq!(power_message_hint(PBT_APMSUSPEND), Some("os/suspendHint"));
         assert_eq!(
             power_message_hint(PBT_APMRESUMEAUTOMATIC),
             Some("os/resumeHint")
         );
         assert_eq!(power_message_hint(0), None);
+        assert_eq!(
+            power_message_hint(PBT_APMPOWERSTATUSCHANGE),
+            Some("os/powerStatusChanged")
+        );
     }
 }

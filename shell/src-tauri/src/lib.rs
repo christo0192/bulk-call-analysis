@@ -4,14 +4,33 @@ mod procguard;
 pub mod rpc;
 mod sleepwatch;
 mod tray;
-use engine::Engine;
 use serde_json::Value;
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+    sync::Mutex,
+};
 use tauri::RunEvent;
 use tauri::{Manager, State};
 
+#[derive(Debug, PartialEq, Eq)]
+enum ExitAction {
+    KeepRunning,
+    Shutdown,
+}
+
+fn exit_action(code: Option<i32>) -> ExitAction {
+    if code.is_some() {
+        ExitAction::Shutdown
+    } else {
+        ExitAction::KeepRunning
+    }
+}
+
 #[doc(hidden)]
-pub use engine::{spawn_for_test, TestEngine};
+pub use engine::{is_running_job_state, job_event_requires_keep_awake, Engine};
+
+static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 
 struct AppLogger(Mutex<PathBuf>);
 impl log::Log for AppLogger {
@@ -89,19 +108,51 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building desktop application")
         .run(|app, event| match event {
-            RunEvent::ExitRequested { api, code, .. } => {
-                if code.is_none() {
-                    api.prevent_exit();
+            RunEvent::ExitRequested { api, code, .. } => match exit_action(code) {
+                ExitAction::KeepRunning => api.prevent_exit(),
+                ExitAction::Shutdown => {
+                    if start_shutdown(app.clone()) {
+                        api.prevent_exit();
+                        hide_windows(app);
+                    }
                 }
-                if let Some(engine) = app.try_state::<Engine>() {
-                    tauri::async_runtime::block_on(engine.shutdown());
-                }
-            }
+            },
             RunEvent::Exit => {
-                if let Some(engine) = app.try_state::<Engine>() {
-                    tauri::async_runtime::block_on(engine.shutdown());
-                }
+                hide_windows(app);
+                let _ = start_shutdown(app.clone());
             }
             _ => {}
         })
+}
+
+fn hide_windows(app: &tauri::AppHandle) {
+    for window in app.webview_windows().values() {
+        let _ = window.hide();
+    }
+}
+
+fn start_shutdown(app: tauri::AppHandle) -> bool {
+    if SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    if let Some(engine) = app.try_state::<Engine>() {
+        let engine = engine.inner().clone();
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            engine.shutdown().await;
+            app.exit(0);
+        });
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exit_action, ExitAction};
+
+    #[test]
+    fn closing_last_window_keeps_engine_running() {
+        assert_eq!(exit_action(None), ExitAction::KeepRunning);
+        assert_eq!(exit_action(Some(0)), ExitAction::Shutdown);
+    }
 }

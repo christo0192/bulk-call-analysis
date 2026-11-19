@@ -369,6 +369,7 @@ version = "0.1.0"
 dependencies = [
  "block2 0.5.1",
  "core-foundation",
+ "embed-resource",
  "libc",
  "log",
  "objc2 0.5.3",

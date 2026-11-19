@@ -60,26 +60,6 @@ fn attach_windows(pid: u32) -> std::io::Result<Guard> {
     }
 }
 
-#[cfg(windows)]
-pub fn terminate_process(pid: u32) {
-    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
-    unsafe {
-        if let Ok(process) = OpenProcess(PROCESS_TERMINATE, false, pid) {
-            let _ = TerminateProcess(process, 1);
-            let _ = windows::Win32::Foundation::CloseHandle(process);
-        }
-    }
-}
-
-#[cfg(unix)]
-pub fn terminate_process(pid: u32) {
-    if pid != 0 {
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-        }
-    }
-}
-
 #[cfg(unix)]
 pub fn terminate_group(pid: u32) {
     if pid == 0 {
