@@ -12,7 +12,7 @@ import pytest
 import bca.coordinator.runner as runner_module
 import bca.luna.pool as pool_module
 from bca.luna.pool import LunaPool
-from bca.store import JobState, edit_spec, save_spec
+from bca.store import JobState, TransitionError, edit_spec, save_spec
 from tests.coordinator.conftest import CoordinatorFixture
 from tests.coordinator.test_pool_quota import _real_pool
 
@@ -47,6 +47,18 @@ def test_superseded_task_not_dispatched_after_edit_and_reapprove_during_drain(
             await super()._run_lead(lead)
 
     monkeypatch.setattr(runner_module, "LunaPool", RecordingPool)
+    # results.attempt_id is the STORE attempt id, created in on_started; the pool task id differs.
+    prompts_by_attempt: dict[str, str] = {}
+    original_started = runner_module._Callbacks.on_started
+
+    async def on_started(self: Any, task: Any) -> bool:
+        started = bool(await original_started(self, task))
+        store_attempt = self.runner._attempts.get(task.attempt_id)
+        if store_attempt is not None:
+            prompts_by_attempt[str(store_attempt)] = task.prompt
+        return started
+
+    monkeypatch.setattr(runner_module._Callbacks, "on_started", on_started)
     runner = coordinator.runner
     runner.on_plan_approved(1)
 
@@ -58,6 +70,16 @@ def test_superseded_task_not_dispatched_after_edit_and_reapprove_during_drain(
         assert runner._state() is JobState.paused
         save_spec(replace(runner.spec, instructions="Return v2."), coordinator.job_dir)
         edit_spec(coordinator.store, "job", 2)
+        with pytest.raises(TransitionError):
+            runner.on_plan_approved(2)
+        dispatch_count = len(dispatches)
+
+        async def wait_for_drain() -> None:
+            while runner._phase_running and not old_sample.done():
+                await asyncio.sleep(0.002)
+
+        await asyncio.wait_for(wait_for_drain(), timeout=20)
+        assert len(dispatches) == dispatch_count
         runner.on_plan_approved(2)
         scenario_path.write_text(json.dumps({"latency_ms": 50}), encoding="utf-8", newline="\n")
         new_sample = asyncio.create_task(runner.run_sample())
@@ -68,11 +90,11 @@ def test_superseded_task_not_dispatched_after_edit_and_reapprove_during_drain(
     approval_index = next(i for i, item in enumerate(dispatches) if "Return v2." in item[2])
     assert all("Return v2." in prompt for _, _, prompt in dispatches[approval_index:])
     stored = coordinator.store.rows(
-        "SELECT a.attempt_id FROM results r JOIN attempts a ON a.attempt_id=r.attempt_id WHERE r.job_id='job'"
+        "SELECT r.spec_version, a.attempt_id "
+        "FROM results r JOIN attempts a ON a.attempt_id=r.attempt_id WHERE r.job_id='job'"
     )
-    prompts_by_attempt = {attempt_id: prompt for _, attempt_id, prompt in dispatches}
     assert stored
-    assert all("Return v2." in prompts_by_attempt[str(row[0])] for row in stored)
+    assert all(row[0] == 2 and "Return v2." in prompts_by_attempt[str(row[1])] for row in stored)
 
 
 def _jump_clock_on_first_result(coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch) -> None:
