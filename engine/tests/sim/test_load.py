@@ -17,6 +17,7 @@ def test_ramp(concurrency: int, tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.timeout(600)  # 1000 leads at concurrency 8: a soak test, slow by design
 def test_soak(tmp_path: Path) -> None:
     result = run_scenario(Scenario("soak", Population(normal=1000), concurrency=8), tmp_path)
     assert_invariants(result)
