@@ -86,7 +86,8 @@ class AppServer:
         return self.process.returncode
 
     async def stop(self, kill_tree: bool = True) -> None:
-        await self.client.close()
+        with contextlib.suppress(OSError, ConnectionError):
+            await self.client.close()
         if self.process.returncode is not None:
             return
         if kill_tree and self.process.pid is not None:

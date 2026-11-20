@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -160,5 +161,6 @@ class AppServerClient:
         self._fail_pending()
         self._reader_task.cancel()
         await asyncio.gather(self._reader_task, return_exceptions=True)
-        self.writer.close()
-        await self.writer.wait_closed()
+        with contextlib.suppress(OSError, ConnectionError):
+            self.writer.close()
+            await self.writer.wait_closed()

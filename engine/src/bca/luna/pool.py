@@ -56,6 +56,8 @@ class PoolCallbacks(Protocol):
 
     async def on_pause(self, reason: str, resume_at: int | None) -> None: ...
 
+    def set_isolation_leads(self, lead_ids: frozenset[str]) -> frozenset[str]: ...
+
 
 class PoolClock(Protocol):
     def now(self) -> float: ...
@@ -101,6 +103,8 @@ class LunaPool:
         self.interrupt_grace_s = interrupt_grace_s
         self.recycle_every = max(1, recycle_every)
         self.max_consecutive_failures = max(1, max_consecutive_failures)
+        # Retained for configuration compatibility; crash storms are bounded by
+        # the pool lifetime and reset when a paused pool resumes.
         self.crash_window_s = max(0, crash_window_s)
         self.restart_backoff_s = max(0, restart_backoff_s)
         self.retry_backoff_s = max(0, retry_backoff_s)
@@ -168,8 +172,12 @@ class LunaPool:
         if self._loop is not loop:
             self._restart_lock = asyncio.Lock()
             self._loop = loop
+        was_paused = self._paused
         self._stopping = False
         self._paused = False
+        if was_paused:
+            self._crashes.clear()
+            self._restarted_crash_generations.clear()
         self._latched_decision = None
         self._dispatch_closed = False
         self._consecutive_failures = 0
@@ -773,7 +781,11 @@ class LunaPool:
 
     async def _crash_or_failure(self, lead: _Lead, detail: str) -> None:
         await self._restart(
-            "appserver_crash", crash=True, server_generation=lead.server_generation, crash_detail=detail
+            "appserver_crash",
+            crash=True,
+            server_generation=lead.server_generation,
+            crash_detail=detail,
+            crash_lead=lead,
         )
 
     async def _restart(
@@ -782,6 +794,7 @@ class LunaPool:
         crash: bool = False,
         server_generation: int | None = None,
         crash_detail: str | None = None,
+        crash_lead: _Lead | None = None,
     ) -> None:
         async with self._restart_lock:
             if server_generation is not None and server_generation != self._server_generation:
@@ -796,17 +809,17 @@ class LunaPool:
                 self._refresh_isolation()
             if crash:
                 self._crashes.append(time.monotonic())
-            if len(self._crashes) >= 4:
-                await self._pause("error_storm", None)
-                return
             if self._server is not None:
                 await self._server.stop()
             self._server = None
             for active_lead in active or list(self._leads.values()):
-                if crash and len(active) == 1:
+                if crash and active_lead is crash_lead:
                     await self._fail(active_lead, "appserver_crash", False, crash_detail or reason)
                 else:
                     await self._fail(active_lead, reason, False, "app-server restarted")
+            if len(self._crashes) >= 4:
+                await self._pause("error_storm", None)
+                return
             if self.restart_backoff_s:
                 await asyncio.sleep(self.restart_backoff_s)
             try:

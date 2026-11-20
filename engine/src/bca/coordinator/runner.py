@@ -897,6 +897,10 @@ class JobRunner:
                 from bca.store import replace_pause
 
                 replace_pause(self.deps.store, self.job_id, PauseReason(reason), None)
+                self._publish(
+                    "pause",
+                    {"reason": reason, "resume_at": None, "replaced": True},
+                )
                 self._pause_reason = None
                 self._pause_resume_at = None
                 self._wake_requested = False

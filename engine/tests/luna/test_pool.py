@@ -57,6 +57,9 @@ class Callbacks:
     async def on_pause(self, reason: str, resume_at: int | None) -> None:
         self.pauses.append((reason, resume_at))
 
+    def set_isolation_leads(self, lead_ids: frozenset[str]) -> frozenset[str]:
+        return lead_ids
+
 
 def assert_exactly_once(callbacks: Callbacks, attempt_ids: list[str]) -> None:
     results = [lead for lead, _ in callbacks.results]
