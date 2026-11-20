@@ -45,6 +45,10 @@ def _cell(
     ws: Any, value: object, numeric: bool, flags: list[str] | None = None, label: str = "value"
 ) -> Cell:
     flags = flags if flags is not None else []
+    if numeric is False and isinstance(value, bool):
+        cell = WriteOnlyCell(ws, value)
+        cell.data_type = "b"
+        return cell
     if (
         numeric
         and isinstance(value, (int, float))
@@ -123,6 +127,7 @@ def _metadata(lead: Any) -> dict[str, object]:
         "calls_pulled": lead[3],
         "calls_sent": lead[4],
         "calls_dropped_cap": lead[5],
+        "calls_dropped_unusable": lead[6],
     }
 
 
@@ -142,7 +147,7 @@ def _spec_rows(
     not_read: list[dict[str, object]] = []
     leads = store.rows(
         "SELECT lead_id, status, reason, calls_pulled, calls_sent, "
-        "calls_dropped_cap FROM leads WHERE job_id=? ORDER BY lead_id",
+        "calls_dropped_cap, calls_dropped_unusable FROM leads WHERE job_id=? ORDER BY lead_id",
         (job_id,),
     )
     result_map = {

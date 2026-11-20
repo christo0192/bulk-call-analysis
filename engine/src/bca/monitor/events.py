@@ -9,6 +9,7 @@ EventKind = Literal[
     "state",
     "lead_done",
     "lead_failed",
+    "lead_started",
     "activity",
     "quota",
     "pause",

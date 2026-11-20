@@ -36,3 +36,5 @@ The MCP tools expose read-only metadata and masked query results, operator
 notes and briefs, validated job proposals and status, opaque sample references,
 leak-scanned masked transcripts, masked aggregates, and the two approved plan
 files. Raw pulls and raw lead identifiers are never exposed to the model.
+Raw transcript bundles are removed after masking, including masking and leak-scan
+hold-backs; no raw bundle is retained once that lead reaches a terminal outcome.

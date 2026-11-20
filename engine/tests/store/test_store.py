@@ -45,6 +45,21 @@ def test_attempt_requeue_rejects_late_result() -> None:
     store.close()
 
 
+def test_pause_requeues_open_counted_attempt_as_uncounted() -> None:
+    store = open_store(Path(":memory:"))
+    store.create_project("p", "P")
+    store.create_job("j", "p", 1)
+    store.add_lead("j", "lead", LeadStatus.queued)
+    attempt = store.start_attempt("j", "lead", "model")
+
+    assert store.requeue_in_flight("j", "user", outcome="interrupted") == 1
+    row = store.rows("SELECT outcome, counted FROM attempts WHERE attempt_id=?", (attempt,))[0]
+    assert tuple(row) == ("interrupted", 0)
+    replacement = store.start_attempt("j", "lead", "model")
+    assert replacement != attempt
+    store.close()
+
+
 def test_lifecycle_gate_requires_operator() -> None:
     store = open_store(Path(":memory:"))
     store.create_project("p", "P")

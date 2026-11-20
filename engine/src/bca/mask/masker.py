@@ -63,7 +63,7 @@ def load_harvest(job_folder: Path) -> tuple[str, ...]:
 def _validate_context(ctx: MaskingContext) -> None:
     if ctx.ner is None:
         raise MissingNer("a NER backend is required")
-    if ctx.harvested_names is None or (ctx.require_harvest and not ctx.harvested_names):
+    if ctx.harvested_names is None:
         raise HarvestMissing("per-job harvested names are required")
 
 

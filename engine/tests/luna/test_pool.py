@@ -15,8 +15,10 @@ from tests.luna.test_appserver import read_json_lines
 
 
 class Callbacks:
-    def __init__(self, tasks: list[LeadTask]) -> None:
+    def __init__(self, tasks: list[LeadTask], pause_reason: str | None = None) -> None:
         self.tasks = tasks
+        self.pause_reason = pause_reason
+        self.pool: LunaPool | None = None
         self.results: list[tuple[str, str]] = []
         self.failures: list[tuple[str, str, bool]] = []
         self.pauses: list[tuple[str, int | None]] = []
@@ -31,6 +33,9 @@ class Callbacks:
 
     async def on_started(self, task: LeadTask) -> None:
         self.started.append(task.attempt_id)
+        if self.pause_reason is not None and self.pool is not None:
+            reason, self.pause_reason = self.pause_reason, None
+            await self.pool.pause(reason)
 
     async def on_result(
         self, task: LeadTask, answer: dict[str, Any], model_used: str, usage: dict[str, Any] | None
@@ -51,6 +56,9 @@ class Callbacks:
 
     async def on_pause(self, reason: str, resume_at: int | None) -> None:
         self.pauses.append((reason, resume_at))
+
+    def set_isolation_leads(self, lead_ids: frozenset[str]) -> frozenset[str]:
+        return lead_ids
 
 
 def assert_exactly_once(callbacks: Callbacks, attempt_ids: list[str]) -> None:
@@ -82,6 +90,7 @@ async def run_pool(
     crash_window_s: float = 600,
     restart_backoff_s: float = 0,
     rpc_timeout_s: float = 30,
+    pause_reason: str | None = None,
 ) -> tuple[Callbacks, list[Path]]:
     scenario_path = tmp_path / "scenario.json"
     scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
@@ -111,6 +120,8 @@ async def run_pool(
         restart_backoff_s=restart_backoff_s,
         rpc_timeout_s=rpc_timeout_s,
     )
+    callbacks.pause_reason = pause_reason
+    callbacks.pool = pool
     await pool.run_until_idle()
     return callbacks, launches
 
@@ -220,6 +231,18 @@ def test_credit_drop_interrupts_inflight_and_pauses(tmp_path: Path) -> None:
     assert_exactly_once(callbacks, ["attempt-0"])
     assert callbacks.failures == [("attempt-0", "quota_interrupt", False)]
     assert callbacks.pauses[0][0] == "credit"
+
+
+@pytest.mark.parametrize("reason", ["network", "model_unavailable", "user"])
+def test_runner_pause_reasons_stop_the_pool_promptly(tmp_path: Path, reason: str) -> None:
+    import asyncio
+
+    async def run() -> None:
+        await asyncio.wait_for(
+            run_pool(tmp_path, {"models": ["codex"]}, [task(0)], pause_reason=reason), timeout=2
+        )
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(

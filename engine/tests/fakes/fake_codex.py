@@ -18,6 +18,7 @@ _SCENARIO_KEYS = frozenset(
         "credit_balance",
         "credit_drop",
         "default_answer",
+        "errors_after_first_answer",
         "env_report",
         "errors",
         "hang",
@@ -28,6 +29,7 @@ _SCENARIO_KEYS = frozenset(
         "quota_increment",
         "reached_type",
         "reroute",
+        "reroute_once",
         "spend_control_reached",
         "tool_call",
         "used_percent",
@@ -45,6 +47,14 @@ def _scenario(path: Path) -> dict[str, Any]:
     return value
 
 
+def _lead_from_params(params: dict[str, Any]) -> str:
+    serialized = json.dumps(params)
+    match = re.search(r"zzlead(\w+)zz", serialized)
+    if match is None:
+        match = re.search(r"call-([^\s-]+)-synthetic", serialized)
+    return match.group(1) if match else "default"
+
+
 async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -> None:
     scenario = _scenario(path)
     env_report = scenario.get("env_report")
@@ -57,6 +67,18 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
         )
     log_path = Path(str(path) + ".methods.json")
     log_file = log_path.open("w", encoding="utf-8")
+    rerouted_once_path = Path(str(path) + ".rerouted-once.json")
+    rerouted_once: set[str] = set()
+    if rerouted_once_path.exists():
+        value = json.loads(rerouted_once_path.read_text(encoding="utf-8"))
+        if isinstance(value, list):
+            rerouted_once = {str(lead) for lead in value}
+    answered_once_path = Path(str(path) + ".answered-once.json")
+    answered_once: set[str] = set()
+    if answered_once_path.exists():
+        value = json.loads(answered_once_path.read_text(encoding="utf-8"))
+        if isinstance(value, list):
+            answered_once = {str(lead) for lead in value}
 
     def record(value: str | dict[str, list[str]]) -> None:
         log_file.write(json.dumps(value) + "\n")
@@ -150,8 +172,9 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                         },
                     }
                 )
-            lead_match = re.search(r"LEAD_ID=([^\s]+)", json.dumps(params))
-            lead = lead_match.group(1) if lead_match else "default"
+            # Production prompts deliberately contain no record-id marker. The synthetic bundle
+            # carries a lead token, with a legacy call-id fallback for older fake tests.
+            lead = _lead_from_params(params)
             errors = scenario.get("errors", {})
             if lead in scenario.get("hangs", []) or scenario.get("hang") == lead:
                 result = {"turn": {"id": turn_id}}
@@ -183,7 +206,15 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                 if request_id is not None:
                     await send({"id": request_id, "result": result})
                 return
-            if scenario.get("reroute") == lead:
+            reroute_once = bool(scenario.get("reroute_once"))
+            reroute = scenario.get("reroute")
+            reroute_lead = reroute == lead or (isinstance(reroute, list) and lead in reroute)
+            if reroute_lead and (not reroute_once or lead not in rerouted_once):
+                rerouted_once.add(lead)
+                if reroute_once:
+                    rerouted_once_path.write_text(
+                        json.dumps(sorted(rerouted_once)), encoding="utf-8", newline="\n"
+                    )
                 await send(
                     {
                         "method": "model/rerouted",
@@ -196,8 +227,17 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                         },
                     }
                 )
-            if lead in errors:
-                info: dict[str, dict[str, Any]] = {str(errors[lead]): {}}
+            after_first = scenario.get("errors_after_first_answer", {})
+            error_code = errors.get(lead)
+            if (
+                error_code is None
+                and isinstance(after_first, dict)
+                and lead in after_first
+                and lead in answered_once
+            ):
+                error_code = after_first[lead]
+            if error_code is not None:
+                info: dict[str, dict[str, Any]] = {str(error_code): {}}
                 await send(
                     {
                         "method": "error",
@@ -225,6 +265,11 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
             else:
                 answer = scenario.get("answers", {}).get(lead, scenario.get("default_answer", {"ok": True}))
                 text = answer if isinstance(answer, str) else json.dumps(answer)
+                if isinstance(after_first, dict) and lead in after_first:
+                    answered_once.add(lead)
+                    answered_once_path.write_text(
+                        json.dumps(sorted(answered_once)), encoding="utf-8", newline="\n"
+                    )
                 await send(
                     {
                         "method": "item/agentMessage/delta",

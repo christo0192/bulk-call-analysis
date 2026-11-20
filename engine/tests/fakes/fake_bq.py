@@ -14,6 +14,7 @@ class FakeBqRunner:
     pages: list[list[dict[str, object]]] = field(default_factory=list)
     dry: DryRun = field(default_factory=lambda: DryRun(0, [], []))
     pages_by_query_kind: dict[str, list[list[dict[str, object]]]] = field(default_factory=dict)
+    preflight_pages: list[list[dict[str, object]]] | None = None
     error: BaseException | None = None
     calls: list[tuple[str, Mapping[str, object] | None, int]] = field(default_factory=list)
     datasets: list[dict[str, object]] = field(default_factory=list)
@@ -38,7 +39,13 @@ class FakeBqRunner:
         self.calls.append((sql, params, page_size))
         if self.error is not None:
             raise self.error
-        pages = self.pages_by_query_kind.get(self._query_kind(sql), self.pages)
+        kind = self._query_kind(sql)
+        if kind in self.pages_by_query_kind:
+            pages = self.pages_by_query_kind[kind]
+        elif self.preflight_pages is not None and (kind == "preflight" or "WITH selected AS" in sql):
+            pages = self.preflight_pages
+        else:
+            pages = self.pages
         if params is not None and "lead_ids" in params:
             lead_ids = params["lead_ids"]
             if not isinstance(lead_ids, list):

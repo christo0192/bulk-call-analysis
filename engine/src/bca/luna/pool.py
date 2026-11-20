@@ -22,7 +22,7 @@ from .quota import (
     merge_update,
     parse_rate_limits,
 )
-from .rpc import AppServerClient, RpcError, RpcTimeout
+from .rpc import RpcError, RpcTimeout
 
 
 @dataclass(frozen=True)
@@ -33,12 +33,14 @@ class LeadTask:
     output_schema: dict[str, object]
     model: str
     effort: str
+    repair: bool = False
+    spec_version: int = 0
 
 
 class PoolCallbacks(Protocol):
     async def next_tasks(self, n: int) -> list[LeadTask]: ...
 
-    async def on_started(self, task: LeadTask) -> None: ...
+    async def on_started(self, task: LeadTask) -> bool | None: ...
 
     async def on_result(
         self, task: LeadTask, answer: dict[str, Any], model_used: str, usage: dict[str, Any] | None
@@ -53,6 +55,12 @@ class PoolCallbacks(Protocol):
     async def on_reroute(self, task: LeadTask, from_model: str, to_model: str, reason: str) -> None: ...
 
     async def on_pause(self, reason: str, resume_at: int | None) -> None: ...
+
+    def set_isolation_leads(self, lead_ids: frozenset[str]) -> frozenset[str]: ...
+
+
+class PoolClock(Protocol):
+    def now(self) -> float: ...
 
 
 @dataclass
@@ -83,7 +91,9 @@ class LunaPool:
         max_consecutive_failures: int = 25,
         crash_window_s: float = 600,
         restart_backoff_s: float = 0,
+        retry_backoff_s: float = 1,
         rpc_timeout_s: float = 30,
+        clock: PoolClock | None = None,
     ) -> None:
         self.launch_factory = launch_factory
         self.callbacks = callbacks
@@ -93,9 +103,13 @@ class LunaPool:
         self.interrupt_grace_s = interrupt_grace_s
         self.recycle_every = max(1, recycle_every)
         self.max_consecutive_failures = max(1, max_consecutive_failures)
+        # Retained for configuration compatibility; crash storms are bounded by
+        # the pool lifetime and reset when a paused pool resumes.
         self.crash_window_s = max(0, crash_window_s)
         self.restart_backoff_s = max(0, restart_backoff_s)
+        self.retry_backoff_s = max(0, retry_backoff_s)
         self.rpc_timeout_s = max(0, rpc_timeout_s)
+        self.clock = clock
         self._server: AppServer | None = None
         self._leads: dict[str, _Lead] = {}
         self._by_turn: dict[str, _Lead] = {}
@@ -104,8 +118,9 @@ class LunaPool:
         self._stopping = False
         self._consecutive_failures = 0
         self._completed = 0
-        self._backoff = 0
+        self._backoff = 0.0
         self._restart_lock = asyncio.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._crashes: list[float] = []
         self._models: set[str] = set()
         self._needs_recycle = False
@@ -115,13 +130,54 @@ class LunaPool:
         self._dispatch_closed = False
         self._server_generation = 0
         self._pending_pause: tuple[str, int | None] | None = None
+        self._next_tasks: asyncio.Task[list[LeadTask]] | None = None
+        self._interrupt_task: asyncio.Task[None] | None = None
+        self._isolation_leads: set[str] = set()
+        self._restarted_crash_generations: set[int] = set()
 
     def set_concurrency(self, n: int) -> None:
         self.concurrency = max(1, n)
 
+    @property
+    def claimed_lead_ids(self) -> frozenset[str]:
+        """Lead claims currently owned by dispatched pool workers."""
+        return frozenset(lead.task.lead_id for lead in self._leads.values())
+
+    @property
+    def pending_pause(self) -> tuple[str, int | None] | None:
+        """Pause that is waiting for active turns to drain, if any."""
+        return self._pending_pause
+
+    async def pause(self, reason: str) -> None:
+        """Stop dispatching and, for interrupting reasons, stop active turns."""
+        if self._paused:
+            if reason != "model_unavailable" and self._leads:
+                self._schedule_interrupt(reason)
+            return
+        self._paused = True
+        self._dispatch_closed = True
+        next_tasks = self._next_tasks
+        if next_tasks is not None and next_tasks is not asyncio.current_task() and not next_tasks.done():
+            next_tasks.cancel()
+        if reason != "model_unavailable":
+            self._schedule_interrupt(reason)
+
+    def _schedule_interrupt(self, reason: str) -> None:
+        task = self._interrupt_task
+        if task is None or task.done():
+            self._interrupt_task = asyncio.create_task(self._interrupt_all(reason))
+
     async def run_until_idle(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            self._restart_lock = asyncio.Lock()
+            self._loop = loop
+        was_paused = self._paused
         self._stopping = False
         self._paused = False
+        if was_paused:
+            self._crashes.clear()
+            self._restarted_crash_generations.clear()
         self._latched_decision = None
         self._dispatch_closed = False
         self._consecutive_failures = 0
@@ -129,41 +185,75 @@ class LunaPool:
         self._needs_recycle = False
         await self._launch_and_prepare()
         running: set[asyncio.Task[None]] = set()
+        heartbeat = asyncio.create_task(self._heartbeat())
         try:
             while not self._stopping and not self._paused:
+                await self._wait_for_restart()
+                error = self._notification_error()
+                if error is not None:
+                    raise RuntimeError("app-server notification callback failed") from error
                 await self._check_quota()
                 if self._paused:
                     break
-                room = self.concurrency - len(running)
+                effective_concurrency = 1 if self._isolation_leads else self.concurrency
+                room = effective_concurrency - len(running)
                 tasks: list[LeadTask] = []
                 if room > 0:
                     if self._dispatch_closed:
                         break
-                    tasks = await self.callbacks.next_tasks(room)
-                    for index, task in enumerate(tasks):
-                        if len(running) >= self.concurrency:
-                            await asyncio.gather(*(self._fail_unstarted(item) for item in tasks[index:]))
+                    next_tasks = asyncio.create_task(self.callbacks.next_tasks(room))
+                    self._next_tasks = next_tasks
+                    try:
+                        tasks = await next_tasks
+                    except asyncio.CancelledError:
+                        if not self._paused:
+                            raise
+                        tasks = []
+                    finally:
+                        if self._next_tasks is next_tasks:
+                            self._next_tasks = None
+                    await self._wait_for_restart()
+                    effective_concurrency = 1 if self._isolation_leads else self.concurrency
+                    room = max(0, effective_concurrency - len(running))
+                    if self._paused or self._server is None:
+                        await asyncio.gather(*(self._fail_unstarted(item) for item in tasks))
+                        if self._paused:
                             break
+                        continue
+                    dispatch_tasks, unstarted = tasks[:room], tasks[room:]
+                    if unstarted:
+                        await asyncio.gather(*(self._fail_unstarted(item) for item in unstarted))
+                    for index, task in enumerate(dispatch_tasks):
                         if not await self._before_dispatch(task.model):
-                            await asyncio.gather(*(self._fail_unstarted(item) for item in tasks[index:]))
+                            remaining = dispatch_tasks[index:]
+                            await asyncio.gather(*(self._fail_unstarted(item) for item in remaining))
                             break
                         if task.model not in self._models:
-                            await asyncio.gather(*(self._fail_unstarted(item) for item in tasks[index:]))
+                            remaining = dispatch_tasks[index:]
+                            await asyncio.gather(*(self._fail_unstarted(item) for item in remaining))
                             await self._pause("model_unavailable", None)
                             break
-                        lead = _Lead(task, server_generation=self._server_generation)
+                        lead = _Lead(task)
                         self._leads[task.attempt_id] = lead
                         running.add(asyncio.create_task(self._run_lead(lead)))
+                if not running and not tasks and (self._paused or self._stopping):
+                    break
                 if not running and not tasks:
                     break
                 if running:
                     done, running = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
                     for completed in done:
                         await completed
+                await self._wait_for_restart()
+                error = self._notification_error()
+                if error is not None:
+                    raise RuntimeError("app-server notification callback failed") from error
                 if self._needs_recycle and not running and not self._paused:
                     self._needs_recycle = False
                     await self._restart("appserver_recycle")
         finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
             if running:
                 if self._paused and not self._stopping:
                     await asyncio.gather(*running, return_exceptions=True)
@@ -171,15 +261,26 @@ class LunaPool:
                     for running_task in running:
                         running_task.cancel()
                     await asyncio.gather(*running, return_exceptions=True)
-            if self._pending_pause is not None:
-                reason, resume_at = self._pending_pause
-                self._pending_pause = None
-                await self.callbacks.on_pause(reason, resume_at)
-            if self._pending_actions:
-                await asyncio.gather(*self._pending_actions, return_exceptions=True)
-            if self._server is not None:
-                await self._server.stop()
-                self._server = None
+            try:
+                if self._pending_pause is not None:
+                    reason, resume_at = self._pending_pause
+                    self._pending_pause = None
+                    await self.callbacks.on_pause(reason, resume_at)
+            finally:
+                try:
+                    if self._pending_actions:
+                        await asyncio.gather(*self._pending_actions, return_exceptions=True)
+                finally:
+                    if self._server is not None:
+                        try:
+                            await self._server.stop()
+                        finally:
+                            self._server = None
+
+    async def _heartbeat(self) -> None:
+        while True:
+            await asyncio.sleep(5)
+            await self.callbacks.on_activity(self.clock.now() if self.clock is not None else time.time())
 
     async def stop(self) -> None:
         self._stopping = True
@@ -192,32 +293,48 @@ class LunaPool:
             await server.stop()
             self._server = None
 
+    async def interrupt_all(self, reason: str) -> None:
+        """Interrupt active turns and deliver one uncounted outcome for each."""
+        await self._interrupt_all(reason)
+
     async def _launch_and_prepare(self) -> None:
         self._server = await self.launch_factory()
         self._server_generation += 1
-        client = self._client
+        server = self._server
+        if server is None:
+            raise RuntimeError("app-server launch returned no server")
+        client = server.client
         client.on_any_notification(self._notification)
-        rate = await self._request("account/rateLimits/read")
+        rate = await self._request_unlocked("account/rateLimits/read")
         self._rate_result = rate
-        models = await self._request("model/list", {"includeHidden": True})
+        models = await self._request_unlocked("model/list", {"includeHidden": True})
         self._models = self._model_names(models)
         cursor = models.get("nextCursor")
         while isinstance(cursor, str) and cursor:
-            models = await self._request("model/list", {"includeHidden": True, "cursor": cursor})
+            models = await self._request_unlocked("model/list", {"includeHidden": True, "cursor": cursor})
             self._models.update(self._model_names(models))
             cursor = models.get("nextCursor")
         model = self._model_for_setup(rate)
         self._snapshot = parse_rate_limits(rate, model)
         await self._report_quota()
 
-    @property
-    def _client(self) -> AppServerClient:
-        if self._server is None:
-            raise RuntimeError("Luna pool has no app-server")
-        return self._server.client
+    async def _wait_for_restart(self) -> None:
+        async with self._restart_lock:
+            return
+
+    def _notification_error(self) -> Exception | None:
+        server = self._server
+        return server.client.callback_error if server is not None else None
+
+    async def _request_unlocked(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        server = self._server
+        if server is None:
+            raise RuntimeError("Luna pool restart did not produce an app-server")
+        return await server.client.request(method, params, timeout_s=self.rpc_timeout_s)
 
     async def _request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await self._client.request(method, params, timeout_s=self.rpc_timeout_s)
+        await self._wait_for_restart()
+        return await self._request_unlocked(method, params)
 
     @staticmethod
     def _model_names(result: dict[str, Any]) -> set[str]:
@@ -271,7 +388,13 @@ class LunaPool:
             await self._pause("quota", decision.resume_at)
         elif decision.kind == INTERRUPT_ALL:
             self._latched_decision = decision
-            await self._interrupt_all("credit" if "credit" in decision.reason else "quota")
+            await self._interrupt_all(
+                "credit"
+                if "credit" in decision.reason
+                else "spend_control"
+                if "subscription" in decision.reason
+                else "quota"
+            )
 
     async def _before_dispatch(self, model: str) -> bool:
         if self._rate_result is not None:
@@ -287,17 +410,32 @@ class LunaPool:
             await self._pause("quota", decision.resume_at)
         else:
             self._latched_decision = decision
-            await self._interrupt_all("credit" if "credit" in decision.reason else "quota")
+            await self._interrupt_all(
+                "credit"
+                if "credit" in decision.reason
+                else "spend_control"
+                if "subscription" in decision.reason
+                else "quota"
+            )
         return False
 
     async def _run_lead(self, lead: _Lead) -> None:
         task = lead.task
+        callback_started = False
         try:
-            await self.callbacks.on_started(task)
+            callback_started_result = await self.callbacks.on_started(task)
+            if callback_started_result is False:
+                return
+            callback_started = True
+            await self._wait_for_restart()
+            if self._paused or self._server is None:
+                await self._fail(lead, "appserver_restart", False, "app-server unavailable before start")
+                return
+            lead.server_generation = self._server_generation
             if self._server is not None and self._server.returncode is not None:
                 await self._crash_or_failure(lead, f"app-server exited with code {self._server.returncode}")
                 return
-            started = await self._request(
+            thread_start_result = await self._request(
                 "thread/start",
                 {
                     "model": task.model,
@@ -307,7 +445,7 @@ class LunaPool:
                     "serviceTier": "default",
                 },
             )
-            thread = started.get("thread")
+            thread = thread_start_result.get("thread")
             lead.thread_id = str(thread.get("id")) if isinstance(thread, dict) else None
             if lead.thread_id is None:
                 raise ValueError("thread/start returned no thread id")
@@ -353,12 +491,21 @@ class LunaPool:
         finally:
             if lead.pending_action is not None:
                 await asyncio.gather(lead.pending_action, return_exceptions=True)
-            if lead.thread_id is not None and lead.server_generation == self._server_generation:
-                with contextlib.suppress(ConnectionError, BrokenPipeError, RpcError, RpcTimeout):
+            if callback_started and not lead.outcome_delivered:
+                await self._fail(lead, "appserver_restart", False, "lead ended without an outcome")
+            if (
+                lead.thread_id is not None
+                and lead.server_generation == self._server_generation
+                and not self._restart_lock.locked()
+            ):
+                with contextlib.suppress(
+                    ConnectionError, BrokenPipeError, RpcError, RpcTimeout, RuntimeError
+                ):
                     await self._request("thread/unsubscribe", {"threadId": lead.thread_id})
             self._leads.pop(task.attempt_id, None)
             if lead.turn_id:
                 self._by_turn.pop(lead.turn_id, None)
+            self._refresh_isolation()
 
     async def _complete_from_events(self, lead: _Lead) -> None:
         lead.completion_event = asyncio.Event()
@@ -381,14 +528,19 @@ class LunaPool:
         validator = validator_for(lead.task.output_schema)(lead.task.output_schema)
         validator.validate(answer)
         lead.outcome_delivered = True
-        await self.callbacks.on_result(lead.task, answer, lead.model_used or lead.task.model, lead.usage)
+        try:
+            await self.callbacks.on_result(lead.task, answer, lead.model_used or lead.task.model, lead.usage)
+        except Exception:
+            await self._callback_error(lead, "result callback failed")
+            return
         self._completed += 1
         self._consecutive_failures = 0
+        self._crashes.clear()
         if self._completed % self.recycle_every == 0:
             self._needs_recycle = True
 
     async def _notification(self, message: dict[str, Any]) -> None:
-        await self.callbacks.on_activity(time.time())
+        await self.callbacks.on_activity(self.clock.now() if self.clock is not None else time.time())
         method = message.get("method", "")
         params = message.get("params")
         if not isinstance(params, dict):
@@ -497,7 +649,7 @@ class LunaPool:
             "-32001",
         }
         if code in retryable:
-            self._backoff = min(60, 1 if self._backoff == 0 else self._backoff * 2)
+            self._backoff = self.retry_backoff_s
             self.set_concurrency(self.concurrency - 1)
             await self._fail(lead, code, False, detail)
         elif code == "usageLimitExceeded":
@@ -551,7 +703,7 @@ class LunaPool:
                 interrupted.append(lead)
         await asyncio.gather(*(self._interrupt(lead) for lead in leads))
         await asyncio.gather(
-            *(self.callbacks.on_failure(lead.task, "quota_interrupt", False, reason) for lead in interrupted)
+            *(self._deliver_failure(lead, "quota_interrupt", False, reason) for lead in interrupted)
         )
         decision = self._latched_decision
         resume_at = decision.resume_at if decision else None
@@ -564,20 +716,52 @@ class LunaPool:
             return
         lead.outcome_delivered = True
         lead.done = True
-        await self.callbacks.on_failure(lead.task, code, counted, detail)
+        try:
+            await self.callbacks.on_failure(lead.task, code, counted, detail)
+        except Exception:
+            await self._callback_error(lead, "failure callback failed")
+            return
         if counted:
             self._consecutive_failures += 1
             if self._consecutive_failures >= self.max_consecutive_failures:
                 await self._pause("error_storm", None)
 
     async def _pause(self, reason: str, resume_at: int | None) -> None:
-        if not self._paused:
-            self._paused = True
-            self._dispatch_closed = True
-            if self._leads:
-                self._pending_pause = (reason, resume_at)
-            else:
+        if self._paused:
+            if self._pending_pause is None and not self._leads:
                 await self.callbacks.on_pause(reason, resume_at)
+            return
+        self._paused = True
+        self._dispatch_closed = True
+        self._pending_pause = (reason, resume_at)
+        if not self._leads:
+            pending = self._pending_pause
+            self._pending_pause = None
+            if pending is not None:
+                await self.callbacks.on_pause(*pending)
+
+    async def _deliver_failure(self, lead: _Lead, code: str, counted: bool, detail: str) -> None:
+        try:
+            await self.callbacks.on_failure(lead.task, code, counted, detail)
+        except Exception:
+            await self._callback_error(lead, "failure callback failed")
+
+    async def _callback_error(self, lead: _Lead, detail: str) -> None:
+        attempt = getattr(self.callbacks, "runner", None)
+        if attempt is not None:
+            callback_runner = attempt
+            attempt_id = callback_runner._attempts.get(lead.task.attempt_id)
+            if attempt_id is not None:
+                callback_runner._close_attempt(lead.task.attempt_id)
+                with contextlib.suppress(ValueError, KeyError):
+                    callback_runner.deps.store.fail_attempt(
+                        attempt_id,
+                        "callback_error",
+                        True,
+                        callback_runner.deps.config.limits.lead_max_attempts,
+                    )
+                callback_runner._get_phase_event().set()
+        await asyncio.sleep(0)
 
     async def _refresh_quota_after_usage_limit(self, model: str) -> None:
         try:
@@ -615,23 +799,70 @@ class LunaPool:
         return task
 
     async def _crash_or_failure(self, lead: _Lead, detail: str) -> None:
-        await self._fail(lead, "appserver_crash", False, detail)
-        await self._restart("appserver_crash", crash=True)
+        await self._restart(
+            "appserver_crash",
+            crash=True,
+            server_generation=lead.server_generation,
+            crash_detail=detail,
+            crash_lead=lead,
+        )
 
-    async def _restart(self, reason: str, crash: bool = False) -> None:
+    async def _restart(
+        self,
+        reason: str,
+        crash: bool = False,
+        server_generation: int | None = None,
+        crash_detail: str | None = None,
+        crash_lead: _Lead | None = None,
+    ) -> None:
         async with self._restart_lock:
-            now = time.monotonic()
-            self._crashes = [stamp for stamp in self._crashes if now - stamp < self.crash_window_s]
-            if crash:
-                self._crashes.append(now)
-            if len(self._crashes) > 3:
-                await self._pause("error_storm", None)
+            if server_generation is not None and server_generation != self._server_generation:
+                server = self._server
+                if crash_lead is None or crash_lead.outcome_delivered:
+                    return
+                if server is not None and server.returncode is None:
+                    await self._fail(crash_lead, "appserver_restart", False, crash_detail or reason)
+                    return
+                server_generation = self._server_generation
+            if crash and server_generation in self._restarted_crash_generations:
+                if crash_lead is not None and not crash_lead.outcome_delivered:
+                    await self._fail(crash_lead, "appserver_restart", False, crash_detail or reason)
                 return
+            if crash and server_generation is not None:
+                self._restarted_crash_generations.add(server_generation)
+            active = [lead for lead in self._leads.values() if not lead.outcome_delivered] if crash else []
+            if crash:
+                self._isolation_leads.update(lead.task.lead_id for lead in active)
+                self._refresh_isolation()
+            if crash:
+                self._crashes.append(time.monotonic())
             if self._server is not None:
                 await self._server.stop()
             self._server = None
-            for lead in list(self._leads.values()):
-                await self._fail(lead, reason, False, "app-server restarted")
+            for active_lead in active or list(self._leads.values()):
+                if crash and active_lead is crash_lead:
+                    await self._fail(active_lead, "appserver_crash", False, crash_detail or reason)
+                else:
+                    await self._fail(active_lead, reason, False, "app-server restarted")
+            if len(self._crashes) >= 4:
+                await self._pause("error_storm", None)
+                return
             if self.restart_backoff_s:
                 await asyncio.sleep(self.restart_backoff_s)
-            await self._launch_and_prepare()
+            try:
+                await self._launch_and_prepare()
+            except Exception:
+                server = self._server
+                self._server = None
+                if server is not None:
+                    await server.stop()
+                await self._pause("error_storm", None)
+
+    def _refresh_isolation(self) -> None:
+        setter = getattr(self.callbacks, "set_isolation_leads", None)
+        if setter is None:
+            return
+        result = setter(frozenset(self._isolation_leads))
+        if not isinstance(result, frozenset):
+            raise TypeError("set_isolation_leads must return a frozenset")
+        self._isolation_leads = set(result)

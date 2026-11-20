@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -43,6 +44,7 @@ class AppServerClient:
         self._any: list[Callback] = []
         self.malformed_lines = 0
         self._closed = False
+        self.callback_error: Exception | None = None
         self._reader_task = asyncio.create_task(self._read_loop())
 
     async def request(
@@ -50,6 +52,8 @@ class AppServerClient:
     ) -> JsonObject:
         if method in FORBIDDEN_METHODS or "apiKey" in method:
             raise ForbiddenMethodError(f"forbidden outgoing method: {method}")
+        if self._closed:
+            raise ConnectionError("app-server connection closed")
         request_id = self._next_id
         self._next_id += 1
         future: asyncio.Future[JsonObject] = asyncio.get_running_loop().create_future()
@@ -96,16 +100,22 @@ class AppServerClient:
                     continue
                 try:
                     await self._dispatch(message)
-                except Exception:
+                except Exception as exc:
+                    self.callback_error = exc
                     log.exception("app-server notification callback failed")
+                    return
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("app-server reader failed")
         finally:
-            for future in self._pending.values():
-                if not future.done():
-                    future.set_exception(ConnectionError("app-server connection closed"))
+            self._fail_pending()
+
+    def _fail_pending(self) -> None:
+        error = ConnectionError("app-server connection closed")
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(error)
 
     async def _dispatch(self, message: JsonObject) -> None:
         if "id" in message and ("result" in message or "error" in message):
@@ -148,7 +158,9 @@ class AppServerClient:
         if self._closed:
             return
         self._closed = True
+        self._fail_pending()
         self._reader_task.cancel()
         await asyncio.gather(self._reader_task, return_exceptions=True)
-        self.writer.close()
-        await self.writer.wait_closed()
+        with contextlib.suppress(OSError, ConnectionError):
+            self.writer.close()
+            await self.writer.wait_closed()

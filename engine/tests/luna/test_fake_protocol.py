@@ -4,6 +4,9 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft7Validator
 
+from bca.bq.pull import build_bundle
+from bca.mask.masker import MaskingContext, mask_text
+from bca.store import CapRule
 from tests.fakes import fake_codex
 
 
@@ -56,3 +59,22 @@ def test_fake_rejects_unknown_scenario_keys(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unknown fake Codex scenario keys"):
         fake_codex._scenario(scenario_path)
+
+
+def test_fake_codex_selects_lead_from_bundle_token() -> None:
+    transcript = mask_text("Synthetic Name says hello. zzlead10zz " + ("x" * 25), MaskingContext()).text
+    bundle = build_bundle(
+        "10",
+        [
+            {
+                "call_id": "call-10-synthetic-0",
+                "transcript_text": transcript,
+                "call_start": "synthetic-start-0",
+                "duration": 200,
+            }
+        ],
+        CapRule(100, "drop_short_then_oldest", 180),
+    )
+    prompt = "Return the answer.\n" + bundle.text
+
+    assert fake_codex._lead_from_params({"input": [{"type": "text", "text": prompt}]}) == "10"

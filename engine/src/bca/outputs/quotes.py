@@ -93,7 +93,7 @@ def check_answer(
     elif isinstance(raw_call, int):
         call = raw_call
     elif (isinstance(raw_call, float) and raw_call.is_integer()) or (
-        isinstance(raw_call, str) and raw_call.isdigit()
+        isinstance(raw_call, str) and re.fullmatch(r"[0-9]+", raw_call) is not None
     ):
         call = int(raw_call)
     else:

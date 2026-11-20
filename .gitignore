@@ -52,3 +52,7 @@ uv-*.lock
 engine/.pytest_tmp_root/
 engine/.pytest_tmp_root2/
 engine/.pytest_tmp_alt/
+**/raw/*.jsonl.gz
+harvested_names.json
+engine/pytest_tmp*/
+**/pytest_tmp*/

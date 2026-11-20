@@ -105,6 +105,11 @@ def run_preflight(
         if bucket != "usable" and persist:
             status = LeadStatus(bucket)
             store.set_lead_status(job_id, lead_id, status)
+            with store.transaction() as cur:
+                cur.execute(
+                    "UPDATE leads SET calls_dropped_unusable=? WHERE job_id=? AND lead_id=?",
+                    (max(0, _number(row["calls"]) - usable), job_id, lead_id),
+                )
     if sum(buckets.values()) != len(lead_ids):
         raise RuntimeError("preflight bucket counts do not reconcile")
     return Preflight(buckets, per_lead, dry.bytes, capped_leads)
@@ -155,10 +160,15 @@ def pull_transcripts(
             handle.close()
     with store.transaction() as cur:
         for lead_id, count in counts.items():
-            status = LeadStatus.pulled if count else LeadStatus.no_transcript
+            existing = cur.execute(
+                "SELECT status FROM leads WHERE job_id=? AND lead_id=?", (job_id, lead_id)
+            ).fetchone()
+            status = str(existing[0]) if existing is not None else str(LeadStatus.pending)
+            if status in {LeadStatus.pending, LeadStatus.pulled}:
+                status = str(LeadStatus.pulled if count else LeadStatus.no_transcript)
             cur.execute(
                 "UPDATE leads SET status=?, calls_pulled=? WHERE job_id=? AND lead_id=?",
-                (str(status), count, job_id, lead_id),
+                (status, count, job_id, lead_id),
             )
     return PullStats(sum(counts.values()), sum(1 for count in counts.values() if count), dry.bytes)
 
