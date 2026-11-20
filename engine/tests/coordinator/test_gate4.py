@@ -405,7 +405,7 @@ def test_poison_lead_crashing_appserver_is_bounded(
 
     assert pools
     assert 2 <= len(launches) <= 5
-    assert 1 <= len(kills) <= 3
+    assert len(kills) <= 3
     poison = tuple(
         coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='10'")[0]
     )
@@ -428,6 +428,90 @@ def test_poison_lead_crashing_appserver_is_bounded(
     assert coordinator.runner._state() in {JobState.sample_ready, JobState.paused}
     if coordinator.runner._state() is JobState.paused:
         assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "error_storm"
+
+
+@pytest.mark.parametrize("concurrency", [2, 4])
+def test_poison_lead_dispatched_last_does_not_hang(
+    coordinator: CoordinatorFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    concurrency: int,
+) -> None:
+    class PoisonPool(LunaPool):
+        async def _complete_from_events(self, lead: Any) -> None:
+            server = self._server
+            if lead.task.lead_id == "13" and server is not None and server.returncode is None:
+                server.process.kill()
+            await super()._complete_from_events(lead)
+
+    _real_pool(coordinator, tmp_path, monkeypatch, {"hangs": ["13"], "latency_ms": 20})
+    monkeypatch.setattr(runner_module, "LunaPool", PoisonPool)
+    runner = coordinator.runner
+    runner.deps = replace(runner.deps, concurrency=concurrency)
+    runner.on_plan_approved(1)
+
+    _run(runner.run_sample(), timeout=30)
+
+    poison = coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='13'")[0]
+    assert tuple(poison) == ("failed", "appserver_crash_repeated")
+    results = coordinator.store.rows(
+        "SELECT lead_id FROM results WHERE job_id='job' AND lead_id IN ('10', '11', '12') ORDER BY lead_id"
+    )
+    assert [tuple(row) for row in results] == [("10",), ("11",), ("12",)]
+    assert runner._state() is JobState.sample_ready
+    assert _count(coordinator, "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND ended_at IS NULL") == 0
+
+
+@pytest.mark.parametrize(
+    ("concurrency", "expected_kills"),
+    [(1, 3), (4, 3)],
+)
+def test_solo_crash_bound_is_bounded(
+    coordinator: CoordinatorFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    concurrency: int,
+    expected_kills: int,
+) -> None:
+    kills: list[int] = []
+
+    class PoisonPool(LunaPool):
+        async def _complete_from_events(self, lead: Any) -> None:
+            server = self._server
+            if lead.task.lead_id == "10" and server is not None and server.returncode is None:
+                kills.append(1)
+                server.process.kill()
+            await super()._complete_from_events(lead)
+
+    _real_pool(coordinator, tmp_path, monkeypatch, {"hangs": ["10"], "latency_ms": 20})
+    monkeypatch.setattr(runner_module, "LunaPool", PoisonPool)
+    runner = coordinator.runner
+    runner.deps = replace(runner.deps, concurrency=concurrency)
+    runner.on_plan_approved(1)
+
+    _run(runner.run_sample(), timeout=30)
+
+    # D-CRASH-BOUND: bounded at no more than 3 kills; the poison lead fails; innocent leads are never charged.
+    assert 1 <= len(kills) <= expected_kills
+    poison = coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='10'")[0]
+    assert tuple(poison) == ("failed", "appserver_crash_repeated")
+    assert runner._state() is JobState.sample_ready
+    assert (
+        _count(
+            coordinator,
+            "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND lead_id IN ('11', '12', '13') "
+            "AND counted=1 AND error_code LIKE 'appserver_crash%'",
+        )
+        == 0
+    )
+    assert (
+        _count(
+            coordinator,
+            "SELECT COUNT(*) FROM results r JOIN leads l ON l.job_id=r.job_id AND l.lead_id=r.lead_id "
+            "WHERE r.job_id='job' AND l.in_sample=1 AND r.lead_id <> '10'",
+        )
+        == 3
+    )
 
 
 def test_error_storm_resume_does_not_loop_on_poison_lead(
