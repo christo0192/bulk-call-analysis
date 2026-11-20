@@ -516,6 +516,8 @@ class JobRunner:
         self._liveness = Liveness(lambda: deps.concurrency, deps.config.limits.lead_timeout_s)
         self._sleep = SleepDetector(clock=deps.clock)
         self._masking_task: asyncio.Task[None] | None = None
+        self._masking_thread_task: asyncio.Task[Any] | None = None
+        self._masking_thread_done = threading.Event()
         self._phase_event: asyncio.Event | None = None
         self._phase_loop: asyncio.AbstractEventLoop | None = None
         self._phase_pool: CoordinatorPool | None = None
@@ -551,7 +553,7 @@ class JobRunner:
 
     async def wait_for_workers(self) -> None:
         while self._worker_tasks:
-            await asyncio.gather(*tuple(self._worker_tasks), return_exceptions=True)
+            await asyncio.shield(asyncio.gather(*tuple(self._worker_tasks), return_exceptions=True))
 
     async def _worker(self, function: Callable[..., Any], *args: Any) -> Any:
         task = asyncio.create_task(asyncio.to_thread(function, *args))
@@ -781,6 +783,12 @@ class JobRunner:
                 if phase_event is not None:
                     self._phase_loop.call_soon_threadsafe(phase_event.set)
 
+    def _prepare_leads_with_completion(self, lead_ids: Iterable[str], sample: bool) -> None:
+        try:
+            self._prepare_leads(lead_ids, sample)
+        finally:
+            self._masking_thread_done.set()
+
     async def _task_list(self, sample: bool, lead_ids: list[str]) -> list[LeadTask]:
         self._refresh_spec()
         self._load_pending_repairs()
@@ -809,12 +817,12 @@ class JobRunner:
                     len(bundle.calls_dropped),
                     bundle.chars,
                 )
-            except Exception as exc:
+            except Exception:
                 self.deps.store.set_lead_status(
                     self.job_id,
                     lead_id,
                     LeadStatus.held_back,
-                    f"masked bundle unavailable: {type(exc).__name__}: {exc}",
+                    "masked_bundle_unavailable",
                 )
                 continue
             prompt = self.spec.instructions + "\n" + bundle.text
@@ -991,6 +999,13 @@ class JobRunner:
     def _start_masking_worker(self, sample: bool) -> None:
         if self._masking_task is not None and not self._masking_task.done():
             return
+        if self._masking_thread_task is not None and (
+            not self._masking_thread_task.done() or not self._masking_thread_done.is_set()
+        ):
+            # The driver may have been cancelled while its waiter was running;
+            # the thread remains the single owner of this masking pass.
+            self._masking_task = asyncio.create_task(self._await_masking_thread(self._masking_thread_task))
+            return
         lead_ids = [
             str(row[0])
             for row in self.deps.store.rows(
@@ -1000,9 +1015,29 @@ class JobRunner:
             )
         ]
         if lead_ids:
-            self._masking_task = asyncio.create_task(self._worker(self._prepare_leads, lead_ids, sample))
+            self._masking_thread_done.clear()
+            thread_task = asyncio.create_task(
+                asyncio.to_thread(self._prepare_leads_with_completion, lead_ids, sample)
+            )
+            self._masking_thread_task = thread_task
+            self._worker_tasks.add(thread_task)
+            thread_task.add_done_callback(self._worker_tasks.discard)
+            self._masking_task = asyncio.create_task(self._await_masking_thread(thread_task))
         elif self._masking_task is not None and self._masking_task.done():
             self._masking_task = None
+
+    async def _await_masking_thread(self, task: asyncio.Task[Any]) -> None:
+        await asyncio.shield(task)
+
+    def _masking_thread_active(self) -> bool:
+        return self._masking_thread_task is not None and (
+            not self._masking_thread_task.done() or not self._masking_thread_done.is_set()
+        )
+
+    def _clear_masking_tasks(self) -> None:
+        self._masking_task = None
+        self._masking_thread_task = None
+        self._masking_thread_done.clear()
 
     async def _wait_for_masking(self, sample: bool) -> bool:
         """Wait for masking while rechecking persisted state and control state."""
@@ -1011,13 +1046,19 @@ class JobRunner:
                 return False
             task = self._masking_task
             if task is None or task.done():
-                if task is not None:
-                    await asyncio.shield(task)
-                    self._masking_task = None
+                if self._masking_thread_active():
+                    self._start_masking_worker(sample)
+                    task = self._masking_task
+                elif task is not None:
+                    thread_task = self._masking_thread_task
+                    if thread_task is not None:
+                        await asyncio.shield(thread_task)
+                    self._clear_masking_tasks()
                 if not self._masking_needed(sample):
                     return True
-                self._start_masking_worker(sample)
-                task = self._masking_task
+                if task is None:
+                    self._start_masking_worker(sample)
+                    task = self._masking_task
             if task is None:
                 return not self._masking_needed(sample)
             try:
@@ -1106,15 +1147,25 @@ class JobRunner:
                 if self._masking_task is not None and self._masking_task.done():
                     masking_task = self._masking_task
                     self._masking_task = None
-                    if masking_task.cancelled():
+                    if self._masking_thread_active():
+                        self._start_masking_worker(sample)
+                    elif masking_task.cancelled():
                         current = asyncio.current_task()
                         if current is not None and current.cancelling():
                             raise asyncio.CancelledError
-                        self._start_masking_worker(sample)
+                        thread_task = self._masking_thread_task
+                        if thread_task is not None:
+                            thread_task.result()
+                        self._clear_masking_tasks()
                     else:
                         try:
-                            masking_task.result()
+                            thread_task = self._masking_thread_task
+                            if thread_task is not None:
+                                thread_task.result()
+                            else:
+                                masking_task.result()
                         except StopRequested:
+                            self._clear_masking_tasks()
                             return
                         except Exception:
                             if self._state() not in {
@@ -1128,6 +1179,7 @@ class JobRunner:
                                     "masking_failed",
                                 )
                             raise
+                        self._clear_masking_tasks()
                 if self._state() is not self._phase_state(sample) or self._phase_finished(sample):
                     break
                 if canary and callbacks.attempt_ended:
@@ -1326,12 +1378,12 @@ class JobRunner:
                         "in_sample=1 WHERE job_id=? AND lead_id=?",
                         (bundle.calls_sent, len(bundle.calls_dropped), bundle.chars, self.job_id, lead_id),
                     )
-            except Exception as exc:
+            except Exception:
                 self.deps.store.set_lead_status(
                     self.job_id,
                     lead_id,
                     LeadStatus.held_back,
-                    f"masked bundle unavailable: {type(exc).__name__}: {exc}",
+                    "masked_bundle_unavailable",
                 )
         sample_set = set(sample)
         for lead_id in usable:

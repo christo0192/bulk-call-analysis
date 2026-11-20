@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import pytest
 
+import bca.coordinator.runner as runner_module
 from bca.api.production import JobManager, ProductionBackend
 from bca.api.server import ApiService, JsonRpcServer, RpcError
 from bca.bq.runner import DryRun
@@ -26,6 +27,7 @@ from bca.config import (
     SiteConfig,
 )
 from bca.coordinator.runner import JobRunner
+from bca.mask.masker import mask_lead_stream
 from bca.monitor.events import Event
 from bca.store import JobSpec, JobState, LeadSourceIds, open_store, save_spec
 from bca.store.spec import CapRule, UsableRule
@@ -558,6 +560,43 @@ def test_full_run_after_sample_does_not_start_a_second_masker(
         "\\" not in str(reason) and "/" not in str(reason) and "Error" not in str(reason)
         for _status, reason in held_back
     )
+
+
+def test_pause_during_full_run_masker_wait_never_double_masks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_mask = mask_lead_stream
+    for attempt in range(3):
+        data_dir = tmp_path / f"masker-attempt-{attempt}"
+        data_dir.mkdir()
+        calls: dict[str, int] = {}
+
+        def slow_mask(raw: Path, masked: Path, context: Any, _calls: dict[str, int] = calls) -> Any:
+            lead_id = raw.name.removesuffix(".jsonl.gz")
+            _calls[lead_id] = _calls.get(lead_id, 0) + 1
+            time.sleep(0.05)
+            return original_mask(raw, masked, context)
+
+        monkeypatch.setattr(runner_module, "mask_lead_stream", slow_mask)
+        backend, _job_dir = _tiny_job(data_dir, monkeypatch, latency_ms=1)
+
+        async def scenario(_backend: ProductionBackend = backend) -> None:
+            await _backend.call("job/approvePlan", {"job": "job-one", "expectedSpecVersion": 1})
+            await _wait_state(_backend, "sample_ready", limit=60, poll=0.05)
+            await _backend.call("job/approveSample", {"job": "job-one", "expectedSpecVersion": 1})
+            await _backend.call("job/startFull", {"job": "job-one"})
+            await asyncio.sleep(0.3)
+            await _backend.call("job/pause", {"job": "job-one"})
+            await asyncio.sleep(0.2)
+            await _backend.call("job/resume", {"job": "job-one"})
+            await _wait_state(_backend, "done_with_issues", limit=90, poll=0.05)
+
+        run(scenario())
+        held_back = backend.store.rows(
+            "SELECT lead_id, reason FROM leads WHERE job_id=? AND reason='masking_failed'", ("job-one",)
+        )
+        assert held_back == []
+        assert all(count == 1 for count in calls.values())
 
 
 def test_each_transition_emits_job_state_exactly_once(

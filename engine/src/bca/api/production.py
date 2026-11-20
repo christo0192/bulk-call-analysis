@@ -164,6 +164,8 @@ class JobManager:
             try:
                 await runner._worker(runner.recover)
                 current = runner._state()
+                if current is JobState.paused:
+                    return
                 if current in {JobState.plan_approved, JobState.pulling, JobState.masking_sample}:
                     await runner._worker(runner.prepare_sample)
                     if runner._state() is JobState.sample_running:
@@ -257,6 +259,8 @@ class JobManager:
             except TimeoutError:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+            except Exception:
+                logging.getLogger("bca.api").exception("Paused job driver failed for %s", job_id)
         self.tasks.pop(job_id, None)
 
     async def shutdown(self) -> None:
@@ -1112,6 +1116,8 @@ class ProductionBackend(ApiBackend):
                     raise RpcError(-32001, "Plan approval failed", {"reason": "stale_spec_version"}) from exc
 
                 async def prepare_and_run(sample_runner: JobRunner) -> None:
+                    if sample_runner._state() is not JobState.plan_approved:
+                        return
                     await sample_runner._worker(sample_runner.prepare_sample)
                     if (
                         sample_runner._stop_requested.is_set()
@@ -1137,7 +1143,13 @@ class ProductionBackend(ApiBackend):
                     start_full_run(self.store, job, "operator")
                 except TransitionError as exc:
                     raise RpcError(-32001, "Full run failed", {"reason": "invalid_job_state"}) from exc
-                await self.jobs.start(job, lambda r: r.start_full_run())
+
+                async def start_full(full_runner: JobRunner) -> None:
+                    if full_runner._state() is not JobState.full_running:
+                        return
+                    await full_runner.start_full_run()
+
+                await self.jobs.start(job, start_full)
                 return self._job_status(job)
             if method == "job/pause":
                 self._validate_job_operation(job, method)
@@ -1148,7 +1160,13 @@ class ProductionBackend(ApiBackend):
                 return self._job_status(job)
             if method == "job/resume":
                 self._validate_job_operation(job, method)
-                await self.jobs.start(job, lambda r: r.resume("operator"))
+
+                async def resume_paused(paused_runner: JobRunner) -> None:
+                    if paused_runner._state() is not JobState.paused:
+                        return
+                    await paused_runner.resume("operator")
+
+                await self.jobs.start(job, resume_paused)
                 return self._job_status(job)
             if method == "job/rebuildRules":
                 runner = self.jobs.runner(job)
