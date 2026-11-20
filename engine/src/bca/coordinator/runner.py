@@ -5,6 +5,7 @@ import contextlib
 import gzip
 import json
 import logging
+import sqlite3
 import threading
 import time
 import uuid
@@ -724,28 +725,30 @@ class JobRunner:
                 context = self._context()
                 stats = mask_lead_stream(raw, masked, context)
                 report = scan_lead(masked, context.allow_ids)
-            except Exception:
-                if self._stop_requested.is_set():
+            except Exception as exc:
+                if self._stop_requested.is_set() or isinstance(
+                    exc, (sqlite3.OperationalError, sqlite3.ProgrammingError)
+                ):
                     raise
-                raw.unlink(missing_ok=True)
                 self.deps.store.set_lead_status(
                     self.job_id,
                     lead_id,
                     LeadStatus.held_back,
                     "masking_failed",
                 )
+                raw.unlink(missing_ok=True)
                 continue
             if stats.failed or report.held_back:
                 reason = "masking_failed" if stats.failed else "leak_scan_hold_back"
-                raw.unlink(missing_ok=True)
                 self.deps.store.set_lead_status(self.job_id, lead_id, LeadStatus.held_back, reason)
+                raw.unlink(missing_ok=True)
                 continue
             try:
                 calls = self._lead_calls(lead_id)
                 bundle = build_bundle(lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit)
                 if bundle.calls_sent == 0:
-                    raw.unlink(missing_ok=True)
                     self._hold_empty_bundle(lead_id, bundle)
+                    raw.unlink(missing_ok=True)
                     continue
                 self._bundles[lead_id] = (self.spec.spec_version, None)
                 self._bundle_metadata[lead_id] = (
@@ -767,16 +770,18 @@ class JobRunner:
                         ),
                     )
                 raw.unlink(missing_ok=True)
-            except Exception:
-                if self._stop_requested.is_set():
+            except Exception as exc:
+                if self._stop_requested.is_set() or isinstance(
+                    exc, (sqlite3.OperationalError, sqlite3.ProgrammingError)
+                ):
                     raise
-                raw.unlink(missing_ok=True)
                 self.deps.store.set_lead_status(
                     self.job_id,
                     lead_id,
                     LeadStatus.held_back,
                     "masking_failed",
                 )
+                raw.unlink(missing_ok=True)
                 continue
             if self._phase_loop is not None:
                 phase_event = self._phase_event
@@ -1005,6 +1010,7 @@ class JobRunner:
             # The driver may have been cancelled while its waiter was running;
             # the thread remains the single owner of this masking pass.
             self._masking_task = asyncio.create_task(self._await_masking_thread(self._masking_thread_task))
+            self._masking_task.add_done_callback(self._consume_task_exception)
             return
         lead_ids = [
             str(row[0])
@@ -1023,11 +1029,18 @@ class JobRunner:
             self._worker_tasks.add(thread_task)
             thread_task.add_done_callback(self._worker_tasks.discard)
             self._masking_task = asyncio.create_task(self._await_masking_thread(thread_task))
+            thread_task.add_done_callback(self._consume_task_exception)
+            self._masking_task.add_done_callback(self._consume_task_exception)
         elif self._masking_task is not None and self._masking_task.done():
             self._masking_task = None
 
     async def _await_masking_thread(self, task: asyncio.Task[Any]) -> None:
         await asyncio.shield(task)
+
+    @staticmethod
+    def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+        if not task.cancelled():
+            task.exception()
 
     def _masking_thread_active(self) -> bool:
         return self._masking_thread_task is not None and (

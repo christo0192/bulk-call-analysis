@@ -203,8 +203,12 @@ class JobManager:
                 raise RpcError(-32001, "Job not found", {"job": job_id})
             runner = self.runner(job_id)
             await runner.wait_for_workers()
+            if self.backend._stopping:
+                return
             runner.clear_stop()
             try:
+                if self.backend._stopping:
+                    return
                 await operation(runner)
             except StopRequested:
                 return
@@ -269,8 +273,13 @@ class JobManager:
         # Let already-scheduled recovery wrappers create their drivers so the
         # same stop-and-wait path covers startup recovery as well.
         await asyncio.sleep(0)
+        for runner in self.runners.values():
+            runner.request_stop()
         for job_id in list(self.tasks):
             await self.stop(job_id, timeout=1.0)
+        for runner in self.runners.values():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(runner.wait_for_workers(), 5.0)
         recovery_tasks = tuple(self._recovery_tasks)
         for task in recovery_tasks:
             if not task.done():
