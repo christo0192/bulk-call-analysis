@@ -905,7 +905,13 @@ def test_idle_engine_cpu_is_low(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_every_state_change_emits_job_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    backend, _job_dir = _tiny_job(tmp_path, monkeypatch, latency_ms=1)
+    class SlowBq(FakeBqRunner):
+        # Hold the pull long enough to observe the pulling state on fast machines.
+        def iter_pages(self, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+            time.sleep(1.5)
+            yield from super().iter_pages(*args, **kwargs)
+
+    backend, _job_dir = _tiny_job(tmp_path, monkeypatch, latency_ms=1, bq_cls=SlowBq)
     service = ApiService(backend, backend.event_bus)
     notifications: list[dict[str, object]] = []
 
@@ -1153,6 +1159,7 @@ def test_stdio_shutdown_during_long_pull_exits_fast(tmp_path: Path, monkeypatch:
 def _missing_conversation_launcher(tmp_path: Path) -> Path:
     script = tmp_path / "missing-conversation.py"
     script.write_text(
+        f"#!{sys.executable}\n"
         """import json, sys
 if sys.argv[1:4] == ["auth", "status", "--json"]:
     print(json.dumps({"loggedIn": True, "authMethod": "claude.ai"}), flush=True)
