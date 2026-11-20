@@ -47,6 +47,28 @@ def test_winjob_sets_kill_on_close_flag() -> None:
         child.wait(timeout=10)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows job objects are Windows-only")
+def test_assign_process_succeeds_for_own_child() -> None:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    job: object | None = None
+    try:
+        job = create_kill_on_close_job()
+        assert job is not None
+        assign_process(job, child.pid)
+        close_job(job)
+        job = None
+        deadline = time.monotonic() + 10
+        while pid_alive(child.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not pid_alive(child.pid)
+    finally:
+        if job is not None:
+            close_job(job)
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
 def test_killed_parent_leaves_no_descendants(tmp_path: Path) -> None:
     go_file = tmp_path / "go"
     pid_file = tmp_path / "pids"
@@ -89,13 +111,10 @@ def test_killed_parent_leaves_no_descendants(tmp_path: Path) -> None:
             asyncio.run(_terminate_process_tree(_as_async_process(parent), None))
         parent.wait(timeout=5)
         deadline = time.monotonic() + 10
-        while any(pid_alive(pid) for pid in descendants) and time.monotonic() < deadline:
+        while any(pid_alive(pid) for pid in [parent.pid, *descendants]) and time.monotonic() < deadline:
             time.sleep(0.05)
+        assert not pid_alive(parent.pid)
         assert not any(pid_alive(pid) for pid in descendants)
-    except OSError as error:
-        if getattr(error, "winerror", None) == 5:
-            pytest.skip("Windows runner has a nested job without breakaway")
-        raise
     finally:
         if job is not None:
             close_job(job)

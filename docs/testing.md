@@ -36,8 +36,8 @@ Safety tests are in `engine/tests/safety`. They verify the child environment,
 configuration isolation, billing guard, initialization guard, and orphan
 handling. The orphan test uses the engine's process-tree termination helper on
 POSIX and a kill-on-close Windows job assigned before the parent spawns its
-children; on Windows it requires a runner without a nested job. They use only
-fakes and synthetic data.
+children; on Windows it verifies that closing the kill-on-close job terminates the
+parent and both descendants. They use only fakes and synthetic data.
 
 To measure memory, run `python scripts/footprint.py --pid PID --interval 5
 --duration 600 --out footprint.csv`. For a synthetic in-process run, use

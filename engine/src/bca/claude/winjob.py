@@ -10,6 +10,9 @@ from typing import Any, ClassVar, cast
 
 LOGGER = logging.getLogger(__name__)
 
+PROCESS_SET_QUOTA = 0x0100
+PROCESS_TERMINATE = 0x0001
+
 
 def _last_error() -> int:
     return int(getattr(ctypes, "get_last_error")())  # noqa: B009
@@ -119,7 +122,9 @@ def assign_process(job: object, pid: int) -> None:
     kernel.OpenProcess.restype = ctypes.c_void_p
     kernel.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     kernel.AssignProcessToJobObject.restype = ctypes.c_int
-    process = kernel.OpenProcess(0x0200 | 0x0400 | 0x0001, False, pid)
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel.CloseHandle.restype = ctypes.c_int
+    process = kernel.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
     if not process:
         raise _windows_error(_last_error())
     try:
@@ -138,10 +143,8 @@ def assign_kill_on_close(pid: int) -> object | None:
     try:
         assign_process(handle, pid)
     except (AttributeError, OSError, ctypes.ArgumentError) as error:
-        if getattr(error, "winerror", None) == 5:
-            LOGGER.warning("cannot assign process %s to job: process is already in a non-breakaway job", pid)
-        else:
-            LOGGER.warning("failed to assign process %s to containment job: %s", pid, error)
+        error_code = getattr(error, "winerror", None)
+        LOGGER.warning("assignment failed for process %s (error %s): %s", pid, error_code, error)
         close_job(handle)
         return None
     return handle
