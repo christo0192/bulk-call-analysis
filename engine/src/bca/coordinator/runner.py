@@ -1154,9 +1154,25 @@ class JobRunner:
                         if current is not None and current.cancelling():
                             raise asyncio.CancelledError
                         thread_task = self._masking_thread_task
-                        if thread_task is not None:
-                            thread_task.result()
                         self._clear_masking_tasks()
+                        if thread_task is not None and not thread_task.cancelled():
+                            try:
+                                thread_task.result()
+                            except StopRequested:
+                                return
+                            except Exception:
+                                if self._state() not in {
+                                    JobState.paused,
+                                    JobState.stalled,
+                                    JobState.done,
+                                    JobState.done_with_issues,
+                                }:
+                                    self._transition(
+                                        JobState.stalled,
+                                        "masking_failed",
+                                    )
+                                raise
+                        self._start_masking_worker(sample)
                     else:
                         try:
                             thread_task = self._masking_thread_task
