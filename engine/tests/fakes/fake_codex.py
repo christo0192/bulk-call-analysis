@@ -12,6 +12,7 @@ from typing import Any
 _SCENARIO_KEYS = frozenset(
     {
         "answers",
+        "answers_after_first",
         "approval_request",
         "crash_after_turns",
         "crash_once_file",
@@ -32,9 +33,23 @@ _SCENARIO_KEYS = frozenset(
         "reroute_once",
         "spend_control_reached",
         "tool_call",
+        "tool_call_type",
         "used_percent",
     }
 )
+
+
+def _config_marker() -> None:
+    configured = os.environ.get("CODEX_HOME")
+    if configured:
+        directory = Path(configured)
+    else:
+        home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+        if not home:
+            raise RuntimeError("fake Codex requires HOME or USERPROFILE when CODEX_HOME is unset")
+        directory = Path(home) / ".codex"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "fake-codex-start.marker").write_text("started\n", encoding="utf-8", newline="\n")
 
 
 def _scenario(path: Path) -> dict[str, Any]:
@@ -51,11 +66,14 @@ def _lead_from_params(params: dict[str, Any]) -> str:
     serialized = json.dumps(params)
     match = re.search(r"zzlead(\w+)zz", serialized)
     if match is None:
+        match = re.search(r"zz([^\s\"']+)zz", serialized)
+    if match is None:
         match = re.search(r"call-([^\s-]+)-synthetic", serialized)
     return match.group(1) if match else "default"
 
 
 async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -> None:
+    _config_marker()
     scenario = _scenario(path)
     env_report = scenario.get("env_report")
     if isinstance(env_report, str):
@@ -66,6 +84,7 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
             encoding="utf-8",
         )
     log_path = Path(str(path) + ".methods.json")
+    prompt_path = Path.cwd() / "fake-codex-prompts.jsonl"
     log_file = log_path.open("w", encoding="utf-8")
     rerouted_once_path = Path(str(path) + ".rerouted-once.json")
     rerouted_once: set[str] = set()
@@ -145,6 +164,8 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
             result = {"thread": {"id": thread_id}}
             await send({"method": "thread/started", "params": {"thread": {"id": thread_id}}})
         elif method == "turn/start":
+            with prompt_path.open("a", encoding="utf-8", newline="\n") as prompt_log:
+                prompt_log.write(json.dumps(params, ensure_ascii=False) + "\n")
             turns += 1
             thread_id = str(params.get("threadId", "thread-1"))
             turn_id = f"turn-{turns}"
@@ -189,7 +210,7 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                         "params": {
                             "threadId": thread_id,
                             "turnId": turn_id,
-                            "item": {"type": "commandExecution"},
+                            "item": {"type": str(scenario.get("tool_call_type", "commandExecution"))},
                         },
                     }
                 )
@@ -215,6 +236,8 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                     rerouted_once_path.write_text(
                         json.dumps(sorted(rerouted_once)), encoding="utf-8", newline="\n"
                     )
+                models = scenario.get("models", ["codex"])
+                to_model = str(models[1]) if isinstance(models, list) and len(models) > 1 else "codex-mini"
                 await send(
                     {
                         "method": "model/rerouted",
@@ -222,7 +245,7 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                             "threadId": thread_id,
                             "turnId": turn_id,
                             "fromModel": "codex",
-                            "toModel": "codex-mini",
+                            "toModel": to_model,
                             "reason": "fake",
                         },
                     }
@@ -264,8 +287,17 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
                 )
             else:
                 answer = scenario.get("answers", {}).get(lead, scenario.get("default_answer", {"ok": True}))
+                after_first_answers = scenario.get("answers_after_first", {})
+                if (
+                    isinstance(after_first_answers, dict)
+                    and lead in after_first_answers
+                    and lead in answered_once
+                ):
+                    answer = after_first_answers[lead]
                 text = answer if isinstance(answer, str) else json.dumps(answer)
-                if isinstance(after_first, dict) and lead in after_first:
+                if (isinstance(after_first, dict) and lead in after_first) or (
+                    isinstance(after_first_answers, dict) and lead in after_first_answers
+                ):
                     answered_once.add(lead)
                     answered_once_path.write_text(
                         json.dumps(sorted(answered_once)), encoding="utf-8", newline="\n"

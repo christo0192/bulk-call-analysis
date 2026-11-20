@@ -433,6 +433,8 @@ class ProductionBackend(ApiBackend):
                 from tests.fakes import fake_codex
 
                 scenario = job_dir / "fake-codex-scenario.json"
+                # Launch the fake by file path: a `-m tests.fakes...` launch cannot import `tests`
+                # from the job directory with the scrubbed environment.
                 command = (sys.executable, str(Path(fake_codex.__file__)), "--scenario", str(scenario))
                 return await start_app_server(CodexLaunch(command, self.app_data / "codex", job_dir))
             executable = Path(os.environ.get("BCA_CODEX_BIN", "codex"))

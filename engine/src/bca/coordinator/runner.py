@@ -22,7 +22,7 @@ from bca.luna.pool import LeadTask, LunaPool, PoolCallbacks
 from bca.luna.quota import Decision, QuotaGuard, QuotaSnapshot
 from bca.mask.leakscan import scan_lead
 from bca.mask.masker import MaskingContext, load_harvest, mask_lead_stream
-from bca.mask.names import harvest_seen_twice
+from bca.mask.names import Span, harvest_seen_twice
 from bca.monitor.eta import EtaEstimator
 from bca.monitor.events import Event, EventBus, EventKind
 from bca.monitor.liveness import Liveness
@@ -70,6 +70,13 @@ class CoordinatorPool(Protocol):
 
     @property
     def pending_pause(self) -> tuple[str, int | None] | None: ...
+
+
+class _WholeTextNer:
+    """Treat each already-extracted name as one complete person span."""
+
+    def persons(self, text: str) -> list[Span]:
+        return [Span(0, len(text))]
 
 
 MaskerFactory = Callable[..., MaskingContext]
@@ -364,7 +371,14 @@ class _Callbacks(PoolCallbacks):
                 LOGGER.warning("ignoring failure for closed attempt %s", task.attempt_id)
                 if self.runner.deps.store.release_claim(self.runner.job_id, task.lead_id):
                     self._queue_tasks([replace(task, attempt_id=str(uuid.uuid4()))])
-            if task.lead_id in self.runner._quote_failures:
+            if error_code == "tool_call_forbidden":
+                # A forbidden item is a terminal safety decision, independent of
+                # the normal counted-attempt budget.
+                self.runner.deps.store.set_lead_status(
+                    self.runner.job_id, task.lead_id, LeadStatus.failed, error_code
+                )
+                self.runner._drop_lead_state(task.lead_id)
+            elif task.lead_id in self.runner._quote_failures:
                 if counted:
                     self.runner.deps.store.set_lead_status(
                         self.runner.job_id, task.lead_id, LeadStatus.done, "quote repair failed; kept answer"
@@ -409,14 +423,18 @@ class _Callbacks(PoolCallbacks):
         self.runner._liveness.lead_ended(task.lead_id, self.runner._ts())
 
     async def on_activity(self, ts: float) -> None:
-        self.runner._liveness.on_activity(ts)
         for event in self.runner._liveness.check(ts):
             self.runner._publish(event.kind, event.data)
+        self.runner._liveness.on_activity(ts)
         for event in self.runner._sleep.heartbeat(ts, self.runner.job_id):
-            if event.kind == "sleep_detected" and self.runner._state() not in {
-                JobState.paused,
-                JobState.done,
-                JobState.done_with_issues,
+            if event.kind == "sleep_detected" and self.runner._state() in {
+                JobState.pulling,
+                JobState.masking_sample,
+                JobState.sample_running,
+                JobState.full_running,
+                JobState.quote_check,
+                JobState.building_output,
+                JobState.verifying,
             }:
                 if self.runner._pause_task is None or self.runner._pause_task.done():
                     parked = (
@@ -435,6 +453,8 @@ class _Callbacks(PoolCallbacks):
                 if isinstance(start, (int, float)):
                     self.runner._eta.sleep_gap(float(start), ts)
                 self.runner._pause_started = ts
+            elif event.kind == "sleep_detected":
+                LOGGER.info("ignoring sleep gap while job is in %s", self.runner._state().value)
             elif event.kind == "wake":
                 if not self.runner._sleep.wait_for_network():
                     row = self.runner.deps.store.rows(
@@ -715,34 +735,47 @@ class JobRunner:
                 ),
             )
 
+    def _hold_back_lead(self, lead_id: str, reason: str, *, clear_sample: bool = False) -> None:
+        """Hold a lead back while accounting for every pulled call as unusable."""
+        calls_pulled = int(
+            self.deps.store.rows(
+                "SELECT calls_pulled FROM leads WHERE job_id=? AND lead_id=?",
+                (self.job_id, lead_id),
+            )[0][0]
+        )
+        sample_sql = ", in_sample=0" if clear_sample else ""
+        with self.deps.store.transaction() as cur:
+            cur.execute(
+                "UPDATE leads SET status='held_back', reason=?, calls_sent=0, calls_dropped_cap=0, "
+                f"calls_dropped_unusable=?{sample_sql} WHERE job_id=? AND lead_id=?",
+                (reason, calls_pulled, self.job_id, lead_id),
+            )
+
     def _prepare_leads(self, lead_ids: Iterable[str], sample: bool) -> None:
         raw_dir, masked_dir = self.deps.job_dir / "raw", self.deps.job_dir / "masked"
         for lead_id in lead_ids:
             if self._stop_requested.is_set():
                 raise StopRequested
             raw, masked = raw_dir / f"{lead_id}.jsonl.gz", masked_dir / f"{lead_id}.jsonl.gz"
-            try:
-                context = self._context()
-                stats = mask_lead_stream(raw, masked, context)
-                report = scan_lead(masked, context.allow_ids)
-            except Exception as exc:
-                if self._stop_requested.is_set() or isinstance(
-                    exc, (sqlite3.OperationalError, sqlite3.ProgrammingError)
-                ):
-                    raise
-                self.deps.store.set_lead_status(
-                    self.job_id,
-                    lead_id,
-                    LeadStatus.held_back,
-                    "masking_failed",
-                )
-                raw.unlink(missing_ok=True)
-                continue
-            if stats.failed or report.held_back:
-                reason = "masking_failed" if stats.failed else "leak_scan_hold_back"
-                self.deps.store.set_lead_status(self.job_id, lead_id, LeadStatus.held_back, reason)
-                raw.unlink(missing_ok=True)
-                continue
+            if not (masked.is_file() and not raw.is_file()):
+                try:
+                    context = self._context()
+                    stats = mask_lead_stream(raw, masked, context)
+                    report = scan_lead(masked, context.allow_ids)
+                except Exception as exc:
+                    if self._stop_requested.is_set() or isinstance(
+                        exc, (sqlite3.OperationalError, sqlite3.ProgrammingError)
+                    ):
+                        raise
+                    # Record the hold-back before removing the raw transcript.
+                    self._hold_back_lead(lead_id, "masking_failed")
+                    raw.unlink(missing_ok=True)
+                    continue
+                if stats.failed or report.held_back:
+                    reason = "masking_failed" if stats.failed else "leak_scan_hold_back"
+                    self._hold_back_lead(lead_id, reason)
+                    raw.unlink(missing_ok=True)
+                    continue
             try:
                 calls = self._lead_calls(lead_id)
                 bundle = build_bundle(lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit)
@@ -758,7 +791,8 @@ class JobRunner:
                 )
                 with self.deps.store.transaction() as cur:
                     cur.execute(
-                        "UPDATE leads SET status='queued', calls_sent=?, calls_dropped_cap=?, chars=?, "
+                        "UPDATE leads SET status='queued', calls_sent=?, calls_dropped_cap=?, "
+                        "calls_dropped_unusable=0, chars=?, "
                         "in_sample=? WHERE job_id=? AND lead_id=?",
                         (
                             bundle.calls_sent,
@@ -775,18 +809,15 @@ class JobRunner:
                     exc, (sqlite3.OperationalError, sqlite3.ProgrammingError)
                 ):
                     raise
-                self.deps.store.set_lead_status(
-                    self.job_id,
-                    lead_id,
-                    LeadStatus.held_back,
-                    "masking_failed",
-                )
+                # Record the hold-back before removing the raw transcript.
+                self._hold_back_lead(lead_id, "masking_failed")
                 raw.unlink(missing_ok=True)
                 continue
-            if self._phase_loop is not None:
+            if self._phase_loop is not None and not self._phase_loop.is_closed():
                 phase_event = self._phase_event
                 if phase_event is not None:
-                    self._phase_loop.call_soon_threadsafe(phase_event.set)
+                    with contextlib.suppress(RuntimeError):
+                        self._phase_loop.call_soon_threadsafe(phase_event.set)
 
     def _prepare_leads_with_completion(self, lead_ids: Iterable[str], sample: bool) -> None:
         try:
@@ -1227,6 +1258,8 @@ class JobRunner:
                 self._phase_done.set()
             if not canary and self._phase_pool is pool and self._state() is not JobState.paused:
                 self._phase_pool = None
+            self._phase_loop = None
+            self._phase_event = None
 
     def approve_plan_gate(self, expected_spec_version: int) -> None:
         if self._phase_running:
@@ -1353,32 +1386,32 @@ class JobRunner:
                 )
         context = self._base_context()
         harvest_path = self.deps.job_dir / "harvested_names.json"
-        harvest_inputs: list[str] = []
+        names_by_lead: dict[str, list[str]] = {}
         if context.ner is not None:
-
-            def source_texts() -> Iterable[str]:
-                for lead_id in usable:
-                    if self._stop_requested.is_set():
-                        raise StopRequested
-                    raw = self.deps.job_dir / "raw" / f"{lead_id}.jsonl.gz"
-                    if not raw.is_file():
-                        continue
-                    try:
-                        calls = self._lead_calls(lead_id, False)
-                    except Exception:
-                        self.deps.store.set_lead_status(
-                            self.job_id,
-                            lead_id,
-                            LeadStatus.held_back,
-                            "harvest_failed",
-                        )
-                        continue
-                    harvest_inputs.append(lead_id)
-                    yield from (str(record.get("transcript_text", "")) for record in calls)
-
-            harvested = harvest_seen_twice(source_texts(), context.ner)
-            usable = harvest_inputs or usable
-            if harvest_inputs and (not harvest_path.exists() or not harvest_path.is_file()):
+            for lead_id in usable:
+                if self._stop_requested.is_set():
+                    raise StopRequested
+                raw = self.deps.job_dir / "raw" / f"{lead_id}.jsonl.gz"
+                if not raw.is_file():
+                    continue
+                try:
+                    calls = self._lead_calls(lead_id, False)
+                    texts = [str(record.get("transcript_text", "")) for record in calls]
+                    names = [
+                        text[span.start : span.end] for text in texts for span in context.ner.persons(text)
+                    ]
+                except Exception:
+                    raw.unlink(missing_ok=True)
+                    self._bundles.pop(lead_id, None)
+                    self._bundle_metadata.pop(lead_id, None)
+                    self._hold_back_lead(lead_id, "harvest_failed", clear_sample=True)
+                    continue
+                names_by_lead[lead_id] = names
+            usable = [lead_id for lead_id in usable if lead_id in names_by_lead]
+            sample = [lead_id for lead_id in sample if lead_id in names_by_lead]
+            if names_by_lead and (not harvest_path.exists() or not harvest_path.is_file()):
+                names_of_ok_leads = (name for lead_id in usable for name in names_by_lead[lead_id])
+                harvested = harvest_seen_twice(names_of_ok_leads, _WholeTextNer())
                 harvest_path.write_text(
                     json.dumps(harvested, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n"
                 )

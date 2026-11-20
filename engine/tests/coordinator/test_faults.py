@@ -22,6 +22,7 @@ from bca.store import (
     save_spec,
     start_full_run,
 )
+from bca.store.reconcile import reconcile
 from tests.coordinator.conftest import CoordinatorFixture
 
 
@@ -110,6 +111,23 @@ def test_crash_mid_run_then_recover_no_duplicates(coordinator: CoordinatorFixtur
         coordinator.store.rows("SELECT outcome FROM attempts WHERE attempt_id=?", (attempt,))[0][0]
         == "requeued"
     )
+
+
+def test_recovered_lead_call_identity_reconciles(coordinator: CoordinatorFixture, make_runner: Any) -> None:
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+    start_full_run(coordinator.store, "job", "operator", 1)
+    coordinator.runner._prepare_leads(["7"], False)
+    coordinator.store.set_lead_status("job", "7", LeadStatus.queued)
+    assert coordinator.store.claim_queued("job", ["7"], False) == {"7"}
+    coordinator.store.start_attempt("job", "7", "codex", claimed=True)
+
+    recovered = make_runner()
+    assert recovered.recover() == 1
+    _run(recovered.start_full_run())
+
+    assert reconcile(coordinator.store, "job", final=True).ok
 
 
 def test_sleep_gap_requeues_uncounted(coordinator: CoordinatorFixture) -> None:
@@ -332,3 +350,15 @@ def test_bus_events_include_progress_eta_liveness(coordinator: CoordinatorFixtur
     kinds = {event.kind for event in coordinator.events.events}
     assert {"counts", "eta"}.issubset(kinds)
     assert all(event.data.get("liveness") != "active" for event in coordinator.events.events)
+
+
+def test_activity_persists_stall_before_refreshing_liveness(coordinator: CoordinatorFixture) -> None:
+    coordinator.runner._liveness.pool_silence_s = 1
+    for lead_id in ("synthetic-1", "synthetic-2", "synthetic-3"):
+        coordinator.runner._liveness.lead_started(lead_id, coordinator.clock.now())
+    coordinator.clock.advance_wall(2)
+    callbacks = _Callbacks(coordinator.runner)
+
+    _run(callbacks.on_activity(coordinator.clock.now()))
+
+    assert any(event.kind == "stall" for event in coordinator.events.events)

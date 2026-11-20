@@ -4,6 +4,7 @@ import asyncio
 import gzip
 import json
 import threading
+import tracemalloc
 from dataclasses import replace
 from functools import partial
 from typing import Any
@@ -11,8 +12,11 @@ from typing import Any
 import pytest
 
 import bca.coordinator.runner as runner_module
-from bca.mask.masker import mask_lead_stream
+from bca.mask.masker import MaskingContext, load_harvest, mask_lead_stream
+from bca.mask.names import Span
+from bca.outputs.verify import verify_job
 from bca.store import JobState, LeadStatus, edit_spec, save_spec
+from bca.store.reconcile import reconcile
 from tests.coordinator.conftest import CoordinatorFixture
 from tests.coordinator.test_faults import Script, ScriptedPool
 
@@ -68,6 +72,125 @@ def test_empty_harvest_is_valid(coordinator: CoordinatorFixture, monkeypatch: py
     coordinator.runner.on_plan_approved(1)
     _run(coordinator.runner.run_sample())
     assert coordinator.runner._state() is JobState.sample_ready
+
+
+def test_sample_harvest_error_holds_back_only_that_lead(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Alpha appears once in each of two successful leads, while Beta straddles the
+    # successful and failing leads. Per-lead harvesting would incorrectly harvest neither.
+    for row in coordinator.bq.pages[0]:
+        lead_id = str(row["lead_id"])
+        if lead_id == "10":
+            row["transcript_text"] = "FAIL Beta Person"
+        elif lead_id == "11" or lead_id == "12":
+            row["transcript_text"] = "Alpha Person"
+        elif lead_id == "13":
+            row["transcript_text"] = "Beta Person"
+
+    class FailingNer:
+        def persons(self, text: str) -> list[Span]:
+            if "FAIL" in text:
+                raise RuntimeError("synthetic masker hold-back")
+            for name in ("Alpha Person", "Beta Person"):
+                start = text.find(name)
+                if start >= 0:
+                    return [Span(start, start + len(name))]
+            return []
+
+    monkeypatch.setattr(
+        coordinator.runner,
+        "deps",
+        replace(
+            coordinator.runner.deps,
+            masking_context=lambda *_: MaskingContext(
+                allow_ids=frozenset(str(index) for index in range(40)), ner=FailingNer()
+            ),
+        ),
+    )
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+
+    assert coordinator.runner._state() is JobState.sample_ready
+    assert tuple(
+        coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='10'")[0]
+    ) == (LeadStatus.held_back, "harvest_failed")
+    assert (
+        coordinator.store.rows(
+            "SELECT COUNT(*) FROM leads WHERE job_id='job' AND in_sample=1 AND status='done'"
+        )[0][0]
+        == 3
+    )
+    assert load_harvest(coordinator.job_dir) == ("Alpha Person",)
+
+
+def test_sample_harvest_memory_is_bounded(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    long_text = "x" * 200_000
+    coordinator.bq.pages = [
+        [{"lead_id": str(index), "transcript_text": long_text, "duration": 200} for index in range(200)]
+    ]
+
+    class EmptyNer:
+        def persons(self, text: str) -> list[Span]:
+            return []
+
+    monkeypatch.setattr(
+        coordinator.runner,
+        "deps",
+        replace(
+            coordinator.runner.deps,
+            masking_context=lambda *_: MaskingContext(
+                allow_ids=frozenset(str(index) for index in range(200)), ner=EmptyNer()
+            ),
+        ),
+    )
+    monkeypatch.setattr(runner_module, "harvest_seen_twice", lambda calls, _ner: list(calls)[:0])
+    coordinator.runner.on_plan_approved(1)
+    tracemalloc.start()
+    try:
+        _run(coordinator.runner.run_sample())
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 10 * 1024 * 1024
+
+
+def test_full_run_masking_failure_holds_back_and_reconciles(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Install the failing masker BEFORE the plan is approved: the background masker
+    # handles the full-run leads during the sample phase, so patching later is too late.
+    original_mask = mask_lead_stream
+    failed_lead: list[str] = []
+
+    def failing_mask(raw: Any, masked: Any, context: Any) -> Any:
+        lead_id = raw.name.removesuffix(".jsonl.gz")
+        in_sample = coordinator.store.rows(
+            "SELECT in_sample FROM leads WHERE job_id='job' AND lead_id=?", (lead_id,)
+        )
+        if in_sample and not int(in_sample[0][0]) and (not failed_lead or failed_lead[0] == lead_id):
+            failed_lead[:] = [lead_id]
+            raise RuntimeError("synthetic masking failure")
+        return original_mask(raw, masked, context)
+
+    monkeypatch.setattr(runner_module, "mask_lead_stream", failing_mask)
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+    _run(coordinator.runner.start_full_run())
+
+    assert failed_lead, "no full-run lead reached the masker"
+    row = coordinator.store.rows(
+        "SELECT status, reason, calls_pulled, calls_sent, calls_dropped_cap, calls_dropped_unusable "
+        "FROM leads WHERE job_id='job' AND lead_id=?",
+        (failed_lead[0],),
+    )[0]
+    assert tuple(row) == ("held_back", "masking_failed", row[2], 0, 0, row[2])
+    assert coordinator.runner._state() is JobState.done_with_issues
+    assert reconcile(coordinator.store, "job", final=True).ok
+    assert verify_job(coordinator.store, "job", coordinator.job_dir / "output" / "results.v1.xlsx").ok
 
 
 def test_recover_after_crash_during_pull(
