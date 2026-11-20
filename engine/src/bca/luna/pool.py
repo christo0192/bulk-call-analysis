@@ -212,18 +212,28 @@ class LunaPool:
                     finally:
                         if self._next_tasks is next_tasks:
                             self._next_tasks = None
-                    for index, task in enumerate(tasks):
-                        if len(running) >= effective_concurrency:
-                            await asyncio.gather(*(self._fail_unstarted(item) for item in tasks[index:]))
+                    await self._wait_for_restart()
+                    effective_concurrency = 1 if self._isolation_leads else self.concurrency
+                    room = max(0, effective_concurrency - len(running))
+                    if self._paused or self._server is None:
+                        await asyncio.gather(*(self._fail_unstarted(item) for item in tasks))
+                        if self._paused:
                             break
+                        continue
+                    dispatch_tasks, unstarted = tasks[:room], tasks[room:]
+                    if unstarted:
+                        await asyncio.gather(*(self._fail_unstarted(item) for item in unstarted))
+                    for index, task in enumerate(dispatch_tasks):
                         if not await self._before_dispatch(task.model):
-                            await asyncio.gather(*(self._fail_unstarted(item) for item in tasks[index:]))
+                            remaining = dispatch_tasks[index:]
+                            await asyncio.gather(*(self._fail_unstarted(item) for item in remaining))
                             break
                         if task.model not in self._models:
-                            await asyncio.gather(*(self._fail_unstarted(item) for item in tasks[index:]))
+                            remaining = dispatch_tasks[index:]
+                            await asyncio.gather(*(self._fail_unstarted(item) for item in remaining))
                             await self._pause("model_unavailable", None)
                             break
-                        lead = _Lead(task, server_generation=self._server_generation)
+                        lead = _Lead(task)
                         self._leads[task.attempt_id] = lead
                         running.add(asyncio.create_task(self._run_lead(lead)))
                 if not running and not tasks and (self._paused or self._stopping):
@@ -411,14 +421,21 @@ class LunaPool:
 
     async def _run_lead(self, lead: _Lead) -> None:
         task = lead.task
+        callback_started = False
         try:
-            callback_started = await self.callbacks.on_started(task)
-            if callback_started is False:
+            callback_started_result = await self.callbacks.on_started(task)
+            if callback_started_result is False:
                 return
+            callback_started = True
+            await self._wait_for_restart()
+            if self._paused or self._server is None:
+                await self._fail(lead, "appserver_restart", False, "app-server unavailable before start")
+                return
+            lead.server_generation = self._server_generation
             if self._server is not None and self._server.returncode is not None:
                 await self._crash_or_failure(lead, f"app-server exited with code {self._server.returncode}")
                 return
-            started = await self._request(
+            thread_start_result = await self._request(
                 "thread/start",
                 {
                     "model": task.model,
@@ -428,7 +445,7 @@ class LunaPool:
                     "serviceTier": "default",
                 },
             )
-            thread = started.get("thread")
+            thread = thread_start_result.get("thread")
             lead.thread_id = str(thread.get("id")) if isinstance(thread, dict) else None
             if lead.thread_id is None:
                 raise ValueError("thread/start returned no thread id")
@@ -474,6 +491,8 @@ class LunaPool:
         finally:
             if lead.pending_action is not None:
                 await asyncio.gather(lead.pending_action, return_exceptions=True)
+            if callback_started and not lead.outcome_delivered:
+                await self._fail(lead, "appserver_restart", False, "lead ended without an outcome")
             if (
                 lead.thread_id is not None
                 and lead.server_generation == self._server_generation
@@ -798,12 +817,20 @@ class LunaPool:
     ) -> None:
         async with self._restart_lock:
             if server_generation is not None and server_generation != self._server_generation:
-                return
+                server = self._server
+                if crash_lead is None or crash_lead.outcome_delivered:
+                    return
+                if server is not None and server.returncode is None:
+                    await self._fail(crash_lead, "appserver_crash", False, crash_detail or reason)
+                    return
+                server_generation = self._server_generation
             if crash and server_generation in self._restarted_crash_generations:
+                if crash_lead is not None and not crash_lead.outcome_delivered:
+                    await self._fail(crash_lead, "appserver_crash", False, crash_detail or reason)
                 return
             if crash and server_generation is not None:
                 self._restarted_crash_generations.add(server_generation)
-            active = list(self._leads.values()) if crash else []
+            active = [lead for lead in self._leads.values() if not lead.outcome_delivered] if crash else []
             if crash:
                 self._isolation_leads.update(lead.task.lead_id for lead in active)
                 self._refresh_isolation()
@@ -814,7 +841,8 @@ class LunaPool:
             self._server = None
             for active_lead in active or list(self._leads.values()):
                 if crash and active_lead is crash_lead:
-                    await self._fail(active_lead, "appserver_crash", False, crash_detail or reason)
+                    crash_code = "appserver_crash" if len(active) == 1 else "appserver_crash_shared"
+                    await self._fail(active_lead, crash_code, False, crash_detail or reason)
                 else:
                     await self._fail(active_lead, reason, False, "app-server restarted")
             if len(self._crashes) >= 4:

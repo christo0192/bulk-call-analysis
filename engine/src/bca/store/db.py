@@ -271,16 +271,18 @@ class Store:
         rows = self.rows(
             "SELECT COUNT(*) FROM attempts WHERE job_id=? AND lead_id=? AND outcome='failed' "
             "AND counted=0 AND COALESCE(error_code, '') NOT IN "
-            "('quota_interrupt', 'interrupted', 'appserver_crash', 'appserver_restart')",
+            "('quota_interrupt', 'interrupted', 'appserver_crash', 'appserver_crash_shared', 'appserver_restart')",
             (job_id, lead_id),
         )
         return int(rows[0][0]) if rows else 0
 
-    def count_appserver_crashes(self, job_id: str, lead_id: str) -> int:
+    def count_appserver_crashes(self, job_id: str, lead_id: str, spec_version: int | None = None) -> int:
+        spec_clause = " AND spec_version=?" if spec_version is not None else ""
+        params: tuple[object, ...] = (job_id, lead_id) + ((spec_version,) if spec_version is not None else ())
         rows = self.rows(
             "SELECT COUNT(*) FROM attempts WHERE job_id=? AND lead_id=? "
-            "AND outcome='failed' AND error_code='appserver_crash'",
-            (job_id, lead_id),
+            "AND outcome='failed' AND error_code='appserver_crash'" + spec_clause,
+            params,
         )
         return int(rows[0][0]) if rows else 0
 

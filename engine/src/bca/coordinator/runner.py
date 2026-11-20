@@ -335,7 +335,9 @@ class _Callbacks(PoolCallbacks):
                 LOGGER.debug("ignoring failure for closed attempt %s", task.attempt_id)
                 return
             if error_code == "appserver_crash" and not counted:
-                crash_count = self.runner.deps.store.count_appserver_crashes(self.runner.job_id, task.lead_id)
+                crash_count = self.runner.deps.store.count_appserver_crashes(
+                    self.runner.job_id, task.lead_id, task.spec_version
+                )
                 if crash_count >= 1:
                     error_code = "appserver_crash_repeated"
                     counted = True
@@ -368,6 +370,7 @@ class _Callbacks(PoolCallbacks):
                     self._uncounted[task.lead_id] = retries
                     if retries >= MAX_UNCOUNTED_FAILURES and error_code not in {
                         "appserver_crash",
+                        "appserver_crash_shared",
                         "appserver_restart",
                     }:
                         await self.on_pause("network", None)
@@ -378,6 +381,7 @@ class _Callbacks(PoolCallbacks):
                 self._uncounted[task.lead_id] = retries
                 if retries >= MAX_UNCOUNTED_FAILURES and error_code not in {
                     "appserver_crash",
+                    "appserver_crash_shared",
                     "appserver_restart",
                 }:
                     await self.on_pause("network", None)

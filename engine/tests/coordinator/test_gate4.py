@@ -405,7 +405,7 @@ def test_poison_lead_crashing_appserver_is_bounded(
 
     assert pools
     assert 2 <= len(launches) <= 5
-    assert 1 <= len(kills) <= 4
+    assert 1 <= len(kills) <= 3
     poison = tuple(
         coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='10'")[0]
     )
