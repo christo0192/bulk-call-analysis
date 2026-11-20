@@ -50,16 +50,24 @@ def test_winjob_sets_kill_on_close_flag() -> None:
 def test_killed_parent_leaves_no_descendants(tmp_path: Path) -> None:
     go_file = tmp_path / "go"
     pid_file = tmp_path / "pids"
-    code = (
-        "import pathlib, subprocess, sys, time; "
-        "go=pathlib.Path(sys.argv[1]); "
-        "pids=pathlib.Path(sys.argv[2]); "
-        "while not go.exists(): time.sleep(.02); "
-        "children=[subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']) for _ in range(2)]; "
-        "pids.write_text(str(children[0].pid)+'\\n'+str(children[1].pid)); time.sleep(60)"
+    # A real script file: a one-line ``python -c`` cannot hold the wait loop.
+    script = tmp_path / "parent.py"
+    script.write_text(
+        "import pathlib, subprocess, sys, time\n"
+        "go = pathlib.Path(sys.argv[1])\n"
+        "pids = pathlib.Path(sys.argv[2])\n"
+        "while not go.exists():\n"
+        "    time.sleep(0.02)\n"
+        "children = [\n"
+        "    subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']) for _ in range(2)\n"
+        "]\n"
+        "pids.write_text(str(children[0].pid) + '\\n' + str(children[1].pid))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+        newline="\n",
     )
     parent = subprocess.Popen(
-        [sys.executable, "-c", code, str(go_file), str(pid_file)], start_new_session=os.name != "nt"
+        [sys.executable, str(script), str(go_file), str(pid_file)], start_new_session=os.name != "nt"
     )
     job: object | None = None
     try:
@@ -94,11 +102,15 @@ def test_killed_parent_leaves_no_descendants(tmp_path: Path) -> None:
         if parent.poll() is None:
             parent.kill()
             parent.wait(timeout=5)
-        if os.name == "nt" and pid_file.exists():
+        # Never leak the test's own processes, whatever happened above.
+        if pid_file.exists():
             for line in pid_file.read_text().splitlines():
                 pid = int(line)
                 if pid_alive(pid):
-                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], check=False)
+                    if os.name == "nt":
+                        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], check=False)
+                    else:
+                        os.kill(pid, 9)
 
 
 def _as_async_process(process: subprocess.Popen[bytes]) -> Any:
