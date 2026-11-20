@@ -94,6 +94,7 @@ class LunaPool:
         retry_backoff_s: float = 1,
         rpc_timeout_s: float = 30,
         clock: PoolClock | None = None,
+        can_dispatch: Callable[[], bool] | None = None,
     ) -> None:
         self.launch_factory = launch_factory
         self.callbacks = callbacks
@@ -110,6 +111,7 @@ class LunaPool:
         self.retry_backoff_s = max(0, retry_backoff_s)
         self.rpc_timeout_s = max(0, rpc_timeout_s)
         self.clock = clock
+        self.can_dispatch = can_dispatch
         self._server: AppServer | None = None
         self._leads: dict[str, _Lead] = {}
         self._by_turn: dict[str, _Lead] = {}
@@ -397,6 +399,9 @@ class LunaPool:
             )
 
     async def _before_dispatch(self, model: str) -> bool:
+        if self.can_dispatch is not None and not self.can_dispatch():
+            await self._pause("power", None)
+            return False
         if self._rate_result is not None:
             self._snapshot = parse_rate_limits(self._rate_result, model)
         decision = await self._report_quota()

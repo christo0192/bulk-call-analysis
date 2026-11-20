@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Protocol
 from openpyxl import load_workbook
 
 from bca.config import BigQueryConfig
+from bca.stop import StopRequested
 from bca.store import LeadStatus, Store
 from bca.store.spec import LeadSourceIds, LeadSourceSql
 
@@ -140,6 +141,7 @@ def resolve_lead_source(
     job_id: str | None = None,
     approved_bytes: int | None = None,
     persist: bool = True,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> IdIntake:
     effective_job = job_id or job_dir.name
     if isinstance(spec, LeadSourceIds):
@@ -152,6 +154,8 @@ def resolve_lead_source(
             raise PermissionError("scan exceeds reject_bytes without operator approval")
         values: list[object] = []
         for page in runner.iter_pages(sql, params, 1000):
+            if stop_requested is not None and stop_requested():
+                raise StopRequested
             values.extend(row.get("lead_id", "") for row in page)
         intake = _intake(values)
     if persist:

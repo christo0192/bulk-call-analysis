@@ -164,7 +164,7 @@ async def run_turn(
 ) -> AsyncIterator[Event]:
     from .auth import auth_status
 
-    if not auth_status(binary, profile).ok:
+    if not (await asyncio.to_thread(auth_status, binary, profile)).ok:
         raise TurnGuardError("Claude subscription authentication is not active")
     if session is None:
         session = SessionRef(uuid4())
@@ -234,8 +234,14 @@ async def run_turn(
                     reason = decision.blocked_reason or "limited"
                     raise TurnGuardError("Claude rate policy blocked turn: " + reason)
             yield event
+        await process.wait()
+        stderr_tail = await stderr_task
+        if first and "No conversation found with session ID" in stderr_tail:
+            raise TurnGuardError("No conversation found with session ID")
         if first:
             raise TurnGuardError("Claude exited without system/init")
+        if process.returncode != 0 and "No conversation found with session ID" in stderr_tail:
+            raise TurnGuardError("No conversation found with session ID")
         completed = True
     except BaseException:
         if process.returncode is None:
@@ -268,10 +274,13 @@ def stop_turn(session: SessionRef | UUID) -> None:
     task.add_done_callback(_termination_tasks.discard)
 
 
-async def _drain_stderr(stderr: asyncio.StreamReader | None) -> None:
+async def _drain_stderr(stderr: asyncio.StreamReader | None) -> str:
+    tail = bytearray()
     if stderr is not None:
-        while await stderr.read(65536):
-            pass
+        while chunk := await stderr.read(65536):
+            tail.extend(chunk)
+            del tail[:-65536]
+    return tail.decode("utf-8", errors="replace")
 
 
 async def _terminate_process_tree(process: asyncio.subprocess.Process, job: object | None) -> None:
@@ -283,11 +292,18 @@ async def _terminate_process_tree(process: asyncio.subprocess.Process, job: obje
                     capture_output=True,
                     check=False,
                     timeout=2.0,
+                    env=build_child_env({}),
                 )
             except subprocess.TimeoutExpired:
                 completed = None
-            if completed is None or completed.returncode != 0:
+            if completed is None:
                 _logger.warning("taskkill failed for Claude process %s", process.pid)
+            elif completed.returncode == 128:
+                _logger.debug("Claude process %s was already gone when taskkill ran", process.pid)
+            elif completed.returncode != 0:
+                _logger.warning(
+                    "taskkill failed for Claude process %s (exit %s)", process.pid, completed.returncode
+                )
         try:
             await asyncio.wait_for(asyncio.shield(process.wait()), timeout=2.0)
         except TimeoutError:

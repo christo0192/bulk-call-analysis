@@ -5,6 +5,8 @@ import contextlib
 import gzip
 import json
 import logging
+import sqlite3
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
@@ -29,6 +31,7 @@ from bca.monitor.sleep import SleepDetector
 from bca.outputs.excel import build_workbook
 from bca.outputs.quotes import QuoteCheck, check_answer, repair_prompt
 from bca.outputs.verify import verify_job
+from bca.stop import StopRequested
 from bca.store import (
     ClaimError,
     JobState,
@@ -89,6 +92,7 @@ class RunnerDeps:
     concurrency: int = 4
     approved_bytes: int | None = None
     retry_backoff_s: float = 1
+    can_dispatch: Callable[[], bool] | None = None
 
 
 def _as_dict(value: object) -> dict[str, object]:
@@ -139,6 +143,12 @@ class _Callbacks(PoolCallbacks):
             self._tasks = [task for task in self._tasks if task.spec_version == current_version]
             if self.runner._state() is not self.runner._phase_state(self.sample):
                 return []
+            if self.runner.deps.can_dispatch is not None and not self.runner.deps.can_dispatch():
+                self.runner._publish("notice", {"reason": "power_wait", "message": "Waiting for power"})
+                phase_event = self.runner._get_phase_event()
+                phase_event.clear()
+                await phase_event.wait()
+                continue
             if self._dispatch_limit == 0:
                 return []
             if not self._tasks:
@@ -249,7 +259,7 @@ class _Callbacks(PoolCallbacks):
             self.runner._close_attempt(task.attempt_id)
             return
         self.runner._refresh_spec()
-        bundle_text = await asyncio.to_thread(self.runner._bundle_text, task.lead_id)
+        bundle_text = await self.runner._worker(self.runner._bundle_text, task.lead_id)
         failures = check_answer(
             answer,
             self.runner.spec.quote_fields,
@@ -456,7 +466,7 @@ class _Callbacks(PoolCallbacks):
                     "UPDATE jobs SET quota_baseline=? WHERE id=?",
                     (str(snapshot.credits_balance), self.runner.job_id),
                 )
-        self.runner._publish("quota", {"kind": decision.kind, "reason": decision.reason})
+        self.runner._publish("quota", {"decision": decision.kind, "reason": decision.reason})
 
     async def on_reroute(self, task: LeadTask, from_model: str, to_model: str, reason: str) -> None:
         attempt = self.runner._attempts.get(task.attempt_id)
@@ -507,6 +517,8 @@ class JobRunner:
         self._liveness = Liveness(lambda: deps.concurrency, deps.config.limits.lead_timeout_s)
         self._sleep = SleepDetector(clock=deps.clock)
         self._masking_task: asyncio.Task[None] | None = None
+        self._masking_thread_task: asyncio.Task[Any] | None = None
+        self._masking_thread_done = threading.Event()
         self._phase_event: asyncio.Event | None = None
         self._phase_loop: asyncio.AbstractEventLoop | None = None
         self._phase_pool: CoordinatorPool | None = None
@@ -527,6 +539,28 @@ class JobRunner:
         self._pause_finished = False
         self._wake_requested = False
         self._wake_network_unavailable = False
+        self._stop_requested = threading.Event()
+        self._worker_tasks: set[asyncio.Task[Any]] = set()
+
+    def request_stop(self) -> None:
+        self._stop_requested.set()
+
+    def request_stop_for_prepare(self) -> None:
+        if self._state() in {JobState.plan_approved, JobState.pulling, JobState.masking_sample}:
+            self.request_stop()
+
+    def clear_stop(self) -> None:
+        self._stop_requested.clear()
+
+    async def wait_for_workers(self) -> None:
+        while self._worker_tasks:
+            await asyncio.shield(asyncio.gather(*tuple(self._worker_tasks), return_exceptions=True))
+
+    async def _worker(self, function: Callable[..., Any], *args: Any) -> Any:
+        task = asyncio.create_task(asyncio.to_thread(function, *args))
+        self._worker_tasks.add(task)
+        task.add_done_callback(self._worker_tasks.discard)
+        return await asyncio.shield(task)
 
     def _job_spec_version(self) -> int:
         rows = self.deps.store.rows("SELECT spec_version FROM jobs WHERE id=?", (self.job_id,))
@@ -585,8 +619,24 @@ class JobRunner:
             self._phase_lock = lock
         return lock
 
+    def signal_dispatch(self) -> None:
+        """Wake a phase loop after an external dispatch condition changes."""
+        event = self._phase_event
+        loop = self._phase_loop
+        if event is None or loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(event.set)
+
     def _publish(self, kind: EventKind, data: dict[str, object]) -> None:
         self.deps.event_bus.publish(Event(kind, self.job_id, self._ts(), data))
+
+    def _transition(self, to: JobState, reason: str | None = None) -> None:
+        current = self._state()
+        transition(self.deps.store, self.job_id, to, reason)
+        self._publish(
+            "state",
+            {"from": current.value, "to": to.value, "reason": reason},
+        )
 
     def _publish_progress(self) -> None:
         progress = counts(self.deps.store, self.job_id)
@@ -668,31 +718,37 @@ class JobRunner:
     def _prepare_leads(self, lead_ids: Iterable[str], sample: bool) -> None:
         raw_dir, masked_dir = self.deps.job_dir / "raw", self.deps.job_dir / "masked"
         for lead_id in lead_ids:
+            if self._stop_requested.is_set():
+                raise StopRequested
             raw, masked = raw_dir / f"{lead_id}.jsonl.gz", masked_dir / f"{lead_id}.jsonl.gz"
             try:
                 context = self._context()
                 stats = mask_lead_stream(raw, masked, context)
                 report = scan_lead(masked, context.allow_ids)
             except Exception as exc:
-                raw.unlink(missing_ok=True)
+                if self._stop_requested.is_set() or isinstance(
+                    exc, (sqlite3.OperationalError, sqlite3.ProgrammingError)
+                ):
+                    raise
                 self.deps.store.set_lead_status(
                     self.job_id,
                     lead_id,
                     LeadStatus.held_back,
-                    f"masking failed: {type(exc).__name__}: {exc}",
+                    "masking_failed",
                 )
+                raw.unlink(missing_ok=True)
                 continue
             if stats.failed or report.held_back:
-                reason = stats.error or "leak scan hold-back"
-                raw.unlink(missing_ok=True)
+                reason = "masking_failed" if stats.failed else "leak_scan_hold_back"
                 self.deps.store.set_lead_status(self.job_id, lead_id, LeadStatus.held_back, reason)
+                raw.unlink(missing_ok=True)
                 continue
             try:
                 calls = self._lead_calls(lead_id)
                 bundle = build_bundle(lead_id, calls, self.spec.cap, self.deps.config.recipe.duration_unit)
                 if bundle.calls_sent == 0:
-                    raw.unlink(missing_ok=True)
                     self._hold_empty_bundle(lead_id, bundle)
+                    raw.unlink(missing_ok=True)
                     continue
                 self._bundles[lead_id] = (self.spec.spec_version, None)
                 self._bundle_metadata[lead_id] = (
@@ -715,18 +771,28 @@ class JobRunner:
                     )
                 raw.unlink(missing_ok=True)
             except Exception as exc:
-                raw.unlink(missing_ok=True)
+                if self._stop_requested.is_set() or isinstance(
+                    exc, (sqlite3.OperationalError, sqlite3.ProgrammingError)
+                ):
+                    raise
                 self.deps.store.set_lead_status(
                     self.job_id,
                     lead_id,
                     LeadStatus.held_back,
-                    f"masking failed: {type(exc).__name__}: {exc}",
+                    "masking_failed",
                 )
+                raw.unlink(missing_ok=True)
                 continue
             if self._phase_loop is not None:
                 phase_event = self._phase_event
                 if phase_event is not None:
                     self._phase_loop.call_soon_threadsafe(phase_event.set)
+
+    def _prepare_leads_with_completion(self, lead_ids: Iterable[str], sample: bool) -> None:
+        try:
+            self._prepare_leads(lead_ids, sample)
+        finally:
+            self._masking_thread_done.set()
 
     async def _task_list(self, sample: bool, lead_ids: list[str]) -> list[LeadTask]:
         self._refresh_spec()
@@ -740,7 +806,7 @@ class JobRunner:
         result: list[LeadTask] = []
         for lead_id in lead_ids:
             try:
-                bundle = await asyncio.to_thread(
+                bundle = await self._worker(
                     build_bundle,
                     lead_id,
                     self._lead_calls(lead_id),
@@ -756,12 +822,12 @@ class JobRunner:
                     len(bundle.calls_dropped),
                     bundle.chars,
                 )
-            except Exception as exc:
+            except Exception:
                 self.deps.store.set_lead_status(
                     self.job_id,
                     lead_id,
                     LeadStatus.held_back,
-                    f"masked bundle unavailable: {type(exc).__name__}: {exc}",
+                    "masked_bundle_unavailable",
                 )
                 continue
             prompt = self.spec.instructions + "\n" + bundle.text
@@ -938,6 +1004,14 @@ class JobRunner:
     def _start_masking_worker(self, sample: bool) -> None:
         if self._masking_task is not None and not self._masking_task.done():
             return
+        if self._masking_thread_task is not None and (
+            not self._masking_thread_task.done() or not self._masking_thread_done.is_set()
+        ):
+            # The driver may have been cancelled while its waiter was running;
+            # the thread remains the single owner of this masking pass.
+            self._masking_task = asyncio.create_task(self._await_masking_thread(self._masking_thread_task))
+            self._masking_task.add_done_callback(self._consume_task_exception)
+            return
         lead_ids = [
             str(row[0])
             for row in self.deps.store.rows(
@@ -947,9 +1021,36 @@ class JobRunner:
             )
         ]
         if lead_ids:
-            self._masking_task = asyncio.create_task(asyncio.to_thread(self._prepare_leads, lead_ids, sample))
+            self._masking_thread_done.clear()
+            thread_task = asyncio.create_task(
+                asyncio.to_thread(self._prepare_leads_with_completion, lead_ids, sample)
+            )
+            self._masking_thread_task = thread_task
+            self._worker_tasks.add(thread_task)
+            thread_task.add_done_callback(self._worker_tasks.discard)
+            self._masking_task = asyncio.create_task(self._await_masking_thread(thread_task))
+            thread_task.add_done_callback(self._consume_task_exception)
+            self._masking_task.add_done_callback(self._consume_task_exception)
         elif self._masking_task is not None and self._masking_task.done():
             self._masking_task = None
+
+    async def _await_masking_thread(self, task: asyncio.Task[Any]) -> None:
+        await asyncio.shield(task)
+
+    @staticmethod
+    def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+        if not task.cancelled():
+            task.exception()
+
+    def _masking_thread_active(self) -> bool:
+        return self._masking_thread_task is not None and (
+            not self._masking_thread_task.done() or not self._masking_thread_done.is_set()
+        )
+
+    def _clear_masking_tasks(self) -> None:
+        self._masking_task = None
+        self._masking_thread_task = None
+        self._masking_thread_done.clear()
 
     async def _wait_for_masking(self, sample: bool) -> bool:
         """Wait for masking while rechecking persisted state and control state."""
@@ -958,13 +1059,19 @@ class JobRunner:
                 return False
             task = self._masking_task
             if task is None or task.done():
-                if task is not None:
-                    await asyncio.shield(task)
-                    self._masking_task = None
+                if self._masking_thread_active():
+                    self._start_masking_worker(sample)
+                    task = self._masking_task
+                elif task is not None:
+                    thread_task = self._masking_thread_task
+                    if thread_task is not None:
+                        await asyncio.shield(thread_task)
+                    self._clear_masking_tasks()
                 if not self._masking_needed(sample):
                     return True
-                self._start_masking_worker(sample)
-                task = self._masking_task
+                if task is None:
+                    self._start_masking_worker(sample)
+                    task = self._masking_task
             if task is None:
                 return not self._masking_needed(sample)
             try:
@@ -1019,6 +1126,7 @@ class JobRunner:
                 self.deps.config.limits.lead_timeout_s,
                 retry_backoff_s=self.deps.retry_backoff_s,
                 clock=self.deps.clock,
+                can_dispatch=self.deps.can_dispatch,
             )
             self._phase_pool = pool
         else:
@@ -1052,36 +1160,66 @@ class JobRunner:
                 if self._masking_task is not None and self._masking_task.done():
                     masking_task = self._masking_task
                     self._masking_task = None
-                    if masking_task.cancelled():
+                    if self._masking_thread_active():
+                        self._start_masking_worker(sample)
+                    elif masking_task.cancelled():
                         current = asyncio.current_task()
                         if current is not None and current.cancelling():
                             raise asyncio.CancelledError
+                        thread_task = self._masking_thread_task
+                        self._clear_masking_tasks()
+                        if thread_task is not None and not thread_task.cancelled():
+                            try:
+                                thread_task.result()
+                            except StopRequested:
+                                return
+                            except Exception:
+                                if self._state() not in {
+                                    JobState.paused,
+                                    JobState.stalled,
+                                    JobState.done,
+                                    JobState.done_with_issues,
+                                }:
+                                    self._transition(
+                                        JobState.stalled,
+                                        "masking_failed",
+                                    )
+                                raise
                         self._start_masking_worker(sample)
                     else:
                         try:
-                            masking_task.result()
-                        except Exception as exc:
+                            thread_task = self._masking_thread_task
+                            if thread_task is not None:
+                                thread_task.result()
+                            else:
+                                masking_task.result()
+                        except StopRequested:
+                            self._clear_masking_tasks()
+                            return
+                        except Exception:
                             if self._state() not in {
                                 JobState.paused,
                                 JobState.stalled,
                                 JobState.done,
                                 JobState.done_with_issues,
                             }:
-                                transition(
-                                    self.deps.store,
-                                    self.job_id,
+                                self._transition(
                                     JobState.stalled,
-                                    f"masking failed: {type(exc).__name__}: {exc}",
+                                    "masking_failed",
                                 )
                             raise
+                        self._clear_masking_tasks()
                 if self._state() is not self._phase_state(sample) or self._phase_finished(sample):
                     break
                 if canary and callbacks.attempt_ended:
                     break
                 phase_event = self._get_phase_event()
                 phase_event.clear()
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(phase_event.wait(), 1.0)
+                if self.deps.can_dispatch is not None and not self.deps.can_dispatch():
+                    await phase_event.wait()
+                else:
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(phase_event.wait(), 1.0)
         finally:
             self._get_phase_event().set()
             self._phase_running = False
@@ -1090,30 +1228,40 @@ class JobRunner:
             if not canary and self._phase_pool is pool and self._state() is not JobState.paused:
                 self._phase_pool = None
 
-    def on_plan_approved(self, expected_spec_version: int) -> None:
+    def approve_plan_gate(self, expected_spec_version: int) -> None:
         if self._phase_running:
             raise TransitionError("cannot approve a plan while the previous phase is draining")
         self._wake_requested = False
         self._wake_network_unavailable = False
         self._refresh_spec(expected_spec_version)
         approve_plan(self.deps.store, self.job_id, "operator", expected_spec_version)
-        transition(self.deps.store, self.job_id, JobState.pulling)
-        intake = self._pull()
-        if not intake.ids:
-            transition(
-                self.deps.store, self.job_id, JobState.stalled, "no leads resolved from the lead source"
-            )
+
+    def on_plan_approved(self, expected_spec_version: int) -> None:
+        self.approve_plan_gate(expected_spec_version)
+        self.prepare_sample()
+
+    def prepare_sample(self) -> None:
+        """Pull and mask the sample inputs outside the API request loop."""
+        state = self._state()
+        if state is JobState.plan_approved:
+            self._transition(JobState.pulling)
+        elif state not in {JobState.pulling, JobState.masking_sample}:
             return
-        transition(self.deps.store, self.job_id, JobState.masking_sample)
         try:
+            if self._state() is JobState.pulling:
+                intake = self._pull()
+                if self._state() is not JobState.pulling:
+                    return
+                if not intake.ids:
+                    self._transition(JobState.stalled, "no leads resolved from the lead source")
+                    return
+                self._transition(JobState.masking_sample)
             self._mask_sample()
-        except Exception as exc:
-            transition(
-                self.deps.store,
-                self.job_id,
-                JobState.stalled,
-                f"sample masking failed: {type(exc).__name__}: {exc}",
-            )
+        except StopRequested:
+            return
+        except Exception:
+            if self._state() not in {JobState.stalled, JobState.paused}:
+                self._transition(JobState.stalled, "pull_failed")
             raise
 
     def _pull(self) -> IdIntake:
@@ -1126,6 +1274,7 @@ class JobRunner:
             self.deps.config.bigquery,
             self.job_id,
             self.deps.approved_bytes,
+            stop_requested=self._stop_requested.is_set,
         )
         window = (
             (self.spec.window_start or "", self.spec.window_end or "")
@@ -1143,6 +1292,7 @@ class JobRunner:
             self.job_id,
             self.deps.config.bigquery,
             self.deps.approved_bytes,
+            stop_requested=self._stop_requested.is_set,
         )
         usable_ids = [
             str(row[0])
@@ -1162,6 +1312,7 @@ class JobRunner:
             self.spec.calls_scope,
             window,
             self.deps.approved_bytes,
+            stop_requested=self._stop_requested.is_set,
         )
         return intake
 
@@ -1207,17 +1358,19 @@ class JobRunner:
 
             def source_texts() -> Iterable[str]:
                 for lead_id in usable:
+                    if self._stop_requested.is_set():
+                        raise StopRequested
                     raw = self.deps.job_dir / "raw" / f"{lead_id}.jsonl.gz"
                     if not raw.is_file():
                         continue
                     try:
                         calls = self._lead_calls(lead_id, False)
-                    except Exception as exc:
+                    except Exception:
                         self.deps.store.set_lead_status(
                             self.job_id,
                             lead_id,
                             LeadStatus.held_back,
-                            f"harvest failed: {type(exc).__name__}: {exc}",
+                            "harvest_failed",
                         )
                         continue
                     harvest_inputs.append(lead_id)
@@ -1230,6 +1383,8 @@ class JobRunner:
                     json.dumps(harvested, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n"
                 )
         for lead_id in sample:
+            if self._stop_requested.is_set():
+                raise StopRequested
             raw_path = self.deps.job_dir / "raw" / f"{lead_id}.jsonl.gz"
             if raw_path.is_file():
                 self._prepare_leads([lead_id], True)
@@ -1252,12 +1407,12 @@ class JobRunner:
                         "in_sample=1 WHERE job_id=? AND lead_id=?",
                         (bundle.calls_sent, len(bundle.calls_dropped), bundle.chars, self.job_id, lead_id),
                     )
-            except Exception as exc:
+            except Exception:
                 self.deps.store.set_lead_status(
                     self.job_id,
                     lead_id,
                     LeadStatus.held_back,
-                    f"masked bundle unavailable: {type(exc).__name__}: {exc}",
+                    "masked_bundle_unavailable",
                 )
         sample_set = set(sample)
         for lead_id in usable:
@@ -1267,16 +1422,21 @@ class JobRunner:
                 )[0][0]
                 if status in {LeadStatus.pulled, LeadStatus.masked}:
                     self.deps.store.set_lead_status(self.job_id, lead_id, LeadStatus.not_started)
-        transition(self.deps.store, self.job_id, JobState.sample_running)
+        if self._state() is JobState.masking_sample:
+            self._transition(JobState.sample_running)
 
     async def run_sample(self) -> None:
+        if self._state() is JobState.plan_approved:
+            await self._worker(self.prepare_sample)
+            if self._state() is not JobState.sample_running:
+                return
         if self._masking_task is None:
             self._start_masking_worker(False)
         await self._run_phase(True)
         if self._state() is not JobState.sample_running:
             return
         assert not counts(self.deps.store, self.job_id).in_flight
-        transition(self.deps.store, self.job_id, JobState.sample_ready)
+        self._transition(JobState.sample_ready)
 
     def on_sample_approved(self, expected_spec_version: int) -> None:
         self._refresh_spec(expected_spec_version)
@@ -1287,6 +1447,14 @@ class JobRunner:
         state = self._state()
         if state is JobState.sample_approved:
             start_full_run(self.deps.store, self.job_id, "operator", self.spec.spec_version)
+            self._publish(
+                "state",
+                {
+                    "from": JobState.sample_approved.value,
+                    "to": JobState.full_running.value,
+                    "reason": "full run started",
+                },
+            )
             state = JobState.full_running
         elif state not in {
             JobState.full_running,
@@ -1311,7 +1479,7 @@ class JobRunner:
         if self._state() is not JobState.full_running:
             return
         assert not counts(self.deps.store, self.job_id).in_flight
-        transition(self.deps.store, self.job_id, JobState.quote_check)
+        self._transition(JobState.quote_check)
         await self._finish_output(JobState.quote_check)
 
     async def _finish_output(self, state: JobState) -> None:
@@ -1324,7 +1492,7 @@ class JobRunner:
             details = ", ".join(f"{row[0]} ({row[1]})" for row in pending)
             raise RuntimeError(f"cannot build output while leads are pending: {details}")
         if state is JobState.quote_check:
-            transition(self.deps.store, self.job_id, JobState.building_output)
+            self._transition(JobState.building_output)
             state = JobState.building_output
         if state is JobState.building_output:
             path = build_workbook(
@@ -1334,7 +1502,7 @@ class JobRunner:
                 self.deps.job_dir / "output",
                 self.spec.spec_version,
             )
-            transition(self.deps.store, self.job_id, JobState.verifying)
+            self._transition(JobState.verifying)
         elif state is JobState.verifying:
             path = self.deps.job_dir / "output" / f"results.v{self.spec.spec_version}.xlsx"
         else:
@@ -1343,9 +1511,7 @@ class JobRunner:
         progress = counts(self.deps.store, self.job_id)
         has_issues = not report.ok or bool(progress.failed) or progress.held_back > 0
         if self._state() is JobState.verifying:
-            transition(
-                self.deps.store, self.job_id, JobState.done_with_issues if has_issues else JobState.done
-            )
+            self._transition(JobState.done_with_issues if has_issues else JobState.done)
 
     async def resume(self, actor: Literal["operator", "automatic"] = "operator") -> None:
         """Resume a persisted pause and continue the phase recorded by lifecycle."""
@@ -1374,12 +1540,23 @@ class JobRunner:
             self._attempts.clear()
             self.deps.store.requeue_in_flight(self.job_id, "resume")
             resume_job(self.deps.store, self.job_id)
+            self._publish(
+                "state", {"from": JobState.paused.value, "to": self._state().value, "reason": "resumed"}
+            )
             self._pause_started = None
             self._pause_reason = None
             self._pause_resume_at = None
             self._pause_finished = False
             state = self._state()
-        if state is JobState.sample_running:
+        self.clear_stop()
+        if state in {JobState.pulling, JobState.masking_sample}:
+            await self._worker(self.recover)
+            if self._state() is not JobState.sample_running:
+                return
+            await self.run_sample()
+        elif state is JobState.plan_approved:
+            await self.run_sample()
+        elif state is JobState.sample_running:
             await self._run_phase(True, canary=True)
             if self._state() is JobState.paused:
                 return
@@ -1395,16 +1572,28 @@ class JobRunner:
     def recover(self) -> int:
         state = self._state()
         if state is JobState.pulling:
-            intake = self._pull()
-            if not intake.ids:
-                transition(
-                    self.deps.store, self.job_id, JobState.stalled, "no leads resolved from the lead source"
-                )
+            try:
+                intake = self._pull()
+                if not intake.ids:
+                    self._transition(JobState.stalled, "pull_failed")
+                    return 0
+                self._transition(JobState.masking_sample)
+                self._mask_sample()
+            except StopRequested:
                 return 0
-            transition(self.deps.store, self.job_id, JobState.masking_sample)
-            self._mask_sample()
+            except Exception:
+                if self._state() is not JobState.stalled:
+                    self._transition(JobState.stalled, "pull_failed")
+                raise
         elif state is JobState.masking_sample:
-            self._mask_sample()
+            try:
+                self._mask_sample()
+            except StopRequested:
+                return 0
+            except Exception:
+                if self._state() is not JobState.stalled:
+                    self._transition(JobState.stalled, "pull_failed")
+                raise
         if state in {
             JobState.pulling,
             JobState.masking_sample,

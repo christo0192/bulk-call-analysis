@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from bca.bq.guard import validate_select
 from bca.bq.runner import DryRun
@@ -20,6 +23,21 @@ class FakeBqRunner:
     datasets: list[dict[str, object]] = field(default_factory=list)
     tables: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     table_details: dict[tuple[str, str], dict[str, object]] = field(default_factory=dict)
+    delay_ms: int = 0
+
+    @classmethod
+    def from_file(cls, path: Path) -> FakeBqRunner:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("fake BigQuery data must be an object")
+        pages = value.get("pages", [])
+        preflight = value.get("preflight_pages")
+        if not isinstance(pages, list) or (preflight is not None and not isinstance(preflight, list)):
+            raise ValueError("fake BigQuery pages have an invalid shape")
+        delay_ms = value.get("delay_ms", 0)
+        if isinstance(delay_ms, bool) or not isinstance(delay_ms, int) or delay_ms < 0:
+            raise ValueError("fake BigQuery delay_ms must be a non-negative integer")
+        return cls(pages=pages, preflight_pages=preflight, delay_ms=delay_ms)
 
     def dry_run(self, sql: str, params: Mapping[str, object] | None = None) -> DryRun:
         validate_select(sql)
@@ -39,6 +57,8 @@ class FakeBqRunner:
         self.calls.append((sql, params, page_size))
         if self.error is not None:
             raise self.error
+        if self.delay_ms:
+            time.sleep(self.delay_ms / 1000)
         kind = self._query_kind(sql)
         if kind in self.pages_by_query_kind:
             pages = self.pages_by_query_kind[kind]

@@ -65,5 +65,5 @@ class ClaudeProfile:
         if not project_id or Path(project_id).name != project_id:
             raise ValueError("project_id must be a single non-empty path component")
         path = self.work_root / project_id
-        path.mkdir(parents=True, exist_ok=False)
+        path.mkdir(parents=True, exist_ok=True)
         return path

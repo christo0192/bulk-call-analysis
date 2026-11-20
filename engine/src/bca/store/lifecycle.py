@@ -40,6 +40,7 @@ class PauseReason(StrEnum):
     error_storm = "error_storm"
     network = "network"
     spend_control = "spend_control"
+    power = "power"
 
 
 class TransitionError(ValueError):
@@ -61,9 +62,9 @@ _TRANSITIONS: dict[JobState, set[JobState]] = {
         JobState.sample_running,
         JobState.failed,
     },
-    JobState.quote_check: {JobState.building_output},
-    JobState.building_output: {JobState.verifying, JobState.failed},
-    JobState.verifying: {JobState.done, JobState.done_with_issues, JobState.failed},
+    JobState.quote_check: {JobState.building_output, JobState.stalled},
+    JobState.building_output: {JobState.verifying, JobState.failed, JobState.stalled},
+    JobState.verifying: {JobState.done, JobState.done_with_issues, JobState.failed, JobState.stalled},
 }
 
 
@@ -107,6 +108,7 @@ def transition(store: Store, job_id: str, to: JobState, reason: str | None = Non
         if changed.rowcount != 1:
             raise TransitionError("job changed before transition")
         _event(cur, job_id, current, to, reason)
+    store.notify_transition(job_id, current.value, to.value, reason)
 
 
 def _gate(
@@ -134,6 +136,7 @@ def _gate(
         if changed.rowcount != 1:
             raise TransitionError(f"{message} is not valid for this job or spec version")
         _event(cur, job_id, source, target, message)
+    store.notify_transition(job_id, source.value, target.value, message)
 
 
 def approve_plan(
@@ -218,6 +221,7 @@ def edit_spec(store: Store, job_id: str, spec_version: int) -> None:
         )
         cur.execute("DELETE FROM results WHERE job_id=?", (job_id,))
         _event(cur, job_id, current, JobState.plan_proposed, "spec edited")
+    store.notify_transition(job_id, current.value, JobState.plan_proposed.value, "spec edited")
 
 
 def pause(store: Store, job_id: str, reason: PauseReason, resume_at: int | None = None) -> None:
@@ -242,6 +246,7 @@ def pause(store: Store, job_id: str, reason: PauseReason, resume_at: int | None 
         if changed.rowcount != 1:
             raise TransitionError("job changed before pause")
         _event(cur, job_id, current, JobState.paused, reason)
+    store.notify_transition(job_id, current.value, JobState.paused.value, reason.value)
 
 
 def resume(store: Store, job_id: str) -> None:
@@ -256,6 +261,7 @@ def resume(store: Store, job_id: str) -> None:
         if changed.rowcount != 1:
             raise TransitionError("job changed before resume")
         _event(cur, job_id, JobState.paused, target, "resumed")
+    store.notify_transition(job_id, JobState.paused.value, target.value, "resumed")
 
 
 def replace_pause(store: Store, job_id: str, reason: PauseReason, resume_at: int | None = None) -> None:
