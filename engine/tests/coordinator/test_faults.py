@@ -13,6 +13,7 @@ from openpyxl import load_workbook
 import bca.coordinator.runner as runner_module
 from bca.coordinator.runner import _Callbacks
 from bca.mask.leakscan import Hit, LeakReport, scan_lead
+from bca.outputs.verify import verify_job
 from bca.store import (
     Condition,
     JobState,
@@ -287,6 +288,58 @@ def test_repair_pass(
         assert answer == {"ok": True}
     else:
         assert answer == repair_answer
+
+
+def test_forbidden_item_during_repair_keeps_answer_and_reconciles(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updated = replace(coordinator.runner.spec, quote_fields=(QuoteField("quote", "any"),))
+    save_spec(updated, coordinator.job_dir)
+    with coordinator.store.transaction() as cur:
+        cur.execute("UPDATE jobs SET spec_version=2 WHERE id='job'")
+    for row in coordinator.bq.pages[0]:
+        if str(row["lead_id"]) == "10":
+            row["transcript_text"] = "Learner: says hello"
+
+    class ForbiddenPool(ScriptedPool):
+        async def run_until_idle(self) -> None:
+            while True:
+                tasks = await self.callbacks.next_tasks(self.concurrency)
+                if not tasks:
+                    return
+                for task in tasks:
+                    await self.callbacks.on_started(task)
+                    if task.lead_id == "10" and not task.repair:
+                        await self.callbacks.on_result(task, {"ok": True}, task.model, None)
+                    elif task.lead_id in {"10", "11"}:
+                        await self.callbacks.on_failure(
+                            task, "tool_call_forbidden", True, "synthetic forbidden"
+                        )
+                    else:
+                        await self.callbacks.on_result(task, {"ok": True, "quote": "hello"}, task.model, None)
+
+    monkeypatch.setattr(runner_module, "LunaPool", partial(ForbiddenPool, control=Script()))
+    coordinator.runner.on_plan_approved(2)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(2)
+    _run(coordinator.runner.start_full_run())
+
+    lead_10 = coordinator.store.rows(
+        "SELECT status, reason, answer_json FROM leads "
+        "LEFT JOIN results USING (job_id, lead_id) WHERE leads.job_id='job' AND leads.lead_id='10'"
+    )[0]
+    assert tuple(lead_10[:2]) == ("done", "repair blocked: tool_call_forbidden")
+    assert json.loads(str(lead_10[2])) == {"ok": True}
+    assert reconcile(coordinator.store, "job", final=True).ok
+    # The workbook is named after the spec version (2 here).
+    assert verify_job(coordinator.store, "job", coordinator.job_dir / "output" / "results.v2.xlsx").ok
+
+    lead_11_attempts = coordinator.store.rows(
+        "SELECT status, reason, COUNT(*) FROM leads "
+        "LEFT JOIN attempts USING (job_id, lead_id) "
+        "WHERE leads.job_id='job' AND leads.lead_id='11' GROUP BY status, reason"
+    )[0]
+    assert tuple(lead_11_attempts) == ("failed", "tool_call_forbidden", 1)
 
 
 def test_retry_exhaustion_ends_done_with_issues(coordinator: CoordinatorFixture) -> None:

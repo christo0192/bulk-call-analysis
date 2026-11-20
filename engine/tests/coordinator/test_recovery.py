@@ -229,6 +229,44 @@ def test_full_run_masking_failure_holds_back_and_reconciles(
     assert verify_job(coordinator.store, "job", coordinator.job_dir / "output" / "results.v1.xlsx").ok
 
 
+def test_crash_between_leak_flag_and_holdback_never_dispatches_flagged_text(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = "ABCDE1234F"
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+
+    masked = coordinator.job_dir / "masked" / "7.jsonl.gz"
+    raw = coordinator.job_dir / "raw" / "7.jsonl.gz"
+    with gzip.open(masked, "wt", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps({"lead_id": "7", "transcript_text": f"Synthetic text {token}"}) + "\n")
+    raw.unlink(missing_ok=True)
+    coordinator.store.set_lead_status("job", "7", LeadStatus.not_started)
+
+    prompts: list[str] = []
+
+    class RecordingPool(ScriptedPool):
+        async def run_until_idle(self) -> None:
+            while True:
+                tasks = await self.callbacks.next_tasks(self.concurrency)
+                if not tasks:
+                    return
+                for task in tasks:
+                    prompts.append(task.prompt)
+                    await self.callbacks.on_started(task)
+                    await self.callbacks.on_result(task, {"ok": True}, task.model, None)
+
+    monkeypatch.setattr(runner_module, "LunaPool", partial(RecordingPool, control=Script()))
+    _run(coordinator.runner.start_full_run())
+
+    assert tuple(
+        coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='7'")[0]
+    ) == ("held_back", "leak_scan_hold_back")
+    assert all(token not in prompt for prompt in prompts)
+    assert not masked.exists()
+
+
 def test_recover_after_crash_during_pull(
     coordinator: CoordinatorFixture, make_runner: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
