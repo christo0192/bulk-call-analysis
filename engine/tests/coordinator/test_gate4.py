@@ -430,6 +430,79 @@ def test_poison_lead_crashing_appserver_is_bounded(
         assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "error_storm"
 
 
+def test_error_storm_resume_does_not_loop_on_poison_lead(
+    coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class PoisonPool(LunaPool):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["rpc_timeout_s"] = 3
+            super().__init__(*args, **kwargs)
+
+        async def _complete_from_events(self, lead: Any) -> None:
+            server = self._server
+            if lead.task.lead_id in {"10", "11"} and server is not None and server.returncode is None:
+                server.process.kill()
+            await super()._complete_from_events(lead)
+
+    _real_pool(coordinator, tmp_path, monkeypatch, {"hangs": ["10", "11"], "latency_ms": 20})
+    monkeypatch.setattr(runner_module, "LunaPool", PoisonPool)
+    runner = coordinator.runner
+    runner.deps = replace(runner.deps, concurrency=4)
+    runner.on_plan_approved(1)
+
+    async def scenario() -> None:
+        await runner.run_sample()
+        for _ in range(2):
+            if runner._state() is not JobState.paused:
+                break
+            assert (
+                coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "error_storm"
+            )
+            await runner.resume("operator")
+
+    _run(scenario(), timeout=40)
+
+    poison = coordinator.store.rows(
+        "SELECT lead_id, status, reason FROM leads "
+        "WHERE job_id='job' AND lead_id IN ('10', '11') ORDER BY lead_id"
+    )
+    assert [tuple(row) for row in poison] == [
+        ("10", "failed", "appserver_crash_repeated"),
+        ("11", "failed", "appserver_crash_repeated"),
+    ]
+    innocent_results = coordinator.store.rows(
+        "SELECT lead_id FROM results WHERE job_id='job' AND lead_id IN ('12', '13') ORDER BY lead_id"
+    )
+    assert [tuple(row) for row in innocent_results] == [("12",), ("13",)]
+    assert runner._state() is JobState.sample_ready
+
+
+def test_kill_with_writes_in_flight_recovers(
+    coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kills: list[str] = []
+
+    class KillInFlightPool(LunaPool):
+        async def _complete_from_events(self, lead: Any) -> None:
+            server = self._server
+            if lead.task.lead_id == "11" and not kills and server is not None and server.returncode is None:
+                kills.append(lead.task.lead_id)
+                server.process.kill()
+            await super()._complete_from_events(lead)
+
+    _real_pool(coordinator, tmp_path, monkeypatch, {"latency_ms": 150})
+    monkeypatch.setattr(runner_module, "LunaPool", KillInFlightPool)
+    runner = coordinator.runner
+    runner.deps = replace(runner.deps, concurrency=4)
+    runner.on_plan_approved(1)
+
+    _run(runner.run_sample(), timeout=40)
+
+    assert kills == ["11"]
+    assert runner._state() in {JobState.sample_ready, JobState.paused}
+    assert _count(coordinator, "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND ended_at IS NULL") == 0
+
+
 def test_failed_relaunch_pauses_job(
     coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
