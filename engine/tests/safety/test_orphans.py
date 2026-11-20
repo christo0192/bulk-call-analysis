@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import os
-import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
+from bca.claude.launch import _terminate_process_tree
 from bca.claude.winjob import (
     JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -47,35 +48,70 @@ def test_winjob_sets_kill_on_close_flag() -> None:
 
 
 def test_killed_parent_leaves_no_descendants(tmp_path: Path) -> None:
+    go_file = tmp_path / "go"
     pid_file = tmp_path / "pids"
     code = (
         "import pathlib, subprocess, sys, time; "
+        "go=pathlib.Path(sys.argv[1]); "
+        "pids=pathlib.Path(sys.argv[2]); "
+        "while not go.exists(): time.sleep(.02); "
         "children=[subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']) for _ in range(2)]; "
-        "pathlib.Path(sys.argv[1]).write_text(str(children[0].pid)+'\\n'+"
-        "str(children[1].pid)); time.sleep(60)"
+        "pids.write_text(str(children[0].pid)+'\\n'+str(children[1].pid)); time.sleep(60)"
     )
-    parent = subprocess.Popen([sys.executable, "-c", code, str(pid_file)], start_new_session=os.name != "nt")
-    deadline = time.monotonic() + 10
-    while not pid_file.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert pid_file.exists()
-    descendants = [int(line) for line in pid_file.read_text().splitlines()]
-    if os.name == "nt":
-        job = create_kill_on_close_job()
-        assert job is not None
-        try:
-            try:
-                assign_process(job, parent.pid)
-            except OSError as error:
-                if getattr(error, "winerror", None) == 5:
-                    pytest.skip("Windows process is already in a non-breakaway job")
-                raise
-        finally:
+    parent = subprocess.Popen(
+        [sys.executable, "-c", code, str(go_file), str(pid_file)], start_new_session=os.name != "nt"
+    )
+    job: object | None = None
+    try:
+        if os.name == "nt":
+            job = create_kill_on_close_job()
+            assert job is not None
+            assign_process(job, parent.pid)
+        go_file.write_text("go\n", encoding="utf-8", newline="\n")
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pid_file.exists()
+        descendants = [int(line) for line in pid_file.read_text().splitlines()]
+        if os.name == "nt":
+            assert job is not None
             close_job(job)
-    else:
-        cast(Any, os).killpg(parent.pid, cast(Any, signal).SIGKILL)
-    parent.wait(timeout=5)
-    deadline = time.monotonic() + 10
-    while any(pid_alive(pid) for pid in descendants) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert not any(pid_alive(pid) for pid in descendants)
+            job = None
+        else:
+            asyncio.run(_terminate_process_tree(_as_async_process(parent), None))
+        parent.wait(timeout=5)
+        deadline = time.monotonic() + 10
+        while any(pid_alive(pid) for pid in descendants) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not any(pid_alive(pid) for pid in descendants)
+    except OSError as error:
+        if getattr(error, "winerror", None) == 5:
+            pytest.skip("Windows runner has a nested job without breakaway")
+        raise
+    finally:
+        if job is not None:
+            close_job(job)
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=5)
+        if os.name == "nt" and pid_file.exists():
+            for line in pid_file.read_text().splitlines():
+                pid = int(line)
+                if pid_alive(pid):
+                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], check=False)
+
+
+def _as_async_process(process: subprocess.Popen[bytes]) -> Any:
+    """Adapt the Popen handle for the launcher's async tree terminator."""
+
+    class ProcessAdapter:
+        pid = process.pid
+        returncode = process.returncode
+
+        async def wait(self) -> int:
+            return process.wait()
+
+        def kill(self) -> None:
+            process.kill()
+
+    return ProcessAdapter()

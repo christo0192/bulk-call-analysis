@@ -374,9 +374,23 @@ class _Callbacks(PoolCallbacks):
             if error_code == "tool_call_forbidden":
                 # A forbidden item is a terminal safety decision, independent of
                 # the normal counted-attempt budget.
-                self.runner.deps.store.set_lead_status(
-                    self.runner.job_id, task.lead_id, LeadStatus.failed, error_code
+                has_result = bool(
+                    self.runner.deps.store.rows(
+                        "SELECT 1 FROM results WHERE job_id=? AND lead_id=?",
+                        (self.runner.job_id, task.lead_id),
+                    )
                 )
+                if task.repair and has_result:
+                    self.runner.deps.store.set_lead_status(
+                        self.runner.job_id,
+                        task.lead_id,
+                        LeadStatus.done,
+                        "repair blocked: tool_call_forbidden",
+                    )
+                else:
+                    self.runner.deps.store.set_lead_status(
+                        self.runner.job_id, task.lead_id, LeadStatus.failed, error_code
+                    )
                 self.runner._drop_lead_state(task.lead_id)
             elif task.lead_id in self.runner._quote_failures:
                 if counted:
@@ -751,13 +765,51 @@ class JobRunner:
                 (reason, calls_pulled, self.job_id, lead_id),
             )
 
+    def _hold_back_and_remove_files(
+        self, lead_id: str, reason: str, raw: Path, masked: Path, *, clear_sample: bool = False
+    ) -> None:
+        self._hold_back_lead(lead_id, reason, clear_sample=clear_sample)
+        raw.unlink(missing_ok=True)
+        masked.unlink(missing_ok=True)
+
     def _prepare_leads(self, lead_ids: Iterable[str], sample: bool) -> None:
         raw_dir, masked_dir = self.deps.job_dir / "raw", self.deps.job_dir / "masked"
         for lead_id in lead_ids:
             if self._stop_requested.is_set():
                 raise StopRequested
             raw, masked = raw_dir / f"{lead_id}.jsonl.gz", masked_dir / f"{lead_id}.jsonl.gz"
-            if not (masked.is_file() and not raw.is_file()):
+            masked_only = masked.is_file() and not raw.is_file()
+            if masked_only:
+                proven = self.deps.store.rows(
+                    "SELECT status, calls_sent FROM leads WHERE job_id=? AND lead_id=?",
+                    (self.job_id, lead_id),
+                )
+                status, calls_sent = (str(proven[0][0]), int(proven[0][1])) if proven else ("", 0)
+                if (
+                    status
+                    in {
+                        LeadStatus.queued,
+                        LeadStatus.in_flight,
+                        LeadStatus.done,
+                        LeadStatus.failed,
+                    }
+                    and calls_sent > 0
+                ):
+                    continue
+                try:
+                    context = self._context()
+                    report = scan_lead(masked, context.allow_ids)
+                except Exception as exc:
+                    if self._stop_requested.is_set() or isinstance(
+                        exc, (sqlite3.OperationalError, sqlite3.ProgrammingError)
+                    ):
+                        raise
+                    self._hold_back_and_remove_files(lead_id, "masking_failed", raw, masked)
+                    continue
+                if report.held_back:
+                    self._hold_back_and_remove_files(lead_id, "leak_scan_hold_back", raw, masked)
+                    continue
+            else:
                 try:
                     context = self._context()
                     stats = mask_lead_stream(raw, masked, context)
@@ -767,14 +819,11 @@ class JobRunner:
                         exc, (sqlite3.OperationalError, sqlite3.ProgrammingError)
                     ):
                         raise
-                    # Record the hold-back before removing the raw transcript.
-                    self._hold_back_lead(lead_id, "masking_failed")
-                    raw.unlink(missing_ok=True)
+                    self._hold_back_and_remove_files(lead_id, "masking_failed", raw, masked)
                     continue
                 if stats.failed or report.held_back:
                     reason = "masking_failed" if stats.failed else "leak_scan_hold_back"
-                    self._hold_back_lead(lead_id, reason)
-                    raw.unlink(missing_ok=True)
+                    self._hold_back_and_remove_files(lead_id, reason, raw, masked)
                     continue
             try:
                 calls = self._lead_calls(lead_id)
@@ -809,9 +858,7 @@ class JobRunner:
                     exc, (sqlite3.OperationalError, sqlite3.ProgrammingError)
                 ):
                     raise
-                # Record the hold-back before removing the raw transcript.
-                self._hold_back_lead(lead_id, "masking_failed")
-                raw.unlink(missing_ok=True)
+                self._hold_back_and_remove_files(lead_id, "masking_failed", raw, masked)
                 continue
             if self._phase_loop is not None and not self._phase_loop.is_closed():
                 phase_event = self._phase_event
@@ -854,11 +901,11 @@ class JobRunner:
                     bundle.chars,
                 )
             except Exception:
-                self.deps.store.set_lead_status(
-                    self.job_id,
+                self._hold_back_and_remove_files(
                     lead_id,
-                    LeadStatus.held_back,
                     "masked_bundle_unavailable",
+                    self.deps.job_dir / "raw" / f"{lead_id}.jsonl.gz",
+                    self.deps.job_dir / "masked" / f"{lead_id}.jsonl.gz",
                 )
                 continue
             prompt = self.spec.instructions + "\n" + bundle.text
@@ -1401,10 +1448,15 @@ class JobRunner:
                         text[span.start : span.end] for text in texts for span in context.ner.persons(text)
                     ]
                 except Exception:
-                    raw.unlink(missing_ok=True)
                     self._bundles.pop(lead_id, None)
                     self._bundle_metadata.pop(lead_id, None)
-                    self._hold_back_lead(lead_id, "harvest_failed", clear_sample=True)
+                    self._hold_back_and_remove_files(
+                        lead_id,
+                        "harvest_failed",
+                        raw,
+                        self.deps.job_dir / "masked" / f"{lead_id}.jsonl.gz",
+                        clear_sample=True,
+                    )
                     continue
                 names_by_lead[lead_id] = names
             usable = [lead_id for lead_id in usable if lead_id in names_by_lead]
@@ -1441,11 +1493,11 @@ class JobRunner:
                         (bundle.calls_sent, len(bundle.calls_dropped), bundle.chars, self.job_id, lead_id),
                     )
             except Exception:
-                self.deps.store.set_lead_status(
-                    self.job_id,
+                self._hold_back_and_remove_files(
                     lead_id,
-                    LeadStatus.held_back,
                     "masked_bundle_unavailable",
+                    self.deps.job_dir / "raw" / f"{lead_id}.jsonl.gz",
+                    self.deps.job_dir / "masked" / f"{lead_id}.jsonl.gz",
                 )
         sample_set = set(sample)
         for lead_id in usable:

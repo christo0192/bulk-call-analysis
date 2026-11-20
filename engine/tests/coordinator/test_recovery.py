@@ -15,7 +15,7 @@ import bca.coordinator.runner as runner_module
 from bca.mask.masker import MaskingContext, load_harvest, mask_lead_stream
 from bca.mask.names import Span
 from bca.outputs.verify import verify_job
-from bca.store import JobState, LeadStatus, edit_spec, save_spec
+from bca.store import CapRule, JobState, LeadSourceIds, LeadStatus, edit_spec, save_spec
 from bca.store.reconcile import reconcile
 from tests.coordinator.conftest import CoordinatorFixture
 from tests.coordinator.test_faults import Script, ScriptedPool
@@ -127,10 +127,50 @@ def test_sample_harvest_error_holds_back_only_that_lead(
 def test_sample_harvest_memory_is_bounded(
     coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    long_text = "x" * 200_000
-    coordinator.bq.pages = [
-        [{"lead_id": str(index), "transcript_text": long_text, "duration": 200} for index in range(200)]
+    lead_ids = [str(index) for index in range(200)]
+    spec = replace(
+        coordinator.runner.spec,
+        lead_source=LeadSourceIds("ids.txt", len(lead_ids)),
+        cap=CapRule(250_000, "drop_short_then_oldest", 180),
+    )
+    (coordinator.job_dir / "ids.txt").write_text("\n".join(lead_ids) + "\n", encoding="utf-8", newline="\n")
+    # save_spec writes the NEXT spec version; move the job to it before approving.
+    save_spec(spec, coordinator.job_dir)
+    edit_spec(coordinator.store, "job", 2)
+
+    coordinator.bq.preflight_pages = [
+        [
+            {
+                "lead_id": lead_id,
+                "found": True,
+                "calls": 1,
+                "usable_calls": 1,
+                "transcript_calls": 1,
+                "transcription_failed": None,
+            }
+            for lead_id in lead_ids
+        ]
     ]
+
+    original_iter_pages = coordinator.bq.iter_pages
+
+    def lazy_pages(sql: str, *args: Any, **kwargs: Any) -> Any:
+        # Preflight queries keep the fake's preflight rows; only the transcript pull is lazy.
+        if kwargs.get("kind") == "preflight" or "WITH selected AS" in sql:
+            yield from original_iter_pages(sql, *args, **kwargs)
+            return
+        for lead_id in lead_ids:
+            yield [
+                {
+                    "lead_id": lead_id,
+                    "call_id": f"call-{lead_id}",
+                    "transcript_text": ("x" * 200_000) + lead_id,
+                    "call_start": f"start-{lead_id}",
+                    "duration": 200,
+                }
+            ]
+
+    monkeypatch.setattr(coordinator.bq, "iter_pages", lazy_pages)
 
     class EmptyNer:
         def persons(self, text: str) -> list[Span]:
@@ -141,16 +181,12 @@ def test_sample_harvest_memory_is_bounded(
         "deps",
         replace(
             coordinator.runner.deps,
-            masking_context=lambda *_: MaskingContext(
-                allow_ids=frozenset(str(index) for index in range(200)), ner=EmptyNer()
-            ),
+            masking_context=lambda *_: MaskingContext(allow_ids=frozenset(lead_ids), ner=EmptyNer()),
         ),
     )
-    monkeypatch.setattr(runner_module, "harvest_seen_twice", lambda calls, _ner: list(calls)[:0])
-    coordinator.runner.on_plan_approved(1)
     tracemalloc.start()
     try:
-        _run(coordinator.runner.run_sample())
+        coordinator.runner.on_plan_approved(2)
         _current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()

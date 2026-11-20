@@ -17,13 +17,15 @@ long-stall, and stdio-api.
 The invariants check that reconciliation passes, the verified workbook exists and
 contains no formulas, and that every scenario reaches its expected final state.
 Fake Codex records every turn prompt in the scenario working directory; the
-invariants reject the synthetic phone, email, PAN, names, and leak sentinel if
-any reach a prompt. PII leads must be masked and complete, while the separate
-synthetic leak and masker failure remain held back for their persisted reasons.
-The simulator also checks scenario-specific retry, pause, sleep-gap, liveness,
-recovery, gate, and failure expectations. Crash-after-recover performs two
-recoveries and verifies that results are not duplicated; long-stall hangs one
-fake turn and requires a persisted liveness/stall signal before completion.
+invariants collect every planted phone, email, PAN, and name belonging to a
+lead that reached a prompt and reject any of those tokens. PII leads must be
+masked and complete, while the separate synthetic leak and masker failure
+remain held back for their persisted reasons. The simulator also checks
+scenario-specific retry, pause, sleep-gap, recovery, gate, and failure
+expectations. Crash-after-recover performs two recoveries and verifies that
+results are not duplicated; long-stall hangs one fake turn and verifies the
+product's short lead-timeout failure (or a successful retry), not a fabricated
+liveness event.
 
 From `engine/`, run the fast suite with `uv run pytest -q -m 'not slow'`.
 Run the slow suite with `uv run pytest -q -m slow`. Run lint with
@@ -32,7 +34,10 @@ Run the slow suite with `uv run pytest -q -m slow`. Run lint with
 
 Safety tests are in `engine/tests/safety`. They verify the child environment,
 configuration isolation, billing guard, initialization guard, and orphan
-handling. They use only fakes and synthetic data.
+handling. The orphan test uses the engine's process-tree termination helper on
+POSIX and a kill-on-close Windows job assigned before the parent spawns its
+children; on Windows it requires a runner without a nested job. They use only
+fakes and synthetic data.
 
 To measure memory, run `python scripts/footprint.py --pid PID --interval 5
 --duration 600 --out footprint.csv`. For a synthetic in-process run, use

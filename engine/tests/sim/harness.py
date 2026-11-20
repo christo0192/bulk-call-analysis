@@ -101,6 +101,7 @@ class SimResult:
     verify: VerifyReport
     store: Store
     prompt_log: Path | None = None
+    planted_pii: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass
@@ -162,7 +163,9 @@ def _config() -> SiteConfig:
     )
 
 
-def _make_rows(population: Population) -> tuple[list[str], list[dict[str, object]], list[dict[str, object]]]:
+def _make_rows(
+    population: Population,
+) -> tuple[list[str], list[dict[str, object]], list[dict[str, object]], dict[str, tuple[str, ...]]]:
     groups = (
         population.normal,
         population.no_transcript,
@@ -174,6 +177,7 @@ def _make_rows(population: Population) -> tuple[list[str], list[dict[str, object
     ids = [str(i) for i in range(sum(groups))]
     preflight: list[dict[str, object]] = []
     calls: list[dict[str, object]] = []
+    planted_pii: dict[str, tuple[str, ...]] = {}
     offset = 0
     for group, count in enumerate(groups):
         for index in range(offset, offset + count):
@@ -223,8 +227,14 @@ def _make_rows(population: Population) -> tuple[list[str], list[dict[str, object
                         "duration": 30 if group == 2 else 200,
                     }
                 )
+            tokens = ["Synthetic Name"]
+            if group == 4:
+                tokens.extend(("9876543210", f"pii-{lead_id}@example.test"))
+            elif group == 5:
+                tokens.append("ABCDE1234F")
+            planted_pii[lead_id] = tuple(tokens)
         offset += count
-    return ids, preflight, calls
+    return ids, preflight, calls, planted_pii
 
 
 def _spec(
@@ -261,7 +271,7 @@ async def _run(scenario: Scenario, root: Path) -> SimResult:
     job_id = "scenario"
     job_dir = root / "job"
     job_dir.mkdir(parents=True)
-    ids, preflight, calls = _make_rows(scenario.population)
+    ids, preflight, calls, planted_pii = _make_rows(scenario.population)
     if scenario.name == "leak-holdbacks":
         # The independent leak scanner catches this synthetic value after masking.
         for call in calls:
@@ -394,28 +404,6 @@ async def _run(scenario: Scenario, root: Path) -> SimResult:
                 return started
 
             runner_module._Callbacks.on_started = sleep_gap_started
-
-        stall_fault = next((fault for fault in scenario.faults if fault.kind == "stall"), None)
-        if stall_fault is not None:
-            original_started_for_stall = runner_module._Callbacks.on_started
-            stall_started_count = 0
-
-            async def stall_started(callbacks: Any, task: Any) -> bool:
-                nonlocal stall_started_count
-                started = bool(await original_started_for_stall(callbacks, task))
-                if started:
-                    stall_started_count += 1
-                if started and stall_started_count == scenario.concurrency:
-                    # Exercise the real monitor tick while all workers are in flight.  Keep
-                    # the sleep detector's wall/monotonic pair aligned so this is a stall,
-                    # not a suspend/resume signal.
-                    now = clock.now()
-                    callbacks.runner._liveness._last_check = now + 181
-                    for event in callbacks.runner._liveness.check(now + 181):
-                        callbacks.runner._publish(event.kind, event.data)
-                return started
-
-            runner_module._Callbacks.on_started = stall_started
 
         def install_crash_hook() -> None:
             nonlocal original_started
@@ -569,9 +557,6 @@ async def _run(scenario: Scenario, root: Path) -> SimResult:
         event_rows = store.rows("SELECT kind FROM job_events WHERE job_id=? ORDER BY id", (job_id,))
         seen.extend(str(row[0]) for row in event_rows)
         bus_events = events.drain()
-        for event in bus_events:
-            if event.kind in {"stall", "slow"}:
-                store.append_event(job_id, event.kind, event.data)
         seen.extend(event.kind for event in bus_events)
         outcome_rows = store.rows(
             "SELECT status, COUNT(*) FROM leads WHERE job_id=? GROUP BY status", (job_id,)
@@ -599,6 +584,7 @@ async def _run(scenario: Scenario, root: Path) -> SimResult:
             report,
             store,
             root / "fake-codex-prompts.jsonl",
+            planted_pii,
         )
         if scenario.expect is not None:
             scenario.expect(result)
@@ -913,9 +899,23 @@ def _fault_expectation(faults: tuple[Fault, ...]) -> Callable[[SimResult], None]
                 if fault.value == "recover":
                     assert sum(kind == "runner_recovered" for kind, _ in events) == 2
             elif fault.kind == "stall":
-                assert any(kind in {"stall", "liveness"} for kind, _ in events)
-                # A hung turn that times out fails its lead (counted), so done_with_issues is the
-                # product's correct outcome; done is fine if a retry succeeded.
+                target = _target(
+                    fault,
+                    [
+                        str(row[0])
+                        for row in result.store.rows(
+                            "SELECT lead_id FROM leads WHERE job_id=? ORDER BY lead_id", ("scenario",)
+                        )
+                    ],
+                )
+                timeout_attempts = result.store.rows(
+                    "SELECT counted, error_code FROM attempts WHERE job_id=? AND lead_id=? "
+                    "AND error_code='timeout'",
+                    ("scenario", target),
+                )
+                assert any(int(counted) == 1 for counted, _error_code in timeout_attempts) or (
+                    result.attempts_per_lead.get(target, 0) > 1
+                )
                 assert result.state in {JobState.done, JobState.done_with_issues}
             elif fault.kind == "rebuild":
                 assert "rules_rebuilt" in result.event_types
@@ -952,11 +952,18 @@ def assert_invariants(result: SimResult) -> None:
         workbook.close()
     if result.prompt_log is not None and result.prompt_log.is_file():
         prompts = result.prompt_log.read_text(encoding="utf-8")
-        for token in (
-            "9876543210",
-            "pii-4@example.test",
-            "ABCDE1234F",
-            "Synthetic Name",
-            "LEAK_SCAN_SENTINEL",
-        ):
+        prompted_leads = {
+            str(lead_id)
+            for (lead_id,) in result.store.rows(
+                "SELECT DISTINCT lead_id FROM attempts WHERE job_id=?", ("scenario",)
+            )
+        }
+        tokens = {
+            token
+            for lead_id, lead_tokens in result.planted_pii.items()
+            if lead_id in prompted_leads
+            for token in lead_tokens
+        }
+        tokens.add("LEAK_SCAN_SENTINEL")
+        for token in tokens:
             assert token not in prompts, f"synthetic PII leaked into a model prompt: {token}"
