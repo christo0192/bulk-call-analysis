@@ -45,3 +45,4 @@ files = ["src", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 60
+markers = ["slow: deterministic simulator load tests"]

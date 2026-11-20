@@ -11,6 +11,19 @@ import time
 from pathlib import Path
 
 
+def _config_marker() -> None:
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    if configured:
+        directory = Path(configured)
+    else:
+        home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+        if not home:
+            raise RuntimeError("fake Claude requires HOME or USERPROFILE when CLAUDE_CONFIG_DIR is unset")
+        directory = Path(home) / ".claude"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "fake-claude-start.marker").write_text("started\n", encoding="utf-8", newline="\n")
+
+
 async def _call_scripted_tool() -> object:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
@@ -31,10 +44,12 @@ async def _call_scripted_tool() -> object:
 
 
 if len(sys.argv) > 1 and sys.argv[1:4] == ["auth", "status", "--json"]:
+    _config_marker()
     print(json.dumps({"loggedIn": True, "authMethod": "claude.ai", "configDirectory": "isolated"}))
     raise SystemExit(0)
 
 scenario = os.environ.get("FAKE_CLAUDE_SCENARIO", "normal")
+_config_marker()
 delay = float(os.environ.get("FAKE_CLAUDE_DELAY", "0"))
 argv_log = os.environ.get("FAKE_CLAUDE_ARGV_LOG")
 env_log = os.environ.get("FAKE_CLAUDE_ENV_LOG")
@@ -62,6 +77,12 @@ init: dict[str, object] = {
     "fast_mode_state": "off",
     "claude_code_version": "2.1.327",
 }
+init_patch = os.environ.get("FAKE_CLAUDE_INIT_PATCH")
+if init_patch:
+    patch_value = json.loads(init_patch)
+    if not isinstance(patch_value, dict):
+        raise ValueError("FAKE_CLAUDE_INIT_PATCH must be an object")
+    init.update(patch_value)
 if scenario == "spawn_child":
     sys.stdout.write(json.dumps(init) + "\n")
     sys.stdout.flush()

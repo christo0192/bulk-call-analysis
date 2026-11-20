@@ -91,6 +91,34 @@ def test_zero_resolved_leads_stalls_with_reason(coordinator: CoordinatorFixture)
     assert not (coordinator.job_dir / "output" / "results.v1.xlsx").exists()
 
 
+def test_sleep_gap_outside_running_state_is_ignored(coordinator: CoordinatorFixture) -> None:
+    _approve_plan(coordinator)
+    _run(coordinator.runner.run_sample())
+    assert coordinator.runner._state() is JobState.sample_ready
+    callbacks = runner_module._Callbacks(coordinator.runner)
+
+    _run(callbacks.on_activity(coordinator.clock.now()))
+    coordinator.clock.advance_wall(16)
+    _run(callbacks.on_activity(coordinator.clock.now()))
+
+    assert coordinator.runner._state() is JobState.sample_ready
+    assert any(event.kind == "sleep_detected" for event in coordinator.events.events)
+    assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] is None
+
+
+def test_sleep_gap_in_running_state_pauses_sleep(coordinator: CoordinatorFixture) -> None:
+    _approve_plan(coordinator)
+    assert coordinator.runner._state() is JobState.sample_running
+    callbacks = runner_module._Callbacks(coordinator.runner)
+
+    _run(callbacks.on_activity(coordinator.clock.now()))
+    coordinator.clock.advance_wall(16)
+    _run(callbacks.on_activity(coordinator.clock.now()))
+
+    assert coordinator.runner._state() is JobState.paused
+    assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "sleep"
+
+
 def test_repair_always_failing_uncounted_pauses_network_after_four(
     coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

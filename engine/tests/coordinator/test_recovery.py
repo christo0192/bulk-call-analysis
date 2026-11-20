@@ -4,6 +4,7 @@ import asyncio
 import gzip
 import json
 import threading
+import tracemalloc
 from dataclasses import replace
 from functools import partial
 from typing import Any
@@ -11,8 +12,11 @@ from typing import Any
 import pytest
 
 import bca.coordinator.runner as runner_module
-from bca.mask.masker import mask_lead_stream
-from bca.store import JobState, LeadStatus, edit_spec, save_spec
+from bca.mask.masker import MaskingContext, load_harvest, mask_lead_stream
+from bca.mask.names import Span
+from bca.outputs.verify import verify_job
+from bca.store import CapRule, JobState, LeadSourceIds, LeadStatus, edit_spec, save_spec
+from bca.store.reconcile import reconcile
 from tests.coordinator.conftest import CoordinatorFixture
 from tests.coordinator.test_faults import Script, ScriptedPool
 
@@ -68,6 +72,199 @@ def test_empty_harvest_is_valid(coordinator: CoordinatorFixture, monkeypatch: py
     coordinator.runner.on_plan_approved(1)
     _run(coordinator.runner.run_sample())
     assert coordinator.runner._state() is JobState.sample_ready
+
+
+def test_sample_harvest_error_holds_back_only_that_lead(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Alpha appears once in each of two successful leads, while Beta straddles the
+    # successful and failing leads. Per-lead harvesting would incorrectly harvest neither.
+    for row in coordinator.bq.pages[0]:
+        lead_id = str(row["lead_id"])
+        if lead_id == "10":
+            row["transcript_text"] = "FAIL Beta Person"
+        elif lead_id == "11" or lead_id == "12":
+            row["transcript_text"] = "Alpha Person"
+        elif lead_id == "13":
+            row["transcript_text"] = "Beta Person"
+
+    class FailingNer:
+        def persons(self, text: str) -> list[Span]:
+            if "FAIL" in text:
+                raise RuntimeError("synthetic masker hold-back")
+            for name in ("Alpha Person", "Beta Person"):
+                start = text.find(name)
+                if start >= 0:
+                    return [Span(start, start + len(name))]
+            return []
+
+    monkeypatch.setattr(
+        coordinator.runner,
+        "deps",
+        replace(
+            coordinator.runner.deps,
+            masking_context=lambda *_: MaskingContext(
+                allow_ids=frozenset(str(index) for index in range(40)), ner=FailingNer()
+            ),
+        ),
+    )
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+
+    assert coordinator.runner._state() is JobState.sample_ready
+    assert tuple(
+        coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='10'")[0]
+    ) == (LeadStatus.held_back, "harvest_failed")
+    assert (
+        coordinator.store.rows(
+            "SELECT COUNT(*) FROM leads WHERE job_id='job' AND in_sample=1 AND status='done'"
+        )[0][0]
+        == 3
+    )
+    assert load_harvest(coordinator.job_dir) == ("Alpha Person",)
+
+
+def test_sample_harvest_memory_is_bounded(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_ids = [str(index) for index in range(200)]
+    spec = replace(
+        coordinator.runner.spec,
+        lead_source=LeadSourceIds("ids.txt", len(lead_ids)),
+        cap=CapRule(250_000, "drop_short_then_oldest", 180),
+    )
+    (coordinator.job_dir / "ids.txt").write_text("\n".join(lead_ids) + "\n", encoding="utf-8", newline="\n")
+    # save_spec writes the NEXT spec version; move the job to it before approving.
+    save_spec(spec, coordinator.job_dir)
+    edit_spec(coordinator.store, "job", 2)
+
+    coordinator.bq.preflight_pages = [
+        [
+            {
+                "lead_id": lead_id,
+                "found": True,
+                "calls": 1,
+                "usable_calls": 1,
+                "transcript_calls": 1,
+                "transcription_failed": None,
+            }
+            for lead_id in lead_ids
+        ]
+    ]
+
+    original_iter_pages = coordinator.bq.iter_pages
+
+    def lazy_pages(sql: str, *args: Any, **kwargs: Any) -> Any:
+        # Preflight queries keep the fake's preflight rows; only the transcript pull is lazy.
+        if kwargs.get("kind") == "preflight" or "WITH selected AS" in sql:
+            yield from original_iter_pages(sql, *args, **kwargs)
+            return
+        for lead_id in lead_ids:
+            yield [
+                {
+                    "lead_id": lead_id,
+                    "call_id": f"call-{lead_id}",
+                    "transcript_text": ("x" * 200_000) + lead_id,
+                    "call_start": f"start-{lead_id}",
+                    "duration": 200,
+                }
+            ]
+
+    monkeypatch.setattr(coordinator.bq, "iter_pages", lazy_pages)
+
+    class EmptyNer:
+        def persons(self, text: str) -> list[Span]:
+            return []
+
+    monkeypatch.setattr(
+        coordinator.runner,
+        "deps",
+        replace(
+            coordinator.runner.deps,
+            masking_context=lambda *_: MaskingContext(allow_ids=frozenset(lead_ids), ner=EmptyNer()),
+        ),
+    )
+    tracemalloc.start()
+    try:
+        coordinator.runner.on_plan_approved(2)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 10 * 1024 * 1024
+
+
+def test_full_run_masking_failure_holds_back_and_reconciles(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Install the failing masker BEFORE the plan is approved: the background masker
+    # handles the full-run leads during the sample phase, so patching later is too late.
+    original_mask = mask_lead_stream
+    failed_lead: list[str] = []
+
+    def failing_mask(raw: Any, masked: Any, context: Any) -> Any:
+        lead_id = raw.name.removesuffix(".jsonl.gz")
+        in_sample = coordinator.store.rows(
+            "SELECT in_sample FROM leads WHERE job_id='job' AND lead_id=?", (lead_id,)
+        )
+        if in_sample and not int(in_sample[0][0]) and (not failed_lead or failed_lead[0] == lead_id):
+            failed_lead[:] = [lead_id]
+            raise RuntimeError("synthetic masking failure")
+        return original_mask(raw, masked, context)
+
+    monkeypatch.setattr(runner_module, "mask_lead_stream", failing_mask)
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+    _run(coordinator.runner.start_full_run())
+
+    assert failed_lead, "no full-run lead reached the masker"
+    row = coordinator.store.rows(
+        "SELECT status, reason, calls_pulled, calls_sent, calls_dropped_cap, calls_dropped_unusable "
+        "FROM leads WHERE job_id='job' AND lead_id=?",
+        (failed_lead[0],),
+    )[0]
+    assert tuple(row) == ("held_back", "masking_failed", row[2], 0, 0, row[2])
+    assert coordinator.runner._state() is JobState.done_with_issues
+    assert reconcile(coordinator.store, "job", final=True).ok
+    assert verify_job(coordinator.store, "job", coordinator.job_dir / "output" / "results.v1.xlsx").ok
+
+
+def test_crash_between_leak_flag_and_holdback_never_dispatches_flagged_text(
+    coordinator: CoordinatorFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = "ABCDE1234F"
+    coordinator.runner.on_plan_approved(1)
+    _run(coordinator.runner.run_sample())
+    coordinator.runner.on_sample_approved(1)
+
+    masked = coordinator.job_dir / "masked" / "7.jsonl.gz"
+    raw = coordinator.job_dir / "raw" / "7.jsonl.gz"
+    with gzip.open(masked, "wt", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps({"lead_id": "7", "transcript_text": f"Synthetic text {token}"}) + "\n")
+    raw.unlink(missing_ok=True)
+    coordinator.store.set_lead_status("job", "7", LeadStatus.not_started)
+
+    prompts: list[str] = []
+
+    class RecordingPool(ScriptedPool):
+        async def run_until_idle(self) -> None:
+            while True:
+                tasks = await self.callbacks.next_tasks(self.concurrency)
+                if not tasks:
+                    return
+                for task in tasks:
+                    prompts.append(task.prompt)
+                    await self.callbacks.on_started(task)
+                    await self.callbacks.on_result(task, {"ok": True}, task.model, None)
+
+    monkeypatch.setattr(runner_module, "LunaPool", partial(RecordingPool, control=Script()))
+    _run(coordinator.runner.start_full_run())
+
+    assert tuple(
+        coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='7'")[0]
+    ) == ("held_back", "leak_scan_hold_back")
+    assert all(token not in prompt for prompt in prompts)
+    assert not masked.exists()
 
 
 def test_recover_after_crash_during_pull(

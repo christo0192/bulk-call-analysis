@@ -49,6 +49,9 @@ class FakeClock:
         self.current += seconds
         self.ticks += seconds
 
+    def advance_wall(self, seconds: float) -> None:
+        self.current += seconds
+
 
 @dataclass
 class EventRecorder:

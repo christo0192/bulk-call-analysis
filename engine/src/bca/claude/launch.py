@@ -313,16 +313,28 @@ async def _terminate_process_tree(process: asyncio.subprocess.Process, job: obje
             except TimeoutError as error:
                 raise RuntimeError("Claude process could not be killed") from error
     else:
-        with contextlib.suppress(ProcessLookupError):
+        try:
             cast(Any, os).killpg(process.pid, signal.SIGTERM)
+        except (PermissionError, ProcessLookupError) as error:
+            _logger.debug(
+                "Claude process group %s was already gone or not signalable: %s", process.pid, error
+            )
         try:
             await asyncio.wait_for(asyncio.shield(process.wait()), timeout=1.0)
         except TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
+            try:
                 cast(Any, os).killpg(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            except (PermissionError, ProcessLookupError) as error:
+                _logger.debug(
+                    "Claude process group %s was already gone or not signalable: %s", process.pid, error
+                )
             try:
                 await asyncio.wait_for(asyncio.shield(process.wait()), timeout=2.0)
             except TimeoutError as error:
                 raise RuntimeError("Claude process could not be killed") from error
-        with contextlib.suppress(ProcessLookupError):
+        try:
             cast(Any, os).killpg(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        except (PermissionError, ProcessLookupError) as error:
+            _logger.debug(
+                "Claude process group %s was already gone or not signalable: %s", process.pid, error
+            )
