@@ -6,7 +6,9 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -566,37 +568,64 @@ def test_pause_during_full_run_masker_wait_never_double_masks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     original_mask = mask_lead_stream
-    for attempt in range(3):
-        data_dir = tmp_path / f"masker-attempt-{attempt}"
-        data_dir.mkdir()
-        calls: dict[str, int] = {}
+    full_started = threading.Event()
+    first_full_mask_started = threading.Event()
+    release_full_masking = threading.Event()
+    calls: Counter[str] = Counter()
+    calls_lock = threading.Lock()
 
-        def slow_mask(raw: Path, masked: Path, context: Any, _calls: dict[str, int] = calls) -> Any:
-            lead_id = raw.name.removesuffix(".jsonl.gz")
-            _calls[lead_id] = _calls.get(lead_id, 0) + 1
-            time.sleep(0.05)
-            return original_mask(raw, masked, context)
+    backend_ref: list[Any] = []
 
-        monkeypatch.setattr(runner_module, "mask_lead_stream", slow_mask)
-        backend, _job_dir = _tiny_job(data_dir, monkeypatch, latency_ms=1)
-
-        async def scenario(_backend: ProductionBackend = backend) -> None:
-            await _backend.call("job/approvePlan", {"job": "job-one", "expectedSpecVersion": 1})
-            await _wait_state(_backend, "sample_ready", limit=60, poll=0.05)
-            await _backend.call("job/approveSample", {"job": "job-one", "expectedSpecVersion": 1})
-            await _backend.call("job/startFull", {"job": "job-one"})
-            await asyncio.sleep(0.3)
-            await _backend.call("job/pause", {"job": "job-one"})
-            await asyncio.sleep(0.2)
-            await _backend.call("job/resume", {"job": "job-one"})
-            await _wait_state(_backend, "done_with_issues", limit=90, poll=0.05)
-
-        run(scenario())
-        held_back = backend.store.rows(
-            "SELECT lead_id, reason FROM leads WHERE job_id=? AND reason='masking_failed'", ("job-one",)
+    def gated_mask(raw: Path, masked: Path, context: Any) -> Any:
+        lead_id = raw.name.removesuffix(".jsonl.gz")
+        with calls_lock:
+            calls[lead_id] += 1
+        in_sample = backend_ref[0].store.rows(
+            "SELECT in_sample FROM leads WHERE job_id='job-one' AND lead_id=?", (lead_id,)
         )
-        assert held_back == []
-        assert all(count == 1 for count in calls.values())
+        if in_sample and not int(in_sample[0][0]):
+            # The background masker handles the non-sample leads: hold it until the
+            # test has paused and resumed the full run, so the race window is certain.
+            first_full_mask_started.set()
+            release_full_masking.wait(30)
+        return original_mask(raw, masked, context)
+
+    monkeypatch.setattr(runner_module, "mask_lead_stream", gated_mask)
+    backend, job_dir = _tiny_job(tmp_path, monkeypatch, latency_ms=1)
+    backend_ref.append(backend)
+
+    async def scenario() -> None:
+        await backend.call("job/approvePlan", {"job": "job-one", "expectedSpecVersion": 1})
+        await _wait_state(backend, "sample_ready", limit=60, poll=0.05)
+        # Full-run leads are otherwise held back when the synthetic fixture has
+        # no harvested-names file, so provide the local synthetic marker.
+        (job_dir / "harvested_names.json").write_text("[]\n", encoding="utf-8", newline="\n")
+        await backend.call("job/approveSample", {"job": "job-one", "expectedSpecVersion": 1})
+        full_started.set()
+        assert await asyncio.to_thread(first_full_mask_started.wait, 5)
+        await backend.call("job/startFull", {"job": "job-one"})
+        await asyncio.sleep(0.2)
+        await backend.call("job/pause", {"job": "job-one"})
+        # The pause reply is allowed to cancel the driver while the masking
+        # thread remains blocked in gated_mask. Resume while that thread still
+        # owns the masking pass, then let the real file operations proceed.
+        await backend.call("job/resume", {"job": "job-one"})
+        release_full_masking.set()
+        deadline = asyncio.get_running_loop().time() + 90
+        while asyncio.get_running_loop().time() < deadline:
+            state = backend._job_state("job-one").value
+            if state in {"done", "done_with_issues"}:
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"job did not finish: {backend._job_state('job-one').value}")
+
+    run(scenario())
+    rows = backend.store.rows("SELECT lead_id, status, reason FROM leads WHERE job_id=?", ("job-one",))
+    assert all(str(reason) != "masking_failed" for _lead_id, _status, reason in rows)
+    assert calls
+    assert all(count == 1 for count in calls.values())
+    # Leads without transcripts are never masked, so masked leads are a subset of all leads.
+    assert set(calls) <= {str(lead_id) for lead_id, _status, _reason in rows}
 
 
 def test_each_transition_emits_job_state_exactly_once(
