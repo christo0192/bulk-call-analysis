@@ -271,7 +271,7 @@ class Store:
         rows = self.rows(
             "SELECT COUNT(*) FROM attempts WHERE job_id=? AND lead_id=? AND outcome='failed' "
             "AND counted=0 AND COALESCE(error_code, '') NOT IN "
-            "('quota_interrupt', 'interrupted', 'appserver_crash', 'appserver_crash_shared', 'appserver_restart')",
+            "('quota_interrupt', 'interrupted', 'appserver_crash', 'appserver_restart')",
             (job_id, lead_id),
         )
         return int(rows[0][0]) if rows else 0

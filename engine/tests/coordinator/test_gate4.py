@@ -462,6 +462,80 @@ def test_poison_lead_dispatched_last_does_not_hang(
     assert _count(coordinator, "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND ended_at IS NULL") == 0
 
 
+@pytest.mark.parametrize("concurrency", [2, 4])
+def test_poison_lead_noticing_its_own_crash_is_bounded(
+    coordinator: CoordinatorFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    concurrency: int,
+) -> None:
+    kills: list[int] = []
+    launches = 0
+    killed_generations: set[int] = set()
+    scenario_path = _real_pool(
+        coordinator,
+        tmp_path,
+        monkeypatch,
+        {"hangs": ["10", "11", "12", "13"], "latency_ms": 20},
+    )
+
+    class PoisonPool(LunaPool):
+        async def _launch_and_prepare(self) -> None:
+            nonlocal launches
+            launches += 1
+            if launches > 1:
+                scenario_path.write_text(
+                    json.dumps({"hangs": ["10"], "latency_ms": 20}),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+            await super()._launch_and_prepare()
+
+        async def _complete_from_events(self, lead: Any) -> None:
+            server = self._server
+            generation = self._server_generation
+            waiting = all(active.turn_id is not None for active in self._leads.values())
+            poison_waiting = lead.task.lead_id == "10" and lead.turn_id is not None
+            if (
+                server is not None
+                and server.returncode is None
+                and generation not in killed_generations
+                and ((generation == 1 and waiting) or (generation > 1 and poison_waiting))
+            ):
+                killed_generations.add(generation)
+                kills.append(1)
+                server.process.kill()
+            await super()._complete_from_events(lead)
+
+    monkeypatch.setattr(runner_module, "LunaPool", PoisonPool)
+    runner = coordinator.runner
+    runner.deps = replace(runner.deps, concurrency=concurrency)
+    runner.on_plan_approved(1)
+
+    _run(runner.run_sample(), timeout=40)
+
+    assert len(kills) <= 3
+    poison = coordinator.store.rows("SELECT status, reason FROM leads WHERE job_id='job' AND lead_id='10'")[0]
+    assert tuple(poison) == ("failed", "appserver_crash_repeated")
+    assert (
+        _count(
+            coordinator,
+            "SELECT COUNT(*) FROM results WHERE job_id='job' AND lead_id IN ('11', '12', '13')",
+        )
+        == 3
+    )
+    assert runner._state() is JobState.sample_ready
+    assert (
+        _count(
+            coordinator,
+            "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND lead_id IN ('11', '12', '13') "
+            "AND counted=1 AND error_code LIKE 'appserver_crash%'",
+        )
+        == 0
+    )
+    assert _count(coordinator, "SELECT COUNT(*) FROM attempts WHERE job_id='job' AND ended_at IS NULL") == 0
+
+
 @pytest.mark.parametrize(
     ("concurrency", "expected_kills"),
     [(1, 3), (4, 3)],

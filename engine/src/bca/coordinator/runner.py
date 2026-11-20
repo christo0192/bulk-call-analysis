@@ -370,7 +370,6 @@ class _Callbacks(PoolCallbacks):
                     self._uncounted[task.lead_id] = retries
                     if retries >= MAX_UNCOUNTED_FAILURES and error_code not in {
                         "appserver_crash",
-                        "appserver_crash_shared",
                         "appserver_restart",
                     }:
                         await self.on_pause("network", None)
@@ -381,7 +380,6 @@ class _Callbacks(PoolCallbacks):
                 self._uncounted[task.lead_id] = retries
                 if retries >= MAX_UNCOUNTED_FAILURES and error_code not in {
                     "appserver_crash",
-                    "appserver_crash_shared",
                     "appserver_restart",
                 }:
                     await self.on_pause("network", None)

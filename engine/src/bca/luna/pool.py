@@ -821,12 +821,12 @@ class LunaPool:
                 if crash_lead is None or crash_lead.outcome_delivered:
                     return
                 if server is not None and server.returncode is None:
-                    await self._fail(crash_lead, "appserver_crash", False, crash_detail or reason)
+                    await self._fail(crash_lead, "appserver_restart", False, crash_detail or reason)
                     return
                 server_generation = self._server_generation
             if crash and server_generation in self._restarted_crash_generations:
                 if crash_lead is not None and not crash_lead.outcome_delivered:
-                    await self._fail(crash_lead, "appserver_crash", False, crash_detail or reason)
+                    await self._fail(crash_lead, "appserver_restart", False, crash_detail or reason)
                 return
             if crash and server_generation is not None:
                 self._restarted_crash_generations.add(server_generation)
@@ -841,8 +841,7 @@ class LunaPool:
             self._server = None
             for active_lead in active or list(self._leads.values()):
                 if crash and active_lead is crash_lead:
-                    crash_code = "appserver_crash" if len(active) == 1 else "appserver_crash_shared"
-                    await self._fail(active_lead, crash_code, False, crash_detail or reason)
+                    await self._fail(active_lead, "appserver_crash", False, crash_detail or reason)
                 else:
                     await self._fail(active_lead, reason, False, "app-server restarted")
             if len(self._crashes) >= 4:
