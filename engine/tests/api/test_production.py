@@ -628,6 +628,118 @@ def test_pause_during_full_run_masker_wait_never_double_masks(
     assert set(calls) <= {str(lead_id) for lead_id, _status, _reason in rows}
 
 
+def _shutdown_during_full_run_masking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, pause_first: bool
+) -> None:
+    original_mask = mask_lead_stream
+    masker_entered = threading.Event()
+    release_masking = threading.Event()
+    backend_ref: list[ProductionBackend] = []
+
+    def gated_mask(raw: Path, masked: Path, context: Any) -> Any:
+        lead_id = raw.name.removesuffix(".jsonl.gz")
+        in_sample = backend_ref[0].store.rows(
+            "SELECT in_sample FROM leads WHERE job_id='job-one' AND lead_id=?", (lead_id,)
+        )
+        if in_sample and not int(in_sample[0][0]):
+            masker_entered.set()
+            release_masking.wait(30)
+        return original_mask(raw, masked, context)
+
+    monkeypatch.setattr(runner_module, "mask_lead_stream", gated_mask)
+    backend, job_dir = _tiny_job(tmp_path, monkeypatch, latency_ms=1)
+    backend_ref.append(backend)
+
+    async def scenario() -> None:
+        await backend.call("job/approvePlan", {"job": "job-one", "expectedSpecVersion": 1})
+        await _wait_state(backend, "sample_ready", limit=60, poll=0.05)
+        (job_dir / "harvested_names.json").write_text("[]\n", encoding="utf-8", newline="\n")
+        await backend.call("job/approveSample", {"job": "job-one", "expectedSpecVersion": 1})
+        await backend.call("job/startFull", {"job": "job-one"})
+        assert await asyncio.to_thread(masker_entered.wait, 5)
+        if pause_first:
+            await backend.call("job/pause", {"job": "job-one"})
+        raw_before = {
+            str(lead_id)
+            for lead_id, in_sample in backend.store.rows(
+                "SELECT lead_id, in_sample FROM leads WHERE job_id='job-one' AND in_sample=0"
+            )
+            if (job_dir / "raw" / f"{lead_id}.jsonl.gz").is_file()
+        }
+        masked_before = {
+            str(lead_id)
+            for lead_id, in_sample in backend.store.rows(
+                "SELECT lead_id, in_sample FROM leads WHERE job_id='job-one' AND in_sample=0"
+            )
+            if in_sample == 0 and (job_dir / "masked" / f"{lead_id}.jsonl.gz").is_file()
+        }
+        shutdown = asyncio.create_task(backend.call("shutdown", {}))
+        for _ in range(100):
+            if backend._stopping:
+                break
+            await asyncio.sleep(0)
+        assert backend._stopping
+        assert not shutdown.done()
+        release_masking.set()
+        assert await shutdown == {"stopping": True, "exitCode": 0}
+
+        # Data is lost only if a lead has neither its raw nor its masked transcript: a lead the
+        # masker finished normally after the release legitimately has only its masked file.
+        for lead_id in raw_before - masked_before:
+            assert (job_dir / "raw" / f"{lead_id}.jsonl.gz").is_file() or (
+                job_dir / "masked" / f"{lead_id}.jsonl.gz"
+            ).is_file()
+        shutdown_store = open_store(tmp_path / "store.sqlite3")
+        try:
+            rows = shutdown_store.rows("SELECT status FROM leads WHERE job_id='job-one'")
+            assert all(str(status) != "held_back" for (status,) in rows)
+        finally:
+            shutdown_store.close()
+
+    run(scenario())
+    monkeypatch.setattr(runner_module, "mask_lead_stream", original_mask)
+    recovered = ProductionBackend(
+        tmp_path,
+        config=backend.config,
+        store=open_store(tmp_path / "store.sqlite3"),
+        bq=FakeBqRunner(),
+    )
+
+    async def recover() -> None:
+        if pause_first:
+            await recovered.call("job/resume", {"job": "job-one"})
+        else:
+            await recovered.call("app/status", {})
+        deadline = asyncio.get_running_loop().time() + 90
+        state: object = None
+        while asyncio.get_running_loop().time() < deadline:
+            state = cast(dict[str, object], await recovered.call("job/status", {"job": "job-one"}))["state"]
+            if state in {"done", "done_with_issues"}:
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"recovered job did not finish: {state}")
+
+    try:
+        run(recover())
+        rows = recovered.store.rows("SELECT status, reason FROM leads WHERE job_id='job-one'")
+        assert all(str(reason) != "masking_failed" for _status, reason in rows)
+        assert all(str(status) != "held_back" for status, _reason in rows)
+    finally:
+        run(recovered.call("shutdown", {}))
+
+
+def test_shutdown_during_full_run_masking_keeps_raw_and_loses_no_lead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shutdown_during_full_run_masking(tmp_path, monkeypatch, pause_first=False)
+
+
+def test_pause_then_shutdown_during_full_run_masking_loses_no_lead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shutdown_during_full_run_masking(tmp_path, monkeypatch, pause_first=True)
+
+
 def test_each_transition_emits_job_state_exactly_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
