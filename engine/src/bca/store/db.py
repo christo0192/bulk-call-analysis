@@ -5,7 +5,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -42,6 +42,12 @@ class Store:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection
         self.lock = threading.RLock()
+        self.transition_listener: Callable[[str, str, str, str | None], None] | None = None
+
+    def notify_transition(self, job_id: str, before: str, after: str, reason: str | None) -> None:
+        listener = self.transition_listener
+        if listener is not None:
+            listener(job_id, before, after, reason)
 
     def close(self) -> None:
         with self.lock:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -102,3 +104,21 @@ def test_runner_exposes_real_job_state_from_store(tmp_path: Path) -> None:
         assert runner._state() is JobState.sample_ready
     finally:
         store.close()
+
+
+def test_phase_loop_waits_for_power_before_dispatch(coordinator: Any) -> None:
+    allowed = False
+    coordinator.runner.on_plan_approved(1)
+    coordinator.runner.deps = replace(coordinator.runner.deps, can_dispatch=lambda: allowed)
+
+    async def exercise() -> None:
+        nonlocal allowed
+        phase = asyncio.create_task(coordinator.runner.run_sample())
+        await asyncio.sleep(0.05)
+        assert coordinator.pool.calls == 0
+        allowed = True
+        coordinator.runner.signal_dispatch()
+        await asyncio.wait_for(phase, timeout=5)
+
+    asyncio.run(exercise())
+    assert coordinator.pool.calls > 0

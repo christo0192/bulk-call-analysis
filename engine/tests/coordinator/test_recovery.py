@@ -21,6 +21,10 @@ def _run(awaitable: Any) -> Any:
     return asyncio.run(asyncio.wait_for(awaitable, timeout=15))
 
 
+class _ProcessDeath(BaseException):
+    """Simulates the engine process dying: not caught by `except Exception`."""
+
+
 def test_fresh_runner_full_run_uses_persisted_harvest(
     coordinator: CoordinatorFixture, make_runner: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -76,11 +80,11 @@ def test_recover_after_crash_during_pull(
         nonlocal crashed
         if not crashed:
             crashed = True
-            raise RuntimeError("synthetic pull crash")
+            raise _ProcessDeath("synthetic pull crash")
         return original_pull(*args, **kwargs)
 
     monkeypatch.setattr(runner_module, "pull_transcripts", crash_once)
-    with pytest.raises(RuntimeError, match="synthetic pull crash"):
+    with pytest.raises(_ProcessDeath, match="synthetic pull crash"):
         coordinator.runner.on_plan_approved(1)
 
     recovered = make_runner()
@@ -88,10 +92,6 @@ def test_recover_after_crash_during_pull(
     asyncio.run(asyncio.wait_for(recovered.run_sample(), timeout=15))
     assert recovered._state() is JobState.sample_ready
     assert coordinator.store.rows("SELECT COUNT(*) FROM results WHERE job_id='job'")[0][0] == 4
-
-
-class _ProcessDeath(BaseException):
-    """Simulates the engine process dying: not caught by `except Exception`."""
 
 
 def test_recover_after_crash_masking_second_sample_lead(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, TypeVar
 
@@ -41,6 +42,7 @@ class Subscription[T]:
             raise ValueError("subscription limit must be positive")
         self._events: deque[T] = deque(maxlen=limit)
         self._lock = threading.Lock()
+        self._wake: Callable[[], None] | None = None
         self.dropped = 0
         self.closed = False
 
@@ -52,6 +54,13 @@ class Subscription[T]:
                 self._events.popleft()
                 self.dropped += 1
             self._events.append(item)
+            wake = self._wake
+        if wake is not None:
+            wake()
+
+    def set_wake(self, wake: Callable[[], None] | None) -> None:
+        with self._lock:
+            self._wake = wake
 
     def get_nowait(self) -> T:
         with self._lock:

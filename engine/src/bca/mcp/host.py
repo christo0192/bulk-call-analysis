@@ -1111,7 +1111,9 @@ def serve_ipc(
 
 def start_ipc_thread(host: ToolHost, address: str, authkey: bytes) -> threading.Thread:
     host._ipc_ready.clear()
-    thread = threading.Thread(target=serve_ipc, args=(host, address, authkey), name="bca-ipc-listener")
+    thread = threading.Thread(
+        target=serve_ipc, args=(host, address, authkey), name="bca-ipc-listener", daemon=True
+    )
     host._ipc_thread = thread
     thread.start()
     if not host._ipc_ready.wait(timeout=5):

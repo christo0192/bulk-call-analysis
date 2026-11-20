@@ -93,7 +93,15 @@ class AppServer:
         if kill_tree and self.process.pid is not None:
             if sys.platform == "win32":
                 killer = await asyncio.create_subprocess_exec(
-                    "taskkill", "/PID", str(self.process.pid), "/T", "/F", stderr=asyncio.subprocess.DEVNULL
+                    "taskkill",
+                    "/PID",
+                    str(self.process.pid),
+                    "/T",
+                    "/F",
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=childenv.build_child_env({"PATH": os.environ.get("PATH", "")}),
                 )
                 await killer.wait()
             else:
@@ -149,7 +157,15 @@ async def start(
         if process.returncode is None:
             if sys.platform == "win32" and process.pid is not None:
                 killer = await asyncio.create_subprocess_exec(
-                    "taskkill", "/PID", str(process.pid), "/T", "/F"
+                    "taskkill",
+                    "/PID",
+                    str(process.pid),
+                    "/T",
+                    "/F",
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=childenv.build_child_env({"PATH": os.environ.get("PATH", "")}),
                 )
                 await killer.wait()
             elif sys.platform != "win32" and process.pid is not None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,9 +26,11 @@ def auth_status(binary: Path, profile: ClaudeProfile) -> AuthStatus:
     result = subprocess.run(
         [str(binary), "auth", "status", "--json"],
         env=build_turn_env(profile),
-        capture_output=True,
         text=True,
         check=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         return AuthStatus(False, None, None)
@@ -39,6 +42,13 @@ def auth_status(binary: Path, profile: ClaudeProfile) -> AuthStatus:
 
 
 def start_login(binary: Path, profile: ClaudeProfile) -> subprocess.Popen[str]:
-    return subprocess.Popen(
-        [str(binary), "auth", "login", "--claudeai"], env=build_turn_env(profile), text=True
-    )
+    kwargs: dict[str, Any] = {
+        "env": build_turn_env(profile),
+        "text": True,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+    return subprocess.Popen([str(binary), "auth", "login", "--claudeai"], **kwargs)

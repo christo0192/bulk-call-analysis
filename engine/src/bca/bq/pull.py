@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import gzip
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bca.config import BigQueryConfig, RecipeConfig
+from bca.stop import StopRequested
 from bca.store import LeadStatus, Store
 from bca.store.spec import CapRule, UsableRule
 
@@ -65,13 +67,18 @@ def run_preflight(
     approved_bytes: int | None = None,
     persist: bool = True,
     cap: CapRule | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> Preflight:
     sql, params, _ = preflight_sql(recipe, usable_rule, scope, window)
     params["lead_ids"] = lead_ids
     dry = runner.dry_run(sql, params)
     if dry.bytes > cfg.reject_bytes and (approved_bytes is None or approved_bytes < dry.bytes):
         raise PermissionError("scan exceeds reject_bytes without operator approval")
-    rows = [row for page in runner.iter_pages(sql, params, 1000) for row in page]
+    rows = []
+    for page in runner.iter_pages(sql, params, 1000):
+        if stop_requested is not None and stop_requested():
+            raise StopRequested
+        rows.extend(page)
     by_id = {str(row["lead_id"]): row for row in rows}
     if set(by_id) != set(lead_ids):
         raise RuntimeError("preflight did not return exactly one result per requested lead")
@@ -127,6 +134,7 @@ def pull_transcripts(
     window: tuple[str, str] | None = None,
     approved_bytes: int | None = None,
     page_size: int = 1000,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> PullStats:
     sql, params, _ = pull_sql(recipe, scope, window)
     params["lead_ids"] = lead_ids
@@ -141,7 +149,11 @@ def pull_transcripts(
     requested = set(lead_ids)
     try:
         for page in runner.iter_pages(sql, params, page_size):
+            if stop_requested is not None and stop_requested():
+                raise StopRequested
             for call in page:
+                if stop_requested is not None and stop_requested():
+                    raise StopRequested
                 lead_id = str(call["lead_id"])
                 if lead_id not in requested:
                     raise RuntimeError(f"pull returned unrequested lead {lead_id!r}")
