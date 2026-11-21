@@ -206,9 +206,10 @@ def test_heartbeat_stops_on_pause_and_on_driver_stop(tmp_path: Path, monkeypatch
     async def scenario() -> None:
         await backend.call("job/approvePlan", {"job": "job-one", "expectedSpecVersion": 1})
         await _wait_state(backend, "sample_running", 30, 0.02)
-        subscription.drain()
         await backend.call("job/pause", {"job": "job-one"})
         assert runner._heartbeat_task is None
+        # The pause itself may publish final counts or activity; only events AFTER the stop count.
+        subscription.drain()
         clock.advance(30)
         await asyncio.sleep(0)
         assert not [event for event in subscription.drain() if event.kind in {"counts", "activity", "eta"}]
