@@ -3,6 +3,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { cleanTool } from './Chat';
 import { Chat } from './Chat';
 import { mockBridge } from '../../engine/bridge';
+import { EngineError } from '../../engine/client';
 
 const entry = (id: number, role: 'user' | 'assistant' | 'status', text: string, turn = 't1') => ({
   id,
@@ -158,8 +159,9 @@ it("switching projects shows only that project's chat", async () => {
   expect(await screen.findByText('project two')).toBeInTheDocument();
 });
 
-it('a failed send restores the text and does not show the message as sent', async () => {
+it('a failed turn leaves no stale bubble and restores the text once', async () => {
   mockBridge.setResponse('chat/send', async () => {
+    event('assistant_delta', { delta: { text: 'partial' } }, 'engine-turn');
     throw new Error('offline');
   });
   chat();
@@ -167,6 +169,46 @@ it('a failed send restores the text and does not show the message as sent', asyn
   fireEvent.click(screen.getByRole('button', { name: 'Send' }));
   await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('retry me'));
   expect(screen.queryByText('retry me', { selector: '.chat-user' })).toBeNull();
+  expect(screen.queryByText('partial')).toBeNull();
+});
+
+it('remounting mid-turn does not duplicate items after the turn is persisted', async () => {
+  let persisted = false;
+  mockBridge.setResponse('chat/history', async () =>
+    persisted
+      ? {
+          entries: [
+            entry(1, 'user', 'question', 'turn-1'),
+            entry(2, 'assistant', 'answer', 'turn-1'),
+          ],
+          more: false,
+        }
+      : { entries: [], more: false },
+  );
+  const view = chat();
+  event('assistant_delta', { delta: { text: 'partial' } }, 'turn-1');
+  view.unmount();
+  chat();
+  event('assistant_delta', { delta: { text: 'answer' } }, 'turn-1');
+  persisted = true;
+  mockBridge.emit({
+    jsonrpc: '2.0',
+    method: 'chat/event',
+    params: { project: 'p1', event: { status: 'completed' } },
+  });
+  await waitFor(() => expect(screen.getAllByText('answer')).toHaveLength(1));
+});
+
+it("the shell's RPC timed out keeps the turn running without a failure banner", async () => {
+  mockBridge.setResponse('chat/send', async () => {
+    event('assistant_delta', { delta: { text: 'still working' } }, 'engine-turn');
+    throw new EngineError(null, 'RPC timed out');
+  });
+  chat();
+  fireEvent.input(screen.getByRole('textbox'), { target: { value: 'wait' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument());
+  expect(screen.queryByRole('alert')).toBeNull();
 });
 
 it('a long history opens scrolled to the latest message', async () => {

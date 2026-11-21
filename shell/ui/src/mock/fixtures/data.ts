@@ -29,7 +29,7 @@ export const jobs: JobSummary[] = projects.map((p, i) => ({
 export const allowances: Allowances = {
   codex: {
     windows: [
-      { name: '5-hour', usedPercent: 4, resetsAt: Math.floor((Date.now() + 3600000) / 1000) },
+      { name: '5h', usedPercent: 4, resetsAt: Math.floor((Date.now() + 3600000) / 1000) },
       { name: 'weekly', usedPercent: 12, resetsAt: Math.floor((Date.now() + 86400000 * 3) / 1000) },
     ],
     stopAtPercent: 95,
@@ -67,12 +67,16 @@ export const plan: PlanCard = {
     { kind: 'quote', summary: 'Include a short masked quote for every answer' },
   ],
   sampleSize: 20,
+  estimate: null,
+  approved: false,
+};
+export const planWithEstimate: PlanCard = {
+  ...plan,
   estimate: {
     sampleSeconds: { low: 180, high: 300 },
     fullSeconds: { low: 25200, high: 32400 },
     codexPercent: { low: 35, high: 42 },
   },
-  approved: false,
 };
 export const sample: SampleCard = {
   job: 'synthetic-job-1',

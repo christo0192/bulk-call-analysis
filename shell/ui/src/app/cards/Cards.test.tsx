@@ -6,6 +6,7 @@ import { formatCount } from '../format';
 import { mockBridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import { plan, sample } from '../../mock/fixtures/data';
+import { adaptPlan } from '../../engine/adapters';
 
 beforeEach(() => {
   mockBridge.calls = [];
@@ -46,6 +47,47 @@ it('formats kilobytes with one decimal', () => expect(bytes(2048)).toBe('2.0 KB'
 it('formats megabytes with one decimal', () => expect(bytes(2 * 1024 ** 2)).toBe('2.0 MB'));
 it('formats gigabytes with one decimal', () => expect(bytes(3 * 1024 ** 3)).toBe('3.0 GB'));
 it('formats zero as zero', () => expect(formatCount(0, 'en-US')).toBe('0'));
+
+it('plan card renders with a null estimate', async () => {
+  render(<PlanCard job="job-one" />);
+  await screen.findByText(plan.question);
+  expect(screen.queryByText(/Sample of/)).toBeNull();
+});
+
+it('start card renders with a null estimate and no approvedAt', async () => {
+  mockBridge.setResponse('job/snapshot', async () => ({
+    job: 'job-one',
+    project: 'p1',
+    state: 'sample_approved',
+  }));
+  render(<StartCard job="job-one" project="p1" />);
+  expect(await screen.findByText("We'll know after a few minutes of reading")).toBeInTheDocument();
+  expect(screen.getByText(/sample approved/)).toHaveTextContent('unknown');
+});
+
+it('plan counts accept snake_case and camelCase', () => {
+  const base = { ...plan, estimate: null };
+  expect(
+    adaptPlan({
+      ...base,
+      counts: {
+        selected: 10,
+        usable: 11,
+        capped: 12,
+        no_transcript: 2,
+        transcription_failed: 3,
+        too_short: 4,
+        not_found: 5,
+      },
+    }).counts,
+  ).toMatchObject({ noTranscript: 2, transcriptionFailed: 3, tooShort: 4, notFound: 5 });
+  expect(
+    adaptPlan({
+      ...base,
+      counts: { ...base.counts, noTranscript: 6, transcriptionFailed: 7, tooShort: 8, notFound: 9 },
+    }).counts,
+  ).toMatchObject({ noTranscript: 6, transcriptionFailed: 7, tooShort: 8, notFound: 9 });
+});
 it('formats thousands with separators', () => expect(formatCount(11058, 'en-US')).toBe('11,058'));
 it('formats millions with en-US separators', () =>
   expect(formatCount(1000000, 'en-US')).toBe('1,000,000'));

@@ -56,16 +56,20 @@ export function Rail({ project, state }: { project: string; state?: string }) {
   const [filesByProject, setFilesByProject] = useState<Record<string, FileInfo[]>>({});
   useEffect(() => {
     let active = true;
-    void bridge.call('files/list', { project }).then((value) => {
-      if (active) setFilesByProject((current) => ({ ...current, [project]: value }));
-    });
+    void bridge
+      .call('files/list', { project })
+      .then((value) => {
+        if (active) setFilesByProject((current) => ({ ...current, [project]: value }));
+      })
+      .catch(() => undefined);
     const unsubscribe = bridge.onNotification((notification) => {
       if (notification.method !== 'job/state') return;
       const params = notification.params as { project?: string };
       if (params.project === project)
         void bridge
           .call('files/list', { project })
-          .then((value) => setFilesByProject((current) => ({ ...current, [project]: value })));
+          .then((value) => setFilesByProject((current) => ({ ...current, [project]: value })))
+          .catch(() => undefined);
     });
     return () => {
       active = false;

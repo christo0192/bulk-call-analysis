@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import type { AllowanceStatus, PlanCard as Plan, SampleCard as Sample } from '../../engine/types';
 import { formatCount } from '../format';
 import { resetsAtMs, weeklyWindow } from '../allowance';
+import { adaptPlan } from '../../engine/adapters';
 
 const bytes = (value: number) =>
   value < 1024 ** 2
@@ -36,12 +37,13 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
   const [notice, setNotice] = useState('');
   const [locked, setLocked] = useState(false);
   const [loadedJob, setLoadedJob] = useState<string | null>(null);
+  const reloadNotice = useRef(false);
   const load = (requestedJob: string, active = () => true) =>
     bridge
       .call('job/plan', { job: requestedJob })
       .then((value) => {
         if (active() && requestedJob === job) {
-          setPlan(value);
+          setPlan(adaptPlan(value));
           setLoadedJob(requestedJob);
         }
       })
@@ -60,6 +62,12 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
       active = false;
     };
   }, [job]);
+  useEffect(() => {
+    if (reloadNotice.current && loadedJob === job) {
+      reloadNotice.current = false;
+      setNotice('');
+    }
+  }, [job, loadedJob, plan]);
   if (!plan || loadedJob !== job)
     return <div class="approval-card">{error ? <ErrorLine error={error} /> : 'Loading plan…'}</div>;
   if (plan.approved)
@@ -76,6 +84,7 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
   const approve = async () => {
     setPending(true);
     setError(null);
+    setNotice('');
     try {
       await bridge.call('job/approvePlan', { job, expectedSpecVersion: plan.specVersion });
       setLocked(true);
@@ -87,6 +96,7 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
         /stale|plan changed/i.test(EngineError.from(e).message)
       ) {
         setNotice('The plan changed. Check the new version.');
+        reloadNotice.current = true;
         setError(null);
         void load(job);
       }
@@ -151,7 +161,7 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
           ))}
         </dd>
       </dl>
-      {estimate.sampleSeconds && (
+      {estimate?.sampleSeconds && (
         <p class="estimate">
           Sample of {formatCount(plan.sampleSize)} leads: about{' '}
           {duration(estimate.sampleSeconds.low)} · Full run:{' '}
@@ -323,16 +333,20 @@ export function StartCard({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [cancelled, setCancelled] = useState(false);
+  const [started, setStarted] = useState(false);
   const [approvedAt, setApprovedAt] = useState<number | undefined>();
   useEffect(() => {
     let active = true;
     setPlan(null);
+    setError(null);
     setApprovedAt(undefined);
+    setStarted(false);
     void Promise.all([bridge.call('job/plan', { job }), bridge.call('job/snapshot', { job })])
       .then(([nextPlan, snapshot]) => {
         if (!active) return;
-        setPlan(nextPlan);
-        setApprovedAt(snapshot.approvedAt);
+        setPlan(adaptPlan(nextPlan));
+        const approvedStep = snapshot.steps?.find((step) => step.id === 'sample_approved');
+        setApprovedAt(snapshot.approvedAt ?? approvedStep?.ts);
       })
       .catch((value) => {
         if (active) setError(value);
@@ -345,6 +359,7 @@ export function StartCard({
     setPending(true);
     try {
       await bridge.call('job/startFull', { job });
+      setStarted(true);
     } catch (e) {
       setError(e);
     } finally {
@@ -360,7 +375,8 @@ export function StartCard({
   const window = weeklyWindow(allowance);
   const percent = window?.usedPercent;
   const safetyStop = allowance?.codex?.stopAtPercent ?? stopAtPercent;
-  const estimate = plan?.estimate.fullSeconds;
+  const estimate = plan?.estimate?.fullSeconds;
+  const codexPercent = plan?.estimate?.codexPercent;
   return (
     <article class="approval-card start-card">
       <header>
@@ -379,7 +395,7 @@ export function StartCard({
       </header>
       <dl>
         <dt>Leads to read</dt>
-        <dd>{formatCount(plan?.counts.usable ?? 0)}</dd>
+        <dd>{plan ? formatCount(plan.counts.usable) : 'loading'}</dd>
         <dt>Time</dt>
         <dd>
           {estimate
@@ -390,7 +406,7 @@ export function StartCard({
         <dd>
           {percent === undefined
             ? 'Allowance projection is not available'
-            : `${percent}% used now${plan?.estimate.codexPercent ? ` → about ${percent + plan.estimate.codexPercent.low}–${percent + plan.estimate.codexPercent.high}% after this job` : ''}${resetsAtMs(window) ? ` · resets ${new Date(resetsAtMs(window)!).toLocaleString()}` : ''}`}
+            : `${percent}% used now${codexPercent ? ` → about ${percent + codexPercent.low}–${percent + codexPercent.high}% after this job` : ''}${resetsAtMs(window) ? ` · resets ${new Date(resetsAtMs(window)!).toLocaleString()}` : ''}`}
         </dd>
         <dt>Safety stop</dt>
         <dd>
@@ -402,7 +418,11 @@ export function StartCard({
       </dl>
       {error && <ErrorLine error={error} />}
       <footer>
-        <button class="primary" disabled={pending} onClick={() => void start()}>
+        <button
+          class="primary"
+          disabled={pending || !plan || Boolean(error) || started}
+          onClick={() => void start()}
+        >
           Start full run
         </button>
         <button disabled={pending} onClick={() => setCancelled(true)}>

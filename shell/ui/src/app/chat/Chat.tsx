@@ -75,6 +75,9 @@ export function Chat({
   const persisted = useRef<ChatEntry[]>([]);
   const nextId = useRef(-1);
   const activeTurn = useRef<string | null>(null);
+  const turnAliases = useRef(new Map<string, string>());
+  const restoredTurns = useRef(new Set<string>());
+  const [attachPending, setAttachPending] = useState(false);
   const wasAtBottom = useRef(true);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const allLive = () => [...live.current.values()].flat();
@@ -99,6 +102,10 @@ export function Chat({
       persisted.current = [...new Map(combined.map((entry) => [entry.id, entry])).values()].sort(
         (a, b) => a.id - b.id,
       );
+      const persistedTurns = new Set(persisted.current.map((entry) => entry.turn));
+      for (const turn of live.current.keys()) {
+        if (persistedTurns.has(turn)) live.current.delete(turn);
+      }
       setMore(result.more);
       publish();
       setLoading(false);
@@ -129,8 +136,23 @@ export function Chat({
       const event = params.event;
       const kind = typeof event.kind === 'string' ? event.kind : '';
       const receivedTurn = typeof event.turn === 'string' ? event.turn : activeTurn.current;
+      if (!kind && 'status' in event) {
+        const endTurn = receivedTurn ?? [...live.current.keys()][0];
+        void loadHistory()
+          .then((available) => {
+            if (available && endTurn && persisted.current.some((entry) => entry.turn === endTurn)) {
+              live.current.delete(endTurn);
+            }
+            publish();
+          })
+          .catch((reason) => setError(errorText(reason)));
+        activeTurn.current = null;
+        setRunning(false);
+        return;
+      }
       if (!receivedTurn) return;
-      if (receivedTurn !== activeTurn.current && live.current.has(activeTurn.current ?? '')) {
+      if (activeTurn.current?.startsWith('local-') && activeTurn.current !== receivedTurn) {
+        turnAliases.current.set(activeTurn.current, receivedTurn);
         const pending = live.current.get(activeTurn.current ?? '') ?? [];
         live.current.delete(activeTurn.current ?? '');
         live.current.set(
@@ -139,7 +161,8 @@ export function Chat({
         );
         activeTurn.current = receivedTurn;
       }
-      const turn = activeTurn.current ?? receivedTurn;
+      activeTurn.current = receivedTurn;
+      const turn = receivedTurn;
       const list = live.current.get(turn) ?? [];
       const id = nextId.current--;
       const data = (event.data ?? {}) as Record<string, unknown>;
@@ -217,16 +240,6 @@ export function Chat({
         live.current.set(turn, list);
         publish();
       }
-      if (!kind && 'status' in event) {
-        void loadHistory()
-          .then((available) => {
-            if (available) live.current.delete(turn);
-            publish();
-          })
-          .catch((reason) => setError(errorText(reason)));
-        activeTurn.current = null;
-        setRunning(false);
-      }
     });
     return () => {
       active = false;
@@ -243,6 +256,7 @@ export function Chat({
     const value = text.trim();
     if (!value || running) return;
     const turn = `local-${Date.now()}-${Math.random()}`;
+    restoredTurns.current.delete(turn);
     activeTurn.current = turn;
     live.current.set(turn, [
       { id: nextId.current--, ts: Date.now(), turn, role: 'user', text: value },
@@ -256,14 +270,21 @@ export function Chat({
       setRunning(false);
     } catch (reason) {
       const parsed = errorText(reason);
-      const timeout = parsed.message.toLowerCase().includes('timeout');
+      const timeout = /timed out|timeout/i.test(parsed.message);
       if (!timeout) {
+        const engineTurn = turnAliases.current.get(turn);
         live.current.delete(turn);
+        if (engineTurn) live.current.delete(engineTurn);
         publish();
-        setText((current) => current || value);
+        if (!restoredTurns.current.has(turn)) {
+          restoredTurns.current.add(turn);
+          setText((current) => current || value);
+        }
         setRunning(false);
+        setError(parsed);
+      } else {
+        setError(null);
       }
-      setError(parsed);
     }
   };
   const stop = async () => {
@@ -275,6 +296,8 @@ export function Chat({
     }
   };
   const attach = async () => {
+    if (attachPending) return;
+    setAttachPending(true);
     try {
       const result = await bridge.call('ids/attach', { project, text: ids });
       const number = formatCount(result.distinct);
@@ -294,8 +317,12 @@ export function Chat({
           ? 'That list is too large.'
           : parsed.reason === 'no_ids'
             ? 'No valid ids were found.'
-            : 'Could not attach those ids.',
+            : parsed.code === -32601
+              ? "Attaching lead lists isn't available yet"
+              : 'Could not attach those ids.',
       );
+    } finally {
+      setAttachPending(false);
     }
   };
   const persistedIds = persisted.current.filter((entry) => entry.id > 0).map((entry) => entry.id);
@@ -399,7 +426,11 @@ export function Chat({
               </button>
             </>
           ) : hasReason(error, 'claude_limit_reached') ? (
-            `Claude's allowance is used up until ${new Date(Number(((error.data as { resetsAt?: number } | null)?.resetsAt ?? 0) * (((error.data as { resetsAt?: number } | null)?.resetsAt ?? 0) < 1e12 ? 1000 : 1))).toLocaleString()}.`
+            (error.data as { resetsAt?: number } | null)?.resetsAt == null ? (
+              "Claude's allowance is used up for now. Try again later."
+            ) : (
+              `Claude's allowance is used up until ${new Date(Number((error.data as { resetsAt: number }).resetsAt) * ((error.data as { resetsAt: number }).resetsAt < 1e12 ? 1000 : 1)).toLocaleString()}.`
+            )
           ) : (
             "Claude couldn't finish that reply. Try again."
           )}
@@ -413,7 +444,9 @@ export function Chat({
             value={ids}
             onInput={(event) => setIds((event.currentTarget as HTMLTextAreaElement).value)}
           />
-          <button onClick={() => void attach()}>Attach</button>
+          <button disabled={attachPending} onClick={() => void attach()}>
+            Attach
+          </button>
         </div>
       )}
       {attachMessage && <p class="attach-message">{attachMessage}</p>}

@@ -52,7 +52,11 @@ export type ChatEntry = {
   status?: 'started' | 'done' | 'failed';
   summary?: string;
 };
-export type JobSnapshot = JobStatus & { selected?: number; eta?: string };
+export type JobSnapshot = JobStatus & {
+  selected?: number;
+  eta?: string;
+  steps?: { id?: string; ts?: number }[];
+};
 export type PlanCard = {
   job: string;
   project: string;
@@ -80,7 +84,7 @@ export type PlanCard = {
     sampleSeconds: { low: number; high: number } | null;
     fullSeconds: { low: number; high: number } | null;
     codexPercent: { low: number; high: number } | null;
-  };
+  } | null;
   approved: boolean;
   approvedAt?: number;
   // Compatibility aliases for older consumers.

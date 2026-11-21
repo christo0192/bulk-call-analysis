@@ -22,7 +22,10 @@ function longest(items: AllowanceWindow[]): AllowanceWindow | undefined {
 
 function findWindow(value: unknown, name: string): AllowanceWindow | undefined {
   const items = windows(value);
-  return items.find((item) => item.name.toLowerCase() === name) ?? longest(items);
+  return (
+    items.find((item) => item.name.toLowerCase() === name) ??
+    (items.length > 1 ? longest(items) : undefined)
+  );
 }
 
 type CodexAllowance = AllowanceStatus['codex'];
@@ -39,7 +42,7 @@ export function fiveHourWindow(
   allowance: AllowanceStatus | ClaudeAllowance | null | undefined,
 ): AllowanceWindow | undefined {
   const value = allowance && 'claude' in allowance ? allowance.claude : allowance;
-  return findWindow(value?.windows, '5-hour');
+  return findWindow(value?.windows, '5h') ?? findWindow(value?.windows, '5-hour');
 }
 
 export function weeklyPercent(

@@ -12,6 +12,7 @@ import {
   appStatus,
   newComputerChecklist,
   plan,
+  planWithEstimate,
   sample,
 } from '../mock/fixtures/data';
 const firstRun = typeof window !== 'undefined' && window.location.search.includes('mock=firstrun');
@@ -240,8 +241,13 @@ export class MockBridge implements EngineBridge {
       return (
         jobs.find((j) => j.job === (params as { job: string }).job) ?? (jobs[0] as ResultOf<M>)
       );
-    if (method === 'job/plan')
-      return { ...plan, job: (params as { job: string }).job } as ResultOf<M>;
+    if (method === 'job/plan') {
+      const requestedJob = (params as { job: string }).job;
+      return {
+        ...(requestedJob === 'synthetic-job-2' ? planWithEstimate : plan),
+        job: requestedJob,
+      } as ResultOf<M>;
+    }
     if (method === 'job/sample')
       return { ...sample, job: (params as { job: string }).job } as ResultOf<M>;
     if (method === 'job/approvePlan') {
