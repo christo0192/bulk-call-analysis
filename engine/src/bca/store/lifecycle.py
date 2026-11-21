@@ -30,6 +30,23 @@ class JobState(StrEnum):
     cancelled = "cancelled"
 
 
+def public_state(internal: str | JobState) -> str:
+    value = internal.value if isinstance(internal, JobState) else internal
+    if value in {"draft", "plan_proposed"}:
+        return "planned"
+    if value in {
+        "pulling",
+        "masking_sample",
+        "sample_running",
+        "full_running",
+        "quote_check",
+        "building_output",
+        "verifying",
+    }:
+        return "running"
+    return value
+
+
 class PauseReason(StrEnum):
     quota = "quota"
     user = "user"

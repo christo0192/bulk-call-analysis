@@ -100,7 +100,8 @@ The engine uses these JSON-RPC errors:
   applicable. Known reasons include `job_not_found`, `job_not_running`,
   `job_not_paused`, `job_stalled`, `sample_not_approved`,
   `stale_spec_version`, `invalid_job_state`, `background_task_failed`,
-  `app_server_unavailable`, `claude_turn_failed`, `filesystem_unavailable`,
+  `app_server_unavailable`, `claude_turn_failed`, `claude_extra_usage_on`,
+  `claude_limit_reached`, `filesystem_unavailable`,
   and `stopping`.
 
 Job errors may also include a safe `stallReason`; project and duplicate-turn
@@ -110,12 +111,18 @@ errors identify the affected job or project. Malformed JSON uses `-32700`.
 
 Notifications have JSON-RPC method names and a `params` object:
 
-* `job/state`: `{job, state}`. Public states include `planned`, `plan_approved`,
-  `running`, `sample_ready`, `paused`, `stalled`, `done`, and
-  `done_with_issues`. Internal phases such as pulling, masking, sample work,
-  full work, quote checks, output building, and verification map to `running`.
-  Exactly one notification is emitted for each stored transition.
-* `job/progress`: `{job, done, total, remaining}`.
+* `job/state`: `{job, project, state, step}`. `state` is the public vocabulary;
+  `step` is the raw internal state. Exactly one notification is emitted for
+  each stored transition.
+* `job/progress`: `{job, project, phase, done, inFlight, retrying, failed,
+  heldBack, remaining, total}`. All count fields are integers. `remaining`
+  means not started, and `done + inFlight + retrying + failed + heldBack +
+  remaining == total`.
+* `engine/event` kinds `counts` and `eta` are also emitted at least every ten
+  seconds while a sample or full phase runs, and after lead completion.
+  `eta` is `{low, high, seeded, known}` in seconds, with null bounds while
+  unknown. The timer also emits `activity` as
+  `{last_activity_ts, in_flight, workers}`.
 * `chat/event`: `{project, event}` for safe, masked Claude events.
 * `engine/event`: the engine event, including `kind` and, for job events, `job`.
   Pause reasons are `quota`, `user`, `sleep`, `credit`, `auth`,
@@ -123,6 +130,15 @@ Notifications have JSON-RPC method names and a `params` object:
 
 Notifications contain application data only. Credentials, tokens, API keys,
 and credential-file contents are never returned.
+
+### Public job states
+
+| Internal step | Public state |
+| --- | --- |
+| `draft`, `plan_proposed` | `planned` |
+| `plan_approved` | `plan_approved` |
+| `pulling`, `masking_sample`, `sample_running`, `full_running`, `quote_check`, `building_output`, `verifying` | `running` |
+| `sample_ready`, `sample_approved`, `paused`, `stalled`, `done`, `done_with_issues`, `failed`, `cancelled` | unchanged |
 
 ## Lifecycle and shutdown
 

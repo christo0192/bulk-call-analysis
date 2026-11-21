@@ -51,6 +51,7 @@ from bca.store import (
     start_full_run,
     transition,
 )
+from bca.store.lifecycle import public_state
 
 from .server import ApiBackend, RpcError
 
@@ -63,6 +64,9 @@ class _RealClock:
 
     def monotonic(self) -> float:
         return time.monotonic()
+
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
 
 
 def _slug(value: object, field: str) -> str:
@@ -78,6 +82,11 @@ class AppServerUnavailableError(ConnectionError):
 class ClaudeTurnError(RuntimeError):
     """A Claude turn failed after the API accepted the request."""
 
+    def __init__(self, message: str, reason: str = "claude_turn_failed", resets_at: object = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.resets_at = resets_at
+
 
 def _safe_error(exc: Exception) -> RpcError:
     if isinstance(exc, RpcError):
@@ -91,7 +100,10 @@ def _safe_error(exc: Exception) -> RpcError:
     if isinstance(exc, AppServerUnavailableError):
         return RpcError(-32001, "Codex app-server did not start", {"reason": "app_server_unavailable"})
     if isinstance(exc, ClaudeTurnError):
-        return RpcError(-32001, "Claude turn failed", {"reason": "claude_turn_failed"})
+        data: dict[str, object] = {"reason": exc.reason, "message": str(exc)}
+        if exc.resets_at is not None:
+            data["resetsAt"] = exc.resets_at
+        return RpcError(-32001, "Claude turn failed", data)
     if isinstance(exc, OSError):
         return RpcError(-32001, "Operation failed", {"reason": "filesystem_unavailable"})
     return RpcError(-32603, "Internal error")
@@ -649,7 +661,15 @@ class ProductionBackend(ApiBackend):
                 return await self._chat_turn(project, text_value, claude_launch.SessionRef(uuid4()), True)
             if isinstance(exc, ClaudeTurnError):
                 raise
-            raise ClaudeTurnError(str(exc)) from exc
+            message = str(exc)
+            reason = getattr(exc, "reason", None)
+            if reason == "extra_usage_on":
+                raise ClaudeTurnError("Claude extra usage is enabled", "claude_extra_usage_on") from exc
+            if reason == "rate_limit_rejected":
+                raise ClaudeTurnError(
+                    "Claude allowance is exhausted", "claude_limit_reached", getattr(exc, "resets_at", None)
+                ) from exc
+            raise ClaudeTurnError(message) from exc
         except RpcError:
             raise
         except Exception as exc:
@@ -673,6 +693,15 @@ class ProductionBackend(ApiBackend):
         self._chat_tasks[project] = task
         try:
             return await task
+        except ClaudeTurnError as exc:
+            data: dict[str, object] = {
+                "project": project,
+                "reason": exc.reason,
+                "message": str(exc),
+            }
+            if exc.resets_at is not None:
+                data["resetsAt"] = exc.resets_at
+            raise RpcError(-32001, "Claude turn failed", data) from exc
         except asyncio.CancelledError:
             if task in self._chat_stop_requests:
                 return {"status": "stopped", "project": project}
@@ -745,7 +774,8 @@ class ProductionBackend(ApiBackend):
         return {
             "job": job_id,
             "project": str(row[0][0]),
-            "state": str(row[0][1]),
+            "state": public_state(str(row[0][1])),
+            "step": str(row[0][1]),
             "specVersion": int(row[0][2]),
             "pauseReason": row[0][3],
             "resumeAt": row[0][4],
@@ -765,12 +795,19 @@ class ProductionBackend(ApiBackend):
         return JobState(str(row[0][0]))
 
     def _publish_transition(self, job_id: str, before: str, after: str, reason: str | None) -> None:
+        row = self.store.rows("SELECT project_id FROM jobs WHERE id=?", (job_id,))
         self.event_bus.publish(
             Event(
                 "state",
                 job_id,
                 self.clock.now(),
-                {"from": before, "to": after, "reason": reason, "source": "store"},
+                {
+                    "from": before,
+                    "to": after,
+                    "reason": reason,
+                    "source": "store",
+                    "project": str(row[0][0]) if row else "",
+                },
             )
         )
 

@@ -477,7 +477,21 @@ async def _wait_state(backend: ProductionBackend, state: str, limit: float, poll
     deadline = asyncio.get_running_loop().time() + limit
     current: object = None
     while asyncio.get_running_loop().time() < deadline:
-        current = cast(dict[str, object], await backend.call("job/status", {"job": "job-one"})).get("state")
+        status = cast(dict[str, object], await backend.call("job/status", {"job": "job-one"}))
+        current = (
+            status.get("step")
+            if state
+            in {
+                "pulling",
+                "masking_sample",
+                "sample_running",
+                "full_running",
+                "quote_check",
+                "building_output",
+                "verifying",
+            }
+            else status.get("state")
+        )
         if current == state:
             return
         await asyncio.sleep(poll)
@@ -783,8 +797,10 @@ def test_each_transition_emits_job_state_exactly_once(
         "verifying",
     }
     expected = ["running" if state in running else state for state in store_states]
-    states = [cast(dict[str, object], item["params"])["state"] for item in notifications]
+    params = [cast(dict[str, object], item["params"]) for item in notifications]
+    states = [item["state"] for item in params]
     assert states == expected
+    assert [item["step"] for item in params] == store_states
 
 
 def test_stdio_pull_failure_stalls_job_and_engine_stays_usable(tmp_path: Path) -> None:
@@ -1119,10 +1135,13 @@ def test_every_state_change_emits_job_state(tmp_path: Path, monkeypatch: pytest.
             await service.publish_event(event)
 
     run(scenario())
-    states = [cast(dict[str, object], item["params"])["state"] for item in notifications]
+    params = [cast(dict[str, object], item["params"]) for item in notifications]
+    states = [item["state"] for item in params]
+    steps = [item["step"] for item in params]
     assert "paused" in states
     assert "stalled" in states
     assert any(state in {"running", "sample_ready"} for state in states)
+    assert "pulling" in steps
 
 
 def test_chat_send_during_shutdown_is_refused_and_no_claude_survives(
@@ -1192,7 +1211,7 @@ def test_pause_mid_pull_never_stalls_and_resume_reaches_sample_ready(
             state: object = None
             while time.monotonic() < deadline:
                 _send_stdio(process, request_id, "job/status", {"job": "job-one"})
-                state = cast(dict[str, object], _read_stdio(process, request_id)["result"])["state"]
+                state = cast(dict[str, object], _read_stdio(process, request_id)["result"])["step"]
                 if state == "pulling":
                     break
                 request_id += 1

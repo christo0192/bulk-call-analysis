@@ -341,28 +341,19 @@ def test_lead_transcript_is_masked_and_capped(tmp_path: Path) -> None:
         ),
         job_dir,
     )
-    path = job_dir / "cache" / "transcripts"
-    path.mkdir(parents=True)
-    with gzip.open(path / "lead.jsonl.gz", "wt", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                {
-                    "call_id": "c1",
-                    "call_start": "2026-01-01",
-                    "transcript_text": "Call 9876543210\n" + ("x" * 50_000),
-                }
-            )
-            + "\n"
-        )
     masked_path = job_dir / "masked"
     masked_path.mkdir(parents=True)
     with gzip.open(masked_path / "lead.jsonl.gz", "wt", encoding="utf-8") as handle:
-        handle.write(json.dumps({"transcript_text": "[REDACTED]"}) + "\n")
+        handle.write(json.dumps({"transcript_text": "Call [PHONE]\n" + ("x" * 50_000)}) + "\n")
     result = host.call("lead_transcript", {"job_id": "job", "ref": "S1"})
     assert isinstance(result, str)
     assert "raw-only-secret" not in result
     assert "[PHONE]" in result
     assert "[..." in result
+    assert "9876543210" not in result
+    host.store.add_lead("job", "missing", LeadStatus.masked, in_sample=1)
+    with pytest.raises(ToolHostError, match="masked transcript not found"):
+        host.call("lead_transcript", {"job_id": "job", "ref": "S2"})
 
 
 def test_write_file_allows_plan_and_summary_only(tmp_path: Path) -> None:

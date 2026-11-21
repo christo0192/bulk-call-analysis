@@ -437,6 +437,7 @@ class _Callbacks(PoolCallbacks):
         self.runner._liveness.lead_ended(task.lead_id, self.runner._ts())
 
     async def on_activity(self, ts: float) -> None:
+        self.runner._last_activity_ts = ts
         for event in self.runner._liveness.check(ts):
             self.runner._publish(event.kind, event.data)
         self.runner._liveness.on_activity(ts)
@@ -575,6 +576,8 @@ class JobRunner:
         self._wake_network_unavailable = False
         self._stop_requested = threading.Event()
         self._worker_tasks: set[asyncio.Task[Any]] = set()
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._last_activity_ts: float | None = None
 
     def request_stop(self) -> None:
         self._stop_requested.set()
@@ -673,20 +676,59 @@ class JobRunner:
         )
 
     def _publish_progress(self) -> None:
-        progress = counts(self.deps.store, self.job_id)
+        sample = self._state() is JobState.sample_running
+        progress = counts(self.deps.store, self.job_id, sample=sample)
+        project_rows = self.deps.store.rows("SELECT project_id FROM jobs WHERE id=?", (self.job_id,))
         remaining = progress.remaining
         eta = self._eta.estimate(self._ts(), remaining, self.deps.concurrency)
         self._publish(
             "counts",
             {
                 "done": progress.done,
+                "project": str(project_rows[0][0]) if project_rows else "",
                 "in_flight": progress.in_flight,
                 "remaining": remaining,
+                "retrying": progress.retrying,
                 "failed": sum(progress.failed.values()),
                 "held_back": progress.held_back,
+                "total": progress.total,
+                "phase": "sample" if sample else "full",
             },
         )
-        self._publish("eta", {"low": eta.low, "high": eta.high, "seeded": eta.seeded})
+        self._publish("eta", eta.public())
+
+    async def _heartbeat(self) -> None:
+        while True:
+            clock_sleep = getattr(self.deps.clock, "sleep", None)
+            if callable(clock_sleep):
+                await clock_sleep(10)
+            else:
+                await asyncio.sleep(10)
+            if not self._phase_running:
+                return
+            self._publish_progress()
+            pool = self._phase_pool
+            workers = (
+                self.deps.concurrency if pool is None else getattr(pool, "concurrency", self.deps.concurrency)
+            )
+            self._publish(
+                "activity",
+                {
+                    "last_activity_ts": self._last_activity_ts,
+                    "in_flight": counts(
+                        self.deps.store, self.job_id, self._state() is JobState.sample_running
+                    ).in_flight,
+                    "workers": workers,
+                },
+            )
+
+    async def _stop_heartbeat(self) -> None:
+        task = self._heartbeat_task
+        self._heartbeat_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     def _state(self) -> JobState:
         rows = self.deps.store.rows("SELECT state FROM jobs WHERE id=?", (self.job_id,))
@@ -994,6 +1036,7 @@ class JobRunner:
         await self._finish_pause(reason, resume_at)
 
     async def _finish_pause(self, reason: str, resume_at: int | None) -> None:
+        await self._stop_heartbeat()
         if self._pause_finished:
             return
         self._pause_finished = True
@@ -1189,6 +1232,8 @@ class JobRunner:
         """Run one store-driven phase with one pool and one termination rule."""
         self._phase_loop = asyncio.get_running_loop()
         self._phase_running = True
+        self._last_activity_ts = None
+        self._heartbeat_task = asyncio.create_task(self._heartbeat())
         self._phase_done = asyncio.Event()
         phase_spec_version = self._job_spec_version()
         phase_event = self._get_phase_event()
@@ -1299,6 +1344,7 @@ class JobRunner:
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(phase_event.wait(), 1.0)
         finally:
+            await self._stop_heartbeat()
             self._get_phase_event().set()
             self._phase_running = False
             if self._phase_done is not None:
