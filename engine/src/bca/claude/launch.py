@@ -239,6 +239,8 @@ async def run_turn(
                     reason = decision.blocked_reason or "limited"
                     if reason == "extra_usage_on":
                         raise TurnGuardError("Claude rate policy blocked turn: extra_usage_on", reason)
+                    if reason not in {"rate_limit_rejected", "limited"}:
+                        raise TurnGuardError("Claude rate policy blocked turn: turn_failed", reason)
                     resets_at = decision.status.resets_at if isinstance(decision.status, Limited) else None
                     raise TurnGuardError(
                         "Claude rate policy blocked turn: rate_limit_rejected",

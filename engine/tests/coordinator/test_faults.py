@@ -389,6 +389,11 @@ def test_rebuild_uses_no_model_and_changes_only_rule_columns(coordinator: Coordi
     finally:
         old.close()
         new.close()
+    output = coordinator.job_dir / "output"
+    assert list(output.glob("*.tmp")) == []
+    renamed = output / ".rebuild-handle-check.xlsx"
+    rebuilt.rename(renamed)
+    renamed.rename(rebuilt)
     old_headers, new_headers = list(old_rows[0]), list(new_rows[0])
     for key in ("lead id", "ok", "quote checks ok"):
         assert [row[old_headers.index(key)] for row in old_rows[1:]] == [
