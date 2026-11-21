@@ -1233,6 +1233,7 @@ def test_stdio_shutdown_during_slow_pull_exits_quickly(
             process.communicate(timeout=5)
 
 
+@pytest.mark.timeout(240)  # about 35 s alone; slower under a full, loaded run
 def test_pause_mid_pull_never_stalls_and_resume_reaches_sample_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
