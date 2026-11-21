@@ -41,13 +41,13 @@ it('the error boundary resets when the project changes', () => {
     return <main>{project}</main>;
   };
   const view = render(
-    <ErrorBoundary key="project-one">
+    <ErrorBoundary resetKey="project-one">
       <View project="project-one" />
     </ErrorBoundary>,
   );
   broken = false;
   view.rerender(
-    <ErrorBoundary key="project-two">
+    <ErrorBoundary resetKey="project-two">
       <View project="project-two" />
     </ErrorBoundary>,
   );

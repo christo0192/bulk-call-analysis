@@ -127,7 +127,7 @@ export function SettingsView() {
           <p>
             ChatGPT:{' '}
             {auth?.codex.loggedIn
-              ? `Signed in · ${formatPlanUsage(auth.codex.planType, weeklyPercent(allowance) ?? auth.codex.usagePercent)}`
+              ? `Signed in · ${formatPlanUsage(auth.codex.planType, weeklyPercent(allowance))}`
               : 'Not signed in'}{' '}
             <button
               disabled={auth?.codex.loggedIn || waitingFor === 'codex'}

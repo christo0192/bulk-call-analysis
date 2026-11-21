@@ -53,7 +53,7 @@ export function MainArea() {
         <div class="actions" />
       </header>
       <div class="body">
-        <ErrorBoundary key={`${currentProject}:${current?.job ?? ''}`}>
+        <ErrorBoundary resetKey={`${currentProject}:${current?.job ?? ''}`}>
           {view}
           {(phase.value === 'setup' || phase.value === 'sample') && (
             <Rail project={currentProject} state={state} />

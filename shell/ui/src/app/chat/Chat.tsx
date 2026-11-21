@@ -48,6 +48,9 @@ function historyTool(entry: ChatEntry): string {
 function historyMissing(error: unknown): boolean {
   return errorText(error).code === -32601;
 }
+function isAlreadyRunning(error: ChatError): boolean {
+  return /chat turn is already running/i.test(error.message);
+}
 
 export function Chat({
   project,
@@ -76,6 +79,7 @@ export function Chat({
   const nextId = useRef(-1);
   const activeTurn = useRef<string | null>(null);
   const turnAliases = useRef(new Map<string, string>());
+  const endedTurns = useRef(new Set<string>());
   const restoredTurns = useRef(new Set<string>());
   const [attachPending, setAttachPending] = useState(false);
   const wasAtBottom = useRef(true);
@@ -116,11 +120,38 @@ export function Chat({
       return false;
     }
   };
+  const reconcileEnd = async (turnHint: string | null) => {
+    const candidates = [...live.current.keys()];
+    if (activeTurn.current && !candidates.includes(activeTurn.current)) {
+      candidates.push(activeTurn.current);
+    }
+    const turn =
+      turnHint ?? [...candidates].reverse().find((candidate) => !endedTurns.current.has(candidate));
+    if (!turn || endedTurns.current.has(turn)) {
+      setRunning(false);
+      return;
+    }
+    endedTurns.current.add(turn);
+    if (activeTurn.current === turn) activeTurn.current = null;
+    setRunning(false);
+    const aliases = [turn, turnAliases.current.get(turn)].filter(
+      (value): value is string => value !== undefined,
+    );
+    try {
+      const available = await loadHistory();
+      const persistedTurn = persisted.current.some((entry) => aliases.includes(entry.turn));
+      if (available && persistedTurn) aliases.forEach((alias) => live.current.delete(alias));
+      publish();
+    } catch (reason) {
+      setError(errorText(reason));
+    }
+  };
   useEffect(() => {
     let active = true;
     live.current.clear();
     persisted.current = [];
     activeTurn.current = null;
+    endedTurns.current.clear();
     setEntries([]);
     setLoading(true);
     void loadHistory().catch((reason) => {
@@ -135,34 +166,31 @@ export function Chat({
       if (params.project !== project || !params.event) return;
       const event = params.event;
       const kind = typeof event.kind === 'string' ? event.kind : '';
-      const receivedTurn = typeof event.turn === 'string' ? event.turn : activeTurn.current;
+      const eventTurn = typeof event.turn === 'string' ? event.turn : undefined;
+      const receivedTurn = eventTurn ?? activeTurn.current;
       if (!kind && 'status' in event) {
-        const endTurn = receivedTurn ?? [...live.current.keys()][0];
-        void loadHistory()
-          .then((available) => {
-            if (available && endTurn && persisted.current.some((entry) => entry.turn === endTurn)) {
-              live.current.delete(endTurn);
-            }
-            publish();
-          })
-          .catch((reason) => setError(errorText(reason)));
-        activeTurn.current = null;
-        setRunning(false);
+        void reconcileEnd(eventTurn ?? activeTurn.current);
         return;
       }
       if (!receivedTurn) return;
+      const turn = receivedTurn;
+      if (!endedTurns.current.has(turn)) setRunning(true);
       if (activeTurn.current?.startsWith('local-') && activeTurn.current !== receivedTurn) {
-        turnAliases.current.set(activeTurn.current, receivedTurn);
-        const pending = live.current.get(activeTurn.current ?? '') ?? [];
-        live.current.delete(activeTurn.current ?? '');
-        live.current.set(
-          receivedTurn,
-          pending.map((entry) => ({ ...entry, turn: receivedTurn })),
-        );
+        const localTurn = activeTurn.current;
+        const pending = live.current.get(localTurn) ?? [];
+        if (live.current.has(receivedTurn)) {
+          live.current.delete(localTurn);
+        } else {
+          turnAliases.current.set(localTurn, receivedTurn);
+          live.current.delete(localTurn);
+          live.current.set(
+            receivedTurn,
+            pending.map((entry) => ({ ...entry, turn: receivedTurn })),
+          );
+        }
         activeTurn.current = receivedTurn;
       }
       activeTurn.current = receivedTurn;
-      const turn = receivedTurn;
       const list = live.current.get(turn) ?? [];
       const id = nextId.current--;
       const data = (event.data ?? {}) as Record<string, unknown>;
@@ -267,11 +295,18 @@ export function Chat({
     setRunning(true);
     try {
       await bridge.call('chat/send', { project, text: value });
-      setRunning(false);
+      await reconcileEnd(activeTurn.current);
     } catch (reason) {
       const parsed = errorText(reason);
-      const timeout = /timed out|timeout/i.test(parsed.message);
-      if (!timeout) {
+      const engineTimeout =
+        /timed out/i.test(parsed.message) && !/write timed out/i.test(parsed.message);
+      if (isAlreadyRunning(parsed)) {
+        live.current.delete(turn);
+        publish();
+        setText((current) => current || value);
+        setRunning(true);
+        setError(parsed);
+      } else if (!engineTimeout) {
         const engineTurn = turnAliases.current.get(turn);
         live.current.delete(turn);
         if (engineTurn) live.current.delete(engineTurn);
@@ -411,7 +446,9 @@ export function Chat({
       )}
       {error && (
         <div class="chat-error" role="alert">
-          {hasReason(error, 'claude_extra_usage_on') ? (
+          {isAlreadyRunning(error) ? (
+            'Claude is still replying. Wait for it or press Stop.'
+          ) : hasReason(error, 'claude_extra_usage_on') ? (
             <>
               Chat is off: extra usage is switched on in your Claude settings. Turn it off to chat.
               A running job is not affected.{' '}

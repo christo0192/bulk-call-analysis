@@ -1,7 +1,15 @@
 import { Component, type ComponentChildren } from 'preact';
 
-export class ErrorBoundary extends Component<{ children: ComponentChildren }, { failed: boolean }> {
+type Props = { children: ComponentChildren; resetKey?: string };
+
+export class ErrorBoundary extends Component<Props, { failed: boolean }> {
   state = { failed: false };
+
+  componentDidUpdate(previousProps: Props) {
+    if (this.state.failed && previousProps.resetKey !== this.props.resetKey) {
+      this.setState({ failed: false });
+    }
+  }
 
   static getDerivedStateFromError(): { failed: boolean } {
     return { failed: true };

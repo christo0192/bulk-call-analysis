@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import type { AllowanceStatus, PlanCard as Plan, SampleCard as Sample } from '../../engine/types';
@@ -37,7 +37,6 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
   const [notice, setNotice] = useState('');
   const [locked, setLocked] = useState(false);
   const [loadedJob, setLoadedJob] = useState<string | null>(null);
-  const reloadNotice = useRef(false);
   const load = (requestedJob: string, active = () => true) =>
     bridge
       .call('job/plan', { job: requestedJob })
@@ -62,12 +61,6 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
       active = false;
     };
   }, [job]);
-  useEffect(() => {
-    if (reloadNotice.current && loadedJob === job) {
-      reloadNotice.current = false;
-      setNotice('');
-    }
-  }, [job, loadedJob, plan]);
   if (!plan || loadedJob !== job)
     return <div class="approval-card">{error ? <ErrorLine error={error} /> : 'Loading plan…'}</div>;
   if (plan.approved)
@@ -96,7 +89,6 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
         /stale|plan changed/i.test(EngineError.from(e).message)
       ) {
         setNotice('The plan changed. Check the new version.');
-        reloadNotice.current = true;
         setError(null);
         void load(job);
       }
@@ -183,6 +175,7 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
         <button
           disabled={pending}
           onClick={() => {
+            setNotice('');
             onFocus?.();
           }}
         >
@@ -331,14 +324,16 @@ export function StartCard({
 }) {
   const [plan, setPlan] = useState<Plan | null>(null);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<unknown>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
+  const [startError, setStartError] = useState<unknown>(null);
   const [cancelled, setCancelled] = useState(false);
   const [started, setStarted] = useState(false);
   const [approvedAt, setApprovedAt] = useState<number | undefined>();
   useEffect(() => {
     let active = true;
     setPlan(null);
-    setError(null);
+    setLoadError(null);
+    setStartError(null);
     setApprovedAt(undefined);
     setStarted(false);
     void Promise.all([bridge.call('job/plan', { job }), bridge.call('job/snapshot', { job })])
@@ -349,19 +344,20 @@ export function StartCard({
         setApprovedAt(snapshot.approvedAt ?? approvedStep?.ts);
       })
       .catch((value) => {
-        if (active) setError(value);
+        if (active) setLoadError(value);
       });
     return () => {
       active = false;
     };
   }, [job]);
   const start = async () => {
+    setStartError(null);
     setPending(true);
     try {
       await bridge.call('job/startFull', { job });
       setStarted(true);
     } catch (e) {
-      setError(e);
+      setStartError(e);
     } finally {
       setPending(false);
     }
@@ -416,11 +412,11 @@ export function StartCard({
         <dt>This computer</dt>
         <dd>Keep it plugged in with the lid open. It's kept awake until the job ends.</dd>
       </dl>
-      {error && <ErrorLine error={error} />}
+      {(loadError || startError) && <ErrorLine error={loadError ?? startError} />}
       <footer>
         <button
           class="primary"
-          disabled={pending || !plan || Boolean(error) || started}
+          disabled={pending || !plan || Boolean(loadError) || started}
           onClick={() => void start()}
         >
           Start full run

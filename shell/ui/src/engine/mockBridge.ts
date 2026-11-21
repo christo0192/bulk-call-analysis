@@ -188,7 +188,7 @@ export class MockBridge implements EngineBridge {
             method: 'chat/event',
             params: {
               project: (params as { project: string }).project,
-              event: { turn, status: 'completed' },
+              event: { status: 'completed' },
             },
           });
           resolve({

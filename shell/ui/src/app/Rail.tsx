@@ -54,22 +54,29 @@ export function formatKb(size: number): string {
 }
 export function Rail({ project, state }: { project: string; state?: string }) {
   const [filesByProject, setFilesByProject] = useState<Record<string, FileInfo[]>>({});
-  useEffect(() => {
-    let active = true;
+  const [fileErrors, setFileErrors] = useState<Record<string, string>>({});
+  const loadFiles = (active: () => boolean) =>
     void bridge
       .call('files/list', { project })
       .then((value) => {
-        if (active) setFilesByProject((current) => ({ ...current, [project]: value }));
+        if (active()) {
+          setFilesByProject((current) => ({ ...current, [project]: value }));
+          setFileErrors((current) => ({ ...current, [project]: '' }));
+        }
       })
-      .catch(() => undefined);
+      .catch((reason) => {
+        const message = reason instanceof Error ? reason.message : String(reason);
+        console.warn(`Couldn't load files for ${project}: ${message}`);
+        if (active())
+          setFileErrors((current) => ({ ...current, [project]: "Couldn't load files" }));
+      });
+  useEffect(() => {
+    let active = true;
+    loadFiles(() => active);
     const unsubscribe = bridge.onNotification((notification) => {
       if (notification.method !== 'job/state') return;
       const params = notification.params as { project?: string };
-      if (params.project === project)
-        void bridge
-          .call('files/list', { project })
-          .then((value) => setFilesByProject((current) => ({ ...current, [project]: value })))
-          .catch(() => undefined);
+      if (params.project === project) loadFiles(() => active);
     });
     return () => {
       active = false;
@@ -92,6 +99,7 @@ export function Rail({ project, state }: { project: string; state?: string }) {
         ))}
       </ol>
       <h3>Files</h3>
+      {fileErrors[project] && <small class="muted">{fileErrors[project]}</small>}
       <ul class="files">
         {(filesByProject[project] ?? []).map((file) => (
           <li key={file.name}>

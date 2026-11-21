@@ -211,6 +211,80 @@ it("the shell's RPC timed out keeps the turn running without a failure banner", 
   expect(screen.queryByRole('alert')).toBeNull();
 });
 
+it('a chat mounted mid-turn shows Stop', async () => {
+  chat();
+  event('assistant_delta', { delta: { text: 'streaming reply' } }, 'engine-turn');
+  expect(await screen.findByRole('button', { name: 'Stop' })).toBeInTheDocument();
+  expect(screen.getByText('streaming reply')).toBeInTheDocument();
+});
+
+it('the end event without a turn id ends the running state', async () => {
+  chat();
+  event('assistant_delta', { delta: { text: 'finished reply' } }, 'engine-turn');
+  expect(await screen.findByRole('button', { name: 'Stop' })).toBeInTheDocument();
+  mockBridge.emit({
+    jsonrpc: '2.0',
+    method: 'chat/event',
+    params: { project: 'p1', event: { status: 'completed' } },
+  });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument());
+  expect(screen.getByText('finished reply')).toBeInTheDocument();
+});
+
+it('a resolved chat/send ends the running state even without an end event', async () => {
+  let completed = false;
+  mockBridge.setResponse('chat/history', async () =>
+    completed
+      ? {
+          entries: [
+            entry(1, 'user', 'resolved question', 'engine-turn'),
+            entry(2, 'assistant', 'resolved reply', 'engine-turn'),
+          ],
+          more: false,
+        }
+      : { entries: [], more: false },
+  );
+  mockBridge.setResponse('chat/send', async () => {
+    // A real turn always streams at least its `system` event with the engine's turn id,
+    // which links the optimistic message to that turn, and then resolves.
+    event('system', {}, 'engine-turn');
+    completed = true;
+    return { status: 'completed', project: 'p1' };
+  });
+  chat();
+  fireEvent.input(screen.getByRole('textbox'), { target: { value: 'resolved question' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument());
+  expect(screen.getByText('resolved reply')).toBeInTheDocument();
+  expect(screen.getAllByText('resolved question')).toHaveLength(1);
+});
+
+it('a rejected send ends running unless it is a timeout', async () => {
+  mockBridge.setResponse('chat/send', async () => {
+    throw new Error('offline');
+  });
+  chat();
+  fireEvent.input(screen.getByRole('textbox'), { target: { value: 'try again' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument());
+  expect(screen.getByRole('alert')).toBeInTheDocument();
+});
+
+it('sending during a running turn shows a gentle notice and keeps the reply', async () => {
+  mockBridge.setResponse('chat/send', async () => {
+    event('assistant_delta', { delta: { text: 'reply in progress' } }, 'engine-turn');
+    throw new EngineError(-32001, 'Chat turn is already running');
+  });
+  chat();
+  fireEvent.input(screen.getByRole('textbox'), { target: { value: 'another question' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  expect(await screen.findByText('reply in progress')).toBeInTheDocument();
+  expect(
+    screen.getByText('Claude is still replying. Wait for it or press Stop.'),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("Claude couldn't finish that reply. Try again.")).toBeNull();
+});
+
 it('a long history opens scrolled to the latest message', async () => {
   mockBridge.setResponse('chat/history', async () => ({
     entries: Array.from({ length: 60 }, (_, i) =>
