@@ -67,5 +67,5 @@ export const appStatus: EngineStatus = {
   protocol: 'json-rpc',
   engineVersion: '0.1.0',
   dataDir: 'Application data',
-  runningJobs: 0,
+  runningJobs: [],
 };

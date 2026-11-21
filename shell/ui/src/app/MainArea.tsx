@@ -19,12 +19,13 @@ export function MainArea() {
     () => setChat(localStorage.getItem(`chat:${selectedProject.value}`) !== 'hidden'),
     [currentProject],
   );
-  if (!current || !currentProject)
+  if (!currentProject)
     return (
       <main class="main">
         <EmptyState />
       </main>
     );
+  const state = current?.state ?? project?.status;
   const toggle = () =>
     setChat((visible) => {
       const next = !visible;
@@ -33,27 +34,27 @@ export function MainArea() {
     });
   const view =
     phase.value === 'setup' ? (
-      <SetupView id={current.job} />
+      <SetupView id={current?.job} />
     ) : phase.value === 'sample' ? (
-      <SampleView id={current.job} />
+      <SampleView id={current!.job} />
     ) : phase.value === 'run' ? (
-      <RunView id={current.job} />
+      <RunView id={current!.job} />
     ) : (
-      <DoneView id={current.job} />
+      <DoneView id={current!.job} />
     );
   return (
     <main class="main">
       <header>
         <div>
           <h1>{project?.title ?? currentProject}</h1>
-          <Pill state={current.state} />
+          <Pill state={state} />
         </div>
         <div class="actions" />
       </header>
       <div class="body">
         {view}
         {(phase.value === 'setup' || phase.value === 'sample') && (
-          <Rail project={currentProject} state={current.state} />
+          <Rail project={currentProject} state={state} />
         )}
         {(phase.value === 'run' || phase.value === 'done') && (
           <ChatDrawer visible={chat} toggle={toggle} />

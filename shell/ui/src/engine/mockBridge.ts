@@ -16,7 +16,8 @@ const firstRun = typeof window !== 'undefined' && window.location.search.include
 let firstRunActive = firstRun;
 const checklistState = (firstRun ? newComputerChecklist : checklist).map((item) => ({ ...item }));
 const authState = {
-  claude: { ...authStatus.claude },
+  // In the first-run mock, Claude starts signed out until the sign-in flow completes.
+  claude: { ...authStatus.claude, loggedIn: firstRun ? false : authStatus.claude.loggedIn },
   codex: { ...authStatus.codex },
 };
 const settingsState = { ...settings };
@@ -27,12 +28,13 @@ export class MockBridge implements EngineBridge {
   private notifications = new Set<(n: Notification) => void>();
   private statuses = new Set<(s: { status: string; reason?: string }) => void>();
   private checkCount = 0;
+  private signInStarted = !firstRun;
   async call<M extends Method>(method: M, params: ParamsOf<M>): Promise<ResultOf<M>> {
     this.calls.push({ method, params });
     const custom = this.responses.get(method);
     if (custom) return (await custom(params)) as ResultOf<M>;
     if (method === 'projects/list') {
-      if (firstRunActive) throw new EngineError(-32002, 'Setup required');
+      if (firstRunActive) throw 'RPC error -32002: Setup required';
       return projects as ResultOf<M>;
     }
     if (method === 'projects/jobs')
@@ -42,7 +44,9 @@ export class MockBridge implements EngineBridge {
     if (method === 'projects/create') {
       const p = params as { project: string; title: string };
       const project = { ...p, status: 'planned' as const };
-      projects.push(project);
+      const existing = projects.findIndex((item) => item.project === project.project);
+      if (existing >= 0) projects[existing] = project;
+      else projects.push(project);
       jobs.push({
         job: `synthetic-job-${jobs.length + 1}`,
         project: p.project,
@@ -56,7 +60,8 @@ export class MockBridge implements EngineBridge {
     if (method === 'allowance/status') return allowances as ResultOf<M>;
     if (method === 'setup/checklist') return checklistState as ResultOf<M>;
     if (method === 'setup/runChecks') {
-      this.checkCount += 1;
+      // Sign-in completes on the second check AFTER auth/claudeLogin was called.
+      if (this.signInStarted) this.checkCount += 1;
       if (this.checkCount >= 2) {
         const item = checklistState.find((entry) => entry.name === 'claude_login');
         if (item) item.status = 'ok';
@@ -72,10 +77,13 @@ export class MockBridge implements EngineBridge {
       const item = checklistState.find((entry) => entry.name === name);
       if (item) item.status = 'manual_done';
       if (firstRun && name === 'extra_usage_off') firstRunActive = false;
-      return item ?? ({ name, status: 'manual_done' } as ResultOf<M>);
+      return { item: name, status: item?.status ?? 'manual_done' } as ResultOf<M>;
     }
     if (method === 'auth/status') return authState as ResultOf<M>;
-    if (method === 'auth/claudeLogin') return { started: true, vendor: 'claude' } as ResultOf<M>;
+    if (method === 'auth/claudeLogin') {
+      this.signInStarted = true;
+      return { started: true, vendor: 'claude' } as ResultOf<M>;
+    }
     if (method === 'auth/codexLogin') return { started: true, vendor: 'codex' } as ResultOf<M>;
     if (method === 'settings/get') return settingsState as ResultOf<M>;
     if (method === 'settings/set') {
@@ -96,6 +104,10 @@ export class MockBridge implements EngineBridge {
     fn: (params: ParamsOf<M>) => ResultOf<M> | Promise<ResultOf<M>>,
   ): void {
     this.responses.set(method, fn as ResponseFn);
+  }
+  /** Test helper: forget every response set with setResponse, so tests stay isolated. */
+  clearResponses(): void {
+    this.responses.clear();
   }
   emit(notification: Notification): void {
     this.notifications.forEach((cb) => cb(notification));

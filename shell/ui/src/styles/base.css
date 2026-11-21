@@ -41,10 +41,17 @@ input:focus-visible {
 }
 .window {
   height: 100%;
+  flex: 1;
+  min-height: 0;
   max-width: 1280px;
   margin: auto;
   background: var(--win);
   display: flex;
+}
+#app {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 .sidebar {
   width: 228px;
@@ -152,6 +159,10 @@ input:focus-visible {
 .pill.danger {
   background: var(--red-soft);
   color: var(--red);
+}
+.pill.neutral {
+  background: var(--side);
+  color: var(--mut);
 }
 .pill.amber {
   background: var(--amb-soft);

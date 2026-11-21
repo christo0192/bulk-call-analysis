@@ -4,13 +4,14 @@ import { EngineError } from '../../engine/client';
 import type { AuthStatus, EngineStatus, Settings } from '../../engine/types';
 import { settingsOpen, setupRequired } from '../../state/store';
 import { useSignIn } from '../hooks/useSignIn';
+import { formatPlanUsage } from '../formatUsage';
 
 const initialSettings: Settings = {
-  connectorPath: '',
+  keyPath: '',
   keyLocated: false,
   claudeModel: '',
   codexModel: '',
-  workerCount: 0,
+  workerCount: 1,
   retentionDays: 30,
 };
 export function SettingsView() {
@@ -23,6 +24,7 @@ export function SettingsView() {
   const [error, setError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
+  const [workersError, setWorkersError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const loadSettings = () => {
     setLoading(true);
@@ -34,7 +36,7 @@ export function SettingsView() {
       bridge.call('app/status', {}),
     ])
       .then(([s, a, p]) => {
-        setValues(s);
+        setValues({ ...s, keyPath: s.keyPath ?? s.connectorPath ?? '' });
         setAuth(a);
         setApp(p);
       })
@@ -42,12 +44,16 @@ export function SettingsView() {
       .finally(() => setLoading(false));
   };
   useEffect(loadSettings, []);
-  const { waitingFor, signIn, checkAgain } = useSignIn(setAuth, (message) =>
-    setError(message || null),
-  );
+  const {
+    waitingFor,
+    isChecking: signInChecking,
+    signIn,
+    checkAgain,
+  } = useSignIn(setAuth, (message) => setError(message || null));
   async function save(changes: Partial<Settings>, label: string) {
     setError(null);
     setFieldError(null);
+    setWorkersError(null);
     try {
       setValues(await bridge.call('settings/set', changes));
       setSaved(label);
@@ -56,6 +62,7 @@ export function SettingsView() {
       const e = EngineError.from(cause);
       const message = e.code === -32602 ? "That value isn't valid" : e.message;
       if (label === 'connector') setFieldError(message);
+      else if (label === 'workers') setWorkersError(message);
       else setError(message);
     }
   }
@@ -87,13 +94,15 @@ export function SettingsView() {
               {waitingFor === 'claude' ? 'Waiting…' : 'Sign in'}
             </button>
             {waitingFor === 'claude' && (
-              <button onClick={() => checkAgain('claude')}>Check again</button>
+              <button disabled={signInChecking} onClick={() => checkAgain('claude')}>
+                {signInChecking ? 'Checking…' : 'Check again'}
+              </button>
             )}
           </p>
           <p>
             ChatGPT:{' '}
             {auth?.codex.loggedIn
-              ? `Signed in · Plan: ${auth.codex.planType} · weekly allowance ${auth.codex.usagePercent}% used`
+              ? `Signed in · ${formatPlanUsage(auth.codex.planType, auth.codex.usagePercent)}`
               : 'Not signed in'}{' '}
             <button
               disabled={auth?.codex.loggedIn || waitingFor === 'codex'}
@@ -102,27 +111,31 @@ export function SettingsView() {
               {waitingFor === 'codex' ? 'Waiting…' : 'Sign in'}
             </button>
             {waitingFor === 'codex' && (
-              <button onClick={() => checkAgain('codex')}>Check again</button>
+              <button disabled={signInChecking} onClick={() => checkAgain('codex')}>
+                {signInChecking ? 'Checking…' : 'Check again'}
+              </button>
             )}
           </p>
         </section>
         <section class="settings-card">
           <h2>BigQuery</h2>
-          <label htmlFor="connector-path">Connector path</label>
+          <label htmlFor="connector-path">Service-account key file</label>
           <div class="field-row">
             <input
               id="connector-path"
-              value={String(values.connectorPath ?? '')}
-              onInput={(e) => setValues({ ...values, connectorPath: e.currentTarget.value })}
+              value={String(values.keyPath ?? values.connectorPath ?? '')}
+              onInput={(e) => setValues({ ...values, keyPath: e.currentTarget.value })}
             />
-            <button
-              onClick={() => void save({ connectorPath: values.connectorPath ?? '' }, 'connector')}
-            >
+            <button onClick={() => void save({ connectorPath: values.keyPath ?? '' }, 'connector')}>
               Save
             </button>
             {saved === 'connector' && <span class="saved">Saved</span>}
           </div>
           {fieldError && <p class="error">{fieldError}</p>}
+          <p class="muted">
+            Where your read-only BigQuery key is stored. The app never reads its contents into the
+            window.
+          </p>
           <p class="muted">{values.keyLocated ? 'Key found' : 'Key not found'}</p>
         </section>
         <section class="settings-card">
@@ -176,7 +189,6 @@ export function SettingsView() {
             value={String(values.workerCount)}
             onChange={(e) => void save({ workerCount: Number(e.currentTarget.value) }, 'workers')}
           >
-            <option value="0">Automatic</option>
             {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
               <option value={n} key={n}>
                 {n}
@@ -184,6 +196,7 @@ export function SettingsView() {
             ))}
           </select>
           <p class="muted">Applies to the next job you start or resume.</p>
+          {workersError && <p class="error">{workersError}</p>}
           {saved === 'workers' && <span class="saved">Saved</span>}
         </section>
         <section class="settings-card">

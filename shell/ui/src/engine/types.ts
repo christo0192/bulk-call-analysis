@@ -1,8 +1,11 @@
 export type JobState =
+  | 'draft'
   | 'planned'
+  | 'plan_proposed'
   | 'plan_approved'
   | 'running'
   | 'sample_ready'
+  | 'sample_approved'
   | 'paused'
   | 'stalled'
   | 'done'
@@ -13,10 +16,10 @@ export type Project = { project: string; title: string; status?: JobState };
 export type JobSummary = {
   job: string;
   project: string;
-  state: JobState;
+  state: string;
   done?: number;
   total?: number;
-  remaining?: number;
+  remaining?: number | string;
 };
 export type FileInfo = { name: string; size: number };
 export type SetupStatus = 'pending' | 'ok' | 'failed' | 'manual_pending' | 'manual_done';
@@ -46,10 +49,11 @@ export type EngineStatus = {
   protocol: string;
   engineVersion: string;
   dataDir: string;
-  runningJobs: number;
+  runningJobs: string[] | number;
 };
 export type Settings = {
-  connectorPath: string;
+  connectorPath?: string;
+  keyPath?: string;
   keyLocated: boolean;
   claudeModel: string;
   codexModel: string;
@@ -72,7 +76,7 @@ export type MethodMap = {
   shutdown: { params: {}; result: { stopping: true; exitCode: 0 } };
   'setup/checklist': { params: {}; result: SetupItem[] };
   'setup/runChecks': { params: {}; result: { items: SetupItem[] } };
-  'setup/markManual': { params: { item: string }; result: SetupItem };
+  'setup/markManual': { params: { item: string }; result: { item: string; status: SetupStatus } };
   'settings/get': { params: {}; result: Settings };
   'settings/set': { params: Partial<Settings>; result: Settings };
   'projects/list': { params: {}; result: Project[] };

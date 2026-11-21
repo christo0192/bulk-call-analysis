@@ -1,5 +1,5 @@
 import { useEffect } from 'preact/hooks';
-import { load, settingsOpen, setupItems, setupRequired } from '../state/store';
+import { load, settingsOpen, setupRequired } from '../state/store';
 import { EngineStatusBanner } from './EngineStatusBanner';
 import { Sidebar } from './Sidebar';
 import { MainArea } from './MainArea';
@@ -12,19 +12,12 @@ export function App() {
   useEffect(() => {
     void load();
   }, []);
-  const checklistPending = setupItems.value.some(
-    (item) => item.status !== 'ok' && item.status !== 'manual_done',
-  );
   return (
     <>
       <EngineStatusBanner />
       <div class="window">
         {settingsOpen.value ? <SettingsView /> : <Sidebar />}
-        {settingsOpen.value ? null : setupRequired.value || checklistPending ? (
-          <SetupChecklist />
-        ) : (
-          <MainArea />
-        )}
+        {settingsOpen.value ? null : setupRequired.value ? <SetupChecklist /> : <MainArea />}
       </div>
     </>
   );

@@ -17,6 +17,7 @@ export class EngineError extends Error {
     this.name = 'EngineError';
   }
   static from(error: unknown): EngineError {
+    if (error instanceof EngineError) return error;
     const value = error instanceof Error ? error.message : error;
     if (typeof value === 'object' && value !== null) {
       const parsed = value as { code?: unknown; message?: unknown; data?: unknown };
@@ -53,6 +54,8 @@ export class EngineError extends Error {
     } catch {
       /* shell errors may be plain text */
     }
+    const rpc = /^RPC error\s+(-?\d+):\s*(.*)$/s.exec(message);
+    if (rpc) return new EngineError(Number(rpc[1]), rpc[2] ?? '', null);
     return new EngineError(null, message);
   }
 }

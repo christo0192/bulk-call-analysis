@@ -3,12 +3,13 @@ import type {
   Allowances,
   JobSummary,
   Project,
-  JobState,
   Notification,
   SetupItem,
+  AuthStatus,
 } from '../engine/types';
 import { bridge } from '../engine/bridge';
 import { EngineError } from '../engine/client';
+
 export const engineStatus = signal<'starting' | 'ready' | 'restarting' | 'failed' | 'stopped'>(
   'starting',
 );
@@ -20,8 +21,13 @@ export const newProjectOpen = signal(false);
 export const setupRequired = signal(false);
 export const settingsOpen = signal(false);
 export const setupItems = signal<SetupItem[]>([]);
+export type Capability = 'available' | 'unknown' | 'missing';
+export const capabilities = signal<Record<string, Capability>>({});
 let removeNotification: (() => void) | undefined;
 let removeStatus: (() => void) | undefined;
+let loadPromise: Promise<void> | null = null;
+let loadAttempted = false;
+
 export function addProject(project: Project): void {
   projects.value = [
     ...projects.value.filter((existing) => existing.project !== project.project),
@@ -30,96 +36,144 @@ export function addProject(project: Project): void {
 }
 export const selectedJob = computed(() => {
   const id = selectedProject.value;
-  return id ? (jobsByProject.value[id]?.[0] ?? null) : null;
+  if (!id) return null;
+  const jobs = jobsByProject.value[id] ?? [];
+  return (
+    jobs.find((job) => !['done', 'done_with_issues', 'failed', 'cancelled'].includes(job.state)) ??
+    jobs[0] ??
+    null
+  );
 });
-export function phaseFor(state?: JobState): 'setup' | 'sample' | 'run' | 'done' {
-  if (state === 'sample_ready') return 'sample';
-  if (state === 'running' || state === 'paused' || state === 'stalled') return 'run';
+export function phaseFor(state?: string): 'setup' | 'sample' | 'run' | 'done' {
+  if (state === 'sample_ready' || state === 'sample_approved') return 'sample';
+  if (
+    state === 'running' ||
+    state === 'paused' ||
+    state === 'stalled' ||
+    [
+      'pulling',
+      'masking_sample',
+      'sample_running',
+      'full_running',
+      'quote_check',
+      'building_output',
+      'verifying',
+    ].includes(state ?? '')
+  )
+    return 'run';
   if (state === 'done' || state === 'done_with_issues') return 'done';
   return 'setup';
 }
 export const phase = computed(() => phaseFor(selectedJob.value?.state));
-async function refetchJobs(projectNames: string[]): Promise<void> {
+function itemReady(item: SetupItem, auth: AuthStatus): boolean {
+  return (
+    item.status === 'ok' ||
+    item.status === 'manual_done' ||
+    (item.name === 'claude_login' && auth.claude.loggedIn) ||
+    (item.name === 'chatgpt_login' && auth.codex.loggedIn)
+  );
+}
+
+async function refetchJobs(names: string[]): Promise<void> {
   await Promise.all(
-    projectNames.map(async (project) => {
-      const result = await bridge.call('projects/jobs', { project });
-      jobsByProject.value = { ...jobsByProject.value, [project]: result.jobs };
+    names.map(async (project) => {
+      try {
+        const result = await bridge.call('projects/jobs', { project });
+        capabilities.value = { ...capabilities.value, 'projects/jobs': 'available' };
+        jobsByProject.value = { ...jobsByProject.value, [project]: result.jobs };
+      } catch (error) {
+        if (EngineError.from(error).code !== -32601) throw error;
+        capabilities.value = { ...capabilities.value, 'projects/jobs': 'missing' };
+        jobsByProject.value = { ...jobsByProject.value, [project]: [] };
+      }
     }),
   );
 }
 export function reduceNotification(n: Notification): void {
   if (n.method === 'job/state') {
-    const p = n.params as { job?: string; state?: JobState; project?: string };
+    const p = n.params as { job?: string; state?: string; project?: string };
     if (!p.job || !p.state) return;
     const next = { ...jobsByProject.value };
     let found = false;
     for (const [project, items] of Object.entries(next)) {
-      const index = items.findIndex((j) => j.job === p.job);
-      if (index >= 0) {
+      if (items.some((job) => job.job === p.job)) {
         found = true;
-        next[project] = items.map((j, i) => (i === index ? { ...j, state: p.state! } : j));
+        next[project] = items.map((job) => (job.job === p.job ? { ...job, state: p.state! } : job));
       }
     }
     jobsByProject.value = next;
     if (!found)
       void refetchJobs(p.project ? [p.project] : projects.value.map((project) => project.project));
   } else if (n.method === 'job/progress') {
-    const p = n.params as { job?: string; done?: number; total?: number; remaining?: number };
+    const p = n.params as {
+      job?: string;
+      done?: number;
+      total?: number;
+      remaining?: number | string;
+    };
     if (!p.job) return;
     const next = { ...jobsByProject.value };
     for (const [project, items] of Object.entries(next))
-      next[project] = items.map((j) =>
-        j.job === p.job
+      next[project] = items.map((job) =>
+        job.job === p.job
           ? {
-              ...j,
+              ...job,
               ...(Number.isInteger(p.done) ? { done: p.done } : {}),
               ...(Number.isInteger(p.total) ? { total: p.total } : {}),
-              ...(Number.isInteger(p.remaining) ? { remaining: p.remaining } : {}),
+              ...(Number.isNaN(Number(p.remaining)) ? {} : { remaining: Number(p.remaining) }),
             }
-          : j,
+          : job,
       );
     jobsByProject.value = next;
   }
 }
+function acceptStatus(status: string): boolean {
+  return ['starting', 'ready', 'restarting', 'stopped'].includes(status);
+}
 export async function load(): Promise<void> {
+  if (loadPromise) return loadPromise;
+  loadPromise = loadOnce();
+  try {
+    await loadPromise;
+  } finally {
+    loadPromise = null;
+  }
+}
+async function loadOnce(): Promise<void> {
+  loadAttempted = true;
   engineStatus.value = 'starting';
   if (!removeNotification) removeNotification = bridge.onNotification(reduceNotification);
   if (!removeStatus)
     removeStatus = bridge.onStatus(({ status }) => {
-      if (
-        status === 'starting' ||
-        status === 'ready' ||
-        status === 'restarting' ||
-        status === 'stopped'
-      ) {
-        engineStatus.value = status;
-      } else if (status === 'error') {
-        engineStatus.value = 'failed';
-      } else {
-        console.warn(`Unknown engine status: ${status}`);
-      }
+      if (acceptStatus(status)) {
+        const wasReady = engineStatus.value === 'ready';
+        engineStatus.value = status as typeof engineStatus.value;
+        if (status === 'ready' && !wasReady && loadAttempted && !loadPromise) void load();
+      } else if (status === 'error') engineStatus.value = 'failed';
+      else console.warn(`Unknown engine status: ${status}`);
     });
   try {
     const initialStatus = await bridge.status();
     if (initialStatus === 'error') engineStatus.value = 'failed';
-    else if (
-      initialStatus === 'starting' ||
-      initialStatus === 'ready' ||
-      initialStatus === 'restarting' ||
-      initialStatus === 'stopped'
-    )
-      engineStatus.value = initialStatus;
-    else console.warn(`Unknown engine status: ${initialStatus}`);
+    else if (acceptStatus(initialStatus))
+      engineStatus.value = initialStatus as typeof engineStatus.value;
     setupItems.value = await bridge.call('setup/checklist', {});
-    setupRequired.value = setupItems.value.some(
-      (item) => item.status !== 'ok' && item.status !== 'manual_done',
-    );
+    const auth = await bridge.call('auth/status', {});
+    setupRequired.value = setupItems.value.some((item) => !itemReady(item, auth));
     projects.value = await bridge.call('projects/list', {});
     selectedProject.value ??= projects.value[0]?.project ?? null;
     await refetchJobs(projects.value.map((project) => project.project));
-    allowances.value = await bridge.call('allowance/status', {});
+    try {
+      allowances.value = await bridge.call('allowance/status', {});
+      capabilities.value = { ...capabilities.value, 'allowance/status': 'available' };
+    } catch (error) {
+      if (EngineError.from(error).code !== -32601) throw error;
+      capabilities.value = { ...capabilities.value, 'allowance/status': 'missing' };
+      allowances.value = null;
+    }
   } catch (error) {
-    if (EngineError.from(error).code === -32002) {
+    const e = EngineError.from(error);
+    if (e.code === -32002) {
       setupRequired.value = true;
       try {
         setupItems.value = await bridge.call('setup/checklist', {});

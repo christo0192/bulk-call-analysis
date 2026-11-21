@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { bridge } from '../engine/bridge';
-import type { FileInfo, JobState } from '../engine/types';
+import type { FileInfo } from '../engine/types';
 import { FileIcon } from './ui/icons';
 export type StepStatus = 'done' | 'current' | 'waiting' | 'todo';
 export const stepNames = [
@@ -13,7 +13,7 @@ export const stepNames = [
   'Excel built and verified',
   'Summary written',
 ];
-export function stepStatuses(state: JobState | undefined): StepStatus[] {
+export function stepStatuses(state: string | undefined): StepStatus[] {
   const index =
     state === 'sample_ready'
       ? 3
@@ -29,7 +29,7 @@ export function stepStatuses(state: JobState | undefined): StepStatus[] {
 export function formatKb(size: number): string {
   return `${Math.max(1, Math.ceil(size / 1024))} KB`;
 }
-export function Rail({ project, state }: { project: string; state?: JobState }) {
+export function Rail({ project, state }: { project: string; state?: string }) {
   const [files, setFiles] = useState<FileInfo[]>([]);
   useEffect(() => {
     let active = true;

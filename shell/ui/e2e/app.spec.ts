@@ -35,21 +35,22 @@ test('new project flow works', async ({ page }) => {
   await page.getByRole('button', { name: /New project/ }).click();
   await page.getByLabel('Project title').fill('Synthetic review');
   await page.getByRole('button', { name: 'Create' }).click();
-  await expect(page.getByText('Synthetic review')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Synthetic review' })).toBeVisible();
+  await expect(page.locator('main header h1')).toHaveText('Synthetic review');
 });
 
 test('first run: sign in to Claude, confirm the two manual items, continue to the main frame', async ({
   page,
 }) => {
   await page.goto('/?mock=firstrun');
-  await expect(page.getByText('Set up this computer')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Set up this computer' })).toBeVisible();
   await page.getByRole('button', { name: 'Sign in' }).click();
   await page.getByRole('button', { name: 'Check again' }).click();
   await page.getByRole('button', { name: 'Check again' }).click();
   await page.getByRole('button', { name: "I've checked" }).first().click();
   await page.getByRole('button', { name: "I've checked" }).first().click();
   await page.getByRole('button', { name: 'Continue' }).click();
-  await expect(page.getByText('Bulk Call Analysis')).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Projects' })).toBeVisible();
 });
 
 test('settings: change the worker count and see Saved', async ({ page }) => {

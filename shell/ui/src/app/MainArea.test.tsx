@@ -1,7 +1,13 @@
 import { beforeEach, expect, it } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/preact';
+import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { MainArea } from './MainArea';
-import { jobsByProject, projects, selectedProject, newProjectOpen } from '../state/store';
+import {
+  jobsByProject,
+  projects,
+  selectedProject,
+  newProjectOpen,
+  addProject,
+} from '../state/store';
 beforeEach(() => {
   projects.value = [{ project: 'p', title: 'Project one', status: 'planned' }];
   selectedProject.value = 'p';
@@ -27,4 +33,25 @@ it('drawer hides and restores', () => {
   fireEvent.click(screen.getByRole('button', { name: /Hide/ }));
   expect(screen.getByRole('button', { name: /Chat/ })).toBeInTheDocument();
   expect(localStorage.getItem('chat:p')).toBe('hidden');
+});
+it('after creating a project the setup view shows instead of No projects yet', async () => {
+  projects.value = [];
+  selectedProject.value = null;
+  jobsByProject.value = {};
+  render(<MainArea />);
+  addProject({ project: 'new-project', title: 'New project', status: 'planned' });
+  selectedProject.value = 'new-project';
+  jobsByProject.value = {
+    'new-project': [{ job: 'new-job', project: 'new-project', state: 'planned' }],
+  };
+  await waitFor(() => expect(screen.getByTestId('setup-view')).toBeInTheDocument());
+  expect(screen.queryByText('No projects yet')).toBeNull();
+});
+it('a selected project without a job still shows the setup view', async () => {
+  projects.value = [{ project: 'new-project', title: 'New project', status: 'planned' }];
+  selectedProject.value = 'new-project';
+  jobsByProject.value = {};
+  render(<MainArea />);
+  await waitFor(() => expect(screen.getByTestId('setup-view')).toBeInTheDocument());
+  expect(screen.queryByText('No projects yet')).toBeNull();
 });

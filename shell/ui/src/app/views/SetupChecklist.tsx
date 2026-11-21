@@ -4,6 +4,7 @@ import { EngineError } from '../../engine/client';
 import type { AuthStatus, SetupItem } from '../../engine/types';
 import { load, setupItems, setupRequired } from '../../state/store';
 import { useSignIn } from '../hooks/useSignIn';
+import { formatPlanUsage } from '../formatUsage';
 
 const groups: Array<{ title: string; names: string[] }> = [
   { title: 'App engine installed', names: ['uv_python', 'venv'] },
@@ -24,41 +25,48 @@ const detail: Record<string, string> = {
   extra_usage_off:
     'Claude: Settings → Usage → turn off extra usage. ChatGPT: Settings → turn off automatic credit top-up.',
 };
-function ready(item?: SetupItem): boolean {
-  return item?.status === 'ok' || item?.status === 'manual_done';
+function ready(item: SetupItem | undefined, auth: AuthStatus | null, name?: string): boolean {
+  if (item?.status === 'ok' || item?.status === 'manual_done') return true;
+  if (name === 'claude_login') return auth?.claude.loggedIn === true;
+  if (name === 'chatgpt_login') return auth?.codex.loggedIn === true;
+  return false;
 }
 
 export function SetupChecklist() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
   const [auth, setAuth] = useState<AuthStatus | null>(null);
-  const { waitingFor, signIn, checkAgain } = useSignIn(setAuth, (message) =>
-    setError(message || null),
-  );
+  const {
+    waitingFor,
+    isChecking: signInChecking,
+    signIn,
+    checkAgain,
+  } = useSignIn(setAuth, (message) => setError(message || null));
   const items = setupItems.value;
   useEffect(() => {
-    void bridge
-      .call('auth/status', {})
-      .then(setAuth)
-      .catch((cause) => {
-        setError(EngineError.from(cause).message);
-      });
+    void checks();
   }, []);
   const itemFor = (name: string) => items.find((item) => item.name === name);
-  const allReady = items.length > 0 && items.every(ready);
+  const allReady = items.length > 0 && items.every((item) => ready(item, auth, item.name));
   async function checks() {
+    setChecking(true);
     try {
       const result = await bridge.call('setup/runChecks', {});
       setupItems.value = result.items;
       setAuth(await bridge.call('auth/status', {}));
     } catch (cause) {
       setError(EngineError.from(cause).message);
+    } finally {
+      setChecking(false);
     }
   }
   async function markManual(name: string) {
     try {
       const result = await bridge.call('setup/markManual', { item: name });
-      setupItems.value = items.map((item) => (item.name === name ? result : item));
+      setupItems.value = items.map((item) =>
+        item.name === result.item ? { ...item, status: result.status } : item,
+      );
     } catch (cause) {
       setError(EngineError.from(cause).message);
     }
@@ -68,13 +76,14 @@ export function SetupChecklist() {
       <div class="setup-card">
         <h1>Set up this computer</h1>
         <p class="muted">About 5 minutes. You only do this once.</p>
+        {checking && <p class="muted">Checking…</p>}
         {error && <p class="error">{error}</p>}
         <div class="checklist">
           {groups.map((group) => {
             const groupItems = group.names.map(itemFor);
-            const good = groupItems.every(ready);
-            const failed = groupItems.find((item) => item?.status === 'failed');
+            const good = groupItems.every((item) => ready(item, auth, item?.name));
             const login = group.names[0] === 'claude_login' || group.names[0] === 'chatgpt_login';
+            const failed = good ? undefined : groupItems.find((item) => item?.status === 'failed');
             const manual =
               group.names[0] === 'training_off' || group.names[0] === 'extra_usage_off';
             const name = group.names[0]!;
@@ -89,14 +98,19 @@ export function SetupChecklist() {
                 </span>
                 <div class="check-copy">
                   <strong>
-                    {name === 'chatgpt_login' && ready(item) ? 'Signed in to ChatGPT' : group.title}
+                    {name === 'chatgpt_login' && ready(item, auth, name)
+                      ? 'Signed in to ChatGPT'
+                      : group.title}
                   </strong>
                   <span class="muted">
-                    {failed?.detail ??
+                    {(failed &&
+                      (login && failed.detail === 'probe not supplied'
+                        ? 'Not signed in yet'
+                        : failed.detail)) ??
                       (waitingFor === (name === 'claude_login' ? 'claude' : 'codex')
                         ? 'Waiting for you to finish signing in in your browser…'
-                        : name === 'chatgpt_login' && ready(item)
-                          ? `Plan: ${auth?.codex.planType ?? 'unknown'} · weekly allowance ${auth?.codex.usagePercent ?? 0}% used`
+                        : name === 'chatgpt_login' && ready(item, auth, name)
+                          ? formatPlanUsage(auth?.codex.planType, auth?.codex.usagePercent)
                           : manual && expanded !== name
                             ? 'Manual check required.'
                             : '')}
@@ -117,9 +131,10 @@ export function SetupChecklist() {
                   )}
                   {login && waitingFor === (name === 'claude_login' ? 'claude' : 'codex') && (
                     <button
+                      disabled={signInChecking}
                       onClick={() => checkAgain(name === 'claude_login' ? 'claude' : 'codex')}
                     >
-                      Check again
+                      {signInChecking ? 'Checking…' : 'Check again'}
                     </button>
                   )}
                   {manual && !good && (

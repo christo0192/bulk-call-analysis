@@ -89,12 +89,76 @@ it('sign in starts the official flow and polls runChecks until ok', async () => 
     return checks >= 2 ? items() : pending;
   });
   renderChecklist(pending);
+  const runChecks = () =>
+    mockBridge.calls.filter((call) => call.method === 'setup/runChecks').length;
+  // The checklist runs the checks once when it opens; count only the polls after Sign in.
+  await vi.advanceTimersByTimeAsync(0);
+  const beforeSignIn = runChecks();
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-  await vi.advanceTimersByTimeAsync(10000);
+  await vi.advanceTimersByTimeAsync(15000);
   expect(screen.getByText('Signed in to ChatGPT')).toBeInTheDocument();
-  expect(mockBridge.calls.filter((call) => call.method === 'setup/runChecks')).toHaveLength(2);
-  await vi.advanceTimersByTimeAsync(10000);
-  expect(mockBridge.calls.filter((call) => call.method === 'setup/runChecks')).toHaveLength(2);
+  const afterSignIn = runChecks();
+  expect(afterSignIn - beforeSignIn).toBeGreaterThanOrEqual(1);
+  // Polling stops once the row is ok.
+  await vi.advanceTimersByTimeAsync(15000);
+  expect(runChecks()).toBe(afterSignIn);
+});
+
+it('login rows are ok when auth/status says signed in even if the probe is missing', async () => {
+  const failed = items([
+    { name: 'claude_login', status: 'failed', detail: 'probe not supplied' },
+    { name: 'chatgpt_login', status: 'failed', detail: 'probe not supplied' },
+  ]);
+  mockBridge.setResponse('setup/runChecks', async () => ({ items: failed }));
+  mockBridge.setResponse('auth/status', async () => ({
+    claude: { loggedIn: true },
+    codex: { loggedIn: true },
+  }));
+  renderChecklist(failed);
+  await waitFor(() => expect(screen.getByText('Signed in to ChatGPT')).toBeInTheDocument());
+  expect(screen.queryAllByText('Not signed in yet')).toHaveLength(0);
+});
+
+it('continue is enabled with the real-shaped checklist and signed-in auth', async () => {
+  const failed = items([
+    { name: 'claude_login', status: 'failed', detail: 'probe not supplied' },
+    { name: 'chatgpt_login', status: 'failed', detail: 'probe not supplied' },
+  ]);
+  mockBridge.setResponse('setup/runChecks', async () => ({ items: failed }));
+  mockBridge.setResponse('auth/status', async () => ({
+    claude: { loggedIn: true },
+    codex: { loggedIn: true },
+  }));
+  renderChecklist(failed);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled());
+});
+
+it('a missing login probe shows Not signed in yet, never the raw detail', async () => {
+  const failed = items([{ name: 'claude_login', status: 'failed', detail: 'probe not supplied' }]);
+  mockBridge.setResponse('setup/runChecks', async () => ({ items: failed }));
+  renderChecklist(failed);
+  await waitFor(() => expect(screen.getByText('Not signed in yet')).toBeInTheDocument());
+  expect(screen.queryByText('probe not supplied')).toBeNull();
+});
+
+it("I've checked updates the row from the {item, status} reply", async () => {
+  renderChecklist(items([{ name: 'training_off', status: 'manual_pending' }]));
+  mockBridge.setResponse('setup/markManual', async () => ({
+    item: 'training_off',
+    status: 'manual_done',
+  }));
+  fireEvent.click(screen.getByRole('button', { name: "I've checked" }));
+  const row = screen
+    .getByText('Model training is off in both accounts')
+    .closest('section') as HTMLElement;
+  await waitFor(() => expect(within(row).getByText('✓')).toBeInTheDocument());
+});
+
+it('the checklist runs the checks when it opens', async () => {
+  renderChecklist();
+  await waitFor(() =>
+    expect(mockBridge.calls.filter((call) => call.method === 'setup/runChecks')).toHaveLength(1),
+  );
 });
 
 it('sign in stops polling after five minutes', async () => {

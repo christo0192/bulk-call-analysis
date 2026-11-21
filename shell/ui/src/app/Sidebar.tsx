@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { bridge } from '../engine/bridge';
 import type { Project } from '../engine/types';
+import { EngineError } from '../engine/client';
 import {
   allowances,
   addProject,
@@ -13,20 +14,27 @@ import {
 import { BrandIcon, GearIcon } from './ui/icons';
 import { Pill } from './ui/Pill';
 
-function slugFor(title: string, existing: Project[]): string {
+export function slugFor(title: string, existing: Project[]): string {
   const base =
     title
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '') || 'project';
-  let id = base;
+  let id = /^[0-9]/.test(base) ? `p-${base}` : base;
+  if (id.length < 4) id += '-project';
+  id = id.slice(0, 64).replace(/-$/, '');
+  const root = id;
   let suffix = 2;
-  while (existing.some((project) => project.project === id)) id = `${base}-${suffix++}`;
+  while (existing.some((project) => project.project === id)) {
+    const ending = `-${suffix++}`;
+    id = `${root.slice(0, 64 - ending.length).replace(/-$/, '')}${ending}`;
+  }
   return id;
 }
 
 export function Sidebar() {
   const [title, setTitle] = useState('');
+  const [createError, setCreateError] = useState<string | null>(null);
   const open = newProjectOpen.value;
   useEffect(() => {
     if (!open) setTitle('');
@@ -36,11 +44,16 @@ export function Sidebar() {
   async function create() {
     const clean = title.trim();
     if (!clean) return;
-    const project = slugFor(clean, projects.value);
-    const created = await bridge.call('projects/create', { project, title: clean });
-    addProject(created);
-    selectedProject.value = project;
-    newProjectOpen.value = false;
+    setCreateError(null);
+    try {
+      const project = slugFor(clean, projects.value);
+      const created = await bridge.call('projects/create', { project, title: clean });
+      addProject(created);
+      selectedProject.value = project;
+      newProjectOpen.value = false;
+    } catch (error) {
+      setCreateError(EngineError.from(error).message);
+    }
   }
   return (
     <aside class="sidebar">
@@ -73,6 +86,7 @@ export function Sidebar() {
             onInput={(event) => setTitle((event.currentTarget as HTMLInputElement).value)}
             autoFocus
           />
+          {createError && <p class="error">{createError}</p>}
           <button class="primary" type="submit">
             Create
           </button>
@@ -81,7 +95,11 @@ export function Sidebar() {
       <div class="side-label">Projects</div>
       <nav aria-label="Projects">
         {projects.value.map((project) => {
-          const done = jobsByProject.value[project.project]?.[0]?.done;
+          const job =
+            jobsByProject.value[project.project]?.find(
+              (item) => !['done', 'done_with_issues', 'failed', 'cancelled'].includes(item.state),
+            ) ?? jobsByProject.value[project.project]?.[0];
+          const done = job?.done;
           return (
             <button
               class={`project ${selectedProject.value === project.project ? 'selected' : ''}`}
@@ -91,15 +109,17 @@ export function Sidebar() {
               }}
             >
               <span>{project.title}</span>
-              {project.status === 'done' || project.status === 'done_with_issues' ? (
+              {job?.state === 'done' || job?.state === 'done_with_issues' ? (
                 <small class="muted-status">
-                  {project.status === 'done_with_issues' ? 'Done with issues' : 'Done'}
+                  {job.state === 'done_with_issues' ? 'Done with issues' : 'Done'}
                   {done === undefined
                     ? ''
                     : ` ${String.fromCharCode(183)} ${done.toLocaleString()} leads`}
                 </small>
+              ) : job ? (
+                <Pill state={job.state} />
               ) : (
-                <Pill state={project.status} />
+                <small class="muted-status">No job yet</small>
               )}
             </button>
           );
