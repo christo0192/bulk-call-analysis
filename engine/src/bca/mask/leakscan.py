@@ -58,11 +58,21 @@ _spoken_email_net = re.compile(
     r"(?ix)(?:@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*"
     r"(?:[a-z0-9_-]+\s+){0,6}(?:dot|\.)\s+[a-z]{2,}\b"
 )
+_spoken_webmail_net = re.compile(
+    r"(?ix)(?<!\w)(?:[a-z0-9][\w.-]*\s+(?:at\s+(?:the\s+rate(?:\s+of)?\s+)?|at\s+the\s+rate\s+)?|[a-z0-9][\w.-]*@)"
+    r"(?:g\s?mail|yahoo|ymail|hotmail|outlook|rediff(?:mail)?|icloud|protonmail)\b"
+)
 
 
 def _scan_spoken_email_net(text: str) -> list[Hit]:
     scrubbed = _placeholder.sub(lambda match: " " * len(match.group()), text)
-    return [Hit("EMAIL_LIKE", match.start(), match.end()) for match in _spoken_email_net.finditer(scrubbed)]
+    matches = list(_spoken_email_net.finditer(scrubbed))
+    matches.extend(
+        match
+        for match in _spoken_webmail_net.finditer(scrubbed)
+        if match.group().split(maxsplit=1)[0].casefold() not in {"check", "please", "email", "mail"}
+    )
+    return [Hit("EMAIL_LIKE", match.start(), match.end()) for match in matches]
 
 
 def scan_text(

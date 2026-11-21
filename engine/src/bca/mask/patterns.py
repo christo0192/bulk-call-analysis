@@ -30,6 +30,10 @@ _card = re.compile(r"(?<!\d)(?:\d[ -.]?){13,19}(?!\d)")
 _digits = re.compile(r"(?<![\d\w])\d(?:(?:[,./-]\s*|\s+)?\d){5,}(?![\d\w])")
 _url = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>]+|\b(?:linkedin|github|instagram)\.com/[^\s<>]+")
 _upi = re.compile(r"(?i)(?<!\w)[\w.-]+@(?:okaxis|oksbi|okhdfcbank|ybl|paytm|upi|ibl|icici)\b")
+_spoken_domain = re.compile(
+    r"(?i)\b(?:g\s?mail|yahoo|ymail|hotmail|outlook|rediff(?:mail)?|icloud|protonmail)\b"
+    r"(?:\s*(?:\.|dot)\s*(?:com|in|co|net|org)\b)?"
+)
 _spoken_email = re.compile(
     r"(?ix)(?<![\w@])"
     r"(?:@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*"
@@ -82,7 +86,71 @@ def _money_spans(text: str) -> list[tuple[int, int]]:
 
 
 def _spoken_email_replacements(text: str) -> list[tuple[int, int]]:
-    replacements: set[tuple[int, int]] = set()
+    replacements: list[tuple[int, int]] = []
+    stop = {
+        "is",
+        "id",
+        "email",
+        "mail",
+        "your",
+        "my",
+        "address",
+        "that",
+        "sir",
+        "it",
+        "to",
+        "on",
+        "me",
+        "send",
+        "sent",
+        "for",
+        "this",
+        "and",
+        "or",
+        "in",
+        "please",
+        "yes",
+        "so",
+        "okay",
+        "ok",
+        "its",
+        "it's",
+        "will",
+        "you",
+        "have",
+        "has",
+        "was",
+        "be",
+        "check",
+        "same",
+        "registered",
+        "official",
+    }
+    connectors = {"at", "the", "rate", "of", "@"}
+    for domain in _spoken_domain.finditer(text):
+        tokens = list(re.finditer(r"\S+", text[: domain.start()]))
+        if not tokens:
+            continue
+        j = len(tokens)
+        while j and tokens[j - 1].group().strip(",.?!").casefold() in connectors:
+            j -= 1
+        k, meaningful = j, 0
+        while k:
+            token = tokens[k - 1].group().strip(",.?!")
+            if len(token) > 1 and token.casefold() in stop:
+                break
+            if meaningful >= 6:
+                break
+            meaningful += len(token) > 1
+            k -= 1
+        if k != j:
+            replacements.append((tokens[k].start(), domain.end()))
+
+    return replacements
+
+
+def _generic_spoken_email_replacements(text: str) -> list[tuple[int, int]]:
+    replacements: list[tuple[int, int]] = []
     stop = {
         "is",
         "id",
@@ -123,24 +191,45 @@ def _spoken_email_replacements(text: str) -> list[tuple[int, int]]:
         "official",
         "contact",
     }
+    local_token = re.compile(r"(?i)[a-z0-9]+(?:[._-][a-z0-9]+)*|[._-]")
+    single_words = {word.casefold() for word in _number_word.findall(text)}
+    punctuation = set(",.;:!?()\"'")
     for match in _spoken_email.finditer(text):
-        separator_start = match.start()
-        tokens = list(re.finditer(r"\S+", text[:separator_start]))
-        start = separator_start
-        taken = 0
-        for taken, token in enumerate(reversed(tokens), start=1):
-            value = token.group()
-            if not re.fullmatch(r"(?i)[a-z0-9]+(?:[._-][a-z0-9]+)*|[._-]", value):
+        tokens = list(re.finditer(r"\S+", text[: match.start()]))
+        start = match.start()
+        single_count = word_count = 0
+        accepted: list[tuple[int, int, bool]] = []
+        for index in range(len(tokens) - 1, -1, -1):
+            token = tokens[index]
+            raw = token.group()
+            left = len(raw) - len(raw.lstrip(" ,.;:!?()\"'"))
+            right = len(raw.rstrip(" ,.;:!?()\"'"))
+            value = raw[left:right]
+            if not value or not local_token.fullmatch(value):
                 break
-            if value.casefold() in stop:
+            is_single = len(value) == 1 or value.casefold() in single_words
+            if len(value) > 1 and value.casefold() in stop:
                 break
-            start = token.start()
-            if taken == 6:
+            trailing_punctuation = raw[right:]
+            if trailing_punctuation and not is_single:
                 break
-        replacements.add((start, match.end()))
-    # Spoken website-like addresses are intentionally caught too: privacy wins
-    # over precision, so a harmless word before "at example dot com" may mask.
-    return sorted(replacements)
+            if index < len(tokens) - 1:
+                gap = text[token.end() : tokens[index + 1].start()]
+                if any(char in punctuation for char in gap) and not (is_single and accepted[-1][2]):
+                    break
+            if is_single:
+                if single_count >= 12:
+                    break
+                single_count += 1
+            else:
+                if word_count >= 6:
+                    break
+                word_count += 1
+            accepted.append((token.start() + left, token.start() + right, is_single))
+            start = token.start() + left
+        if accepted:
+            replacements.append((start, match.end()))
+    return replacements
 
 
 def _number_word_spans(text: str) -> list[tuple[int, int]]:
@@ -173,10 +262,26 @@ def apply_patterns(
 ) -> tuple[str, dict[str, int]]:
     counts: dict[str, int] = {}
     spans: list[tuple[int, int, str, str]] = []
-    for start, end in _spoken_email_replacements(text):
+    email_spans = set(_spoken_email_replacements(text) + _generic_spoken_email_replacements(text))
+    for start, end in email_spans:
+        while start < end and text[start] in "(\"'":
+            start += 1
         counts["EMAIL"] = counts.get("EMAIL", 0) + 1
         spans.append((start, end, "[EMAIL]", "EMAIL"))
-    protected = _money_spans(text)
+    enclosing = [
+        match.span()
+        for detector in DETECTORS
+        if detector.name in {"EMAIL", "URL", "UPI"}
+        for match in detector.regex.finditer(text)
+    ]
+    protected = [
+        span
+        for span in _money_spans(text)
+        if not any(
+            enclosing_start <= span[0] and span[1] <= enclosing_end
+            for enclosing_start, enclosing_end in enclosing
+        )
+    ]
     structured = _money_spans(text) + [
         match.span()
         for detector in (
