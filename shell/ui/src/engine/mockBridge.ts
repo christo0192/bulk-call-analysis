@@ -105,8 +105,9 @@ export class MockBridge implements EngineBridge {
     if (method === 'chat/send') {
       const text = (params as { text: string }).text;
       const turn = `turn-${Date.now()}`;
+      const entryId = this.chatEntries.length + 1;
       this.chatEntries.push({
-        id: this.chatEntries.length + 1,
+        id: entryId,
         ts: Date.now(),
         turn,
         role: 'user',
@@ -115,55 +116,72 @@ export class MockBridge implements EngineBridge {
       const answer =
         'I checked the read-only data. The plan below keeps the transcripts masked and starts with a small sample so you can verify the answers.';
       return new Promise((resolve) => {
-        const chunks = [answer.slice(0, 45), answer.slice(45, 100), answer.slice(100)];
+        const emitEvent = (event: Record<string, unknown>) =>
+          this.emit({
+            jsonrpc: '2.0',
+            method: 'chat/event',
+            params: {
+              project: (params as { project: string }).project,
+              event: { ...event, turn, entryId },
+            },
+          });
+        emitEvent({ kind: 'system', data: { subtype: 'init' } });
+        const chunks = [answer.slice(0, 45), answer.slice(45, 100)];
         chunks.forEach((delta, index) =>
           setTimeout(
-            () =>
-              this.emit({
-                jsonrpc: '2.0',
-                method: 'chat/event',
-                params: {
-                  project: (params as { project: string }).project,
-                  event: { kind: 'assistant_delta', turn, data: { delta: { text: delta } } },
-                },
-              }),
+            () => emitEvent({ kind: 'assistant_delta', data: { delta: { text: delta } } }),
             index * 500,
           ),
         );
-        ['bq_query', 'bq_dry_run', 'propose_job'].forEach((name, index) =>
+        const tools = [
+          ['bq_query', 'tool-1'],
+          ['bq_dry_run', 'tool-2'],
+          ['propose_job', 'tool-3'],
+        ];
+        tools.forEach(([name, id], index) =>
           setTimeout(
-            () =>
-              this.emit({
-                jsonrpc: '2.0',
-                method: 'chat/event',
-                params: {
-                  project: (params as { project: string }).project,
-                  event: { kind: 'tool_result', turn, data: { name } },
+            () => {
+              emitEvent({
+                kind: 'tool_use',
+                data: {
+                  message: {
+                    content: [{ type: 'tool_use', id, name: `mcp__bq__${name}`, input: {} }],
+                  },
                 },
-              }),
+              });
+              setTimeout(
+                () =>
+                  emitEvent({
+                    kind: 'tool_result',
+                    data: {
+                      message: { content: [{ type: 'tool_result', tool_use_id: id, content: [] }] },
+                    },
+                  }),
+                100,
+              );
+            },
             150 + index * 400,
           ),
         );
+        setTimeout(
+          () =>
+            emitEvent({ kind: 'assistant_delta', data: { delta: { text: answer.slice(100) } } }),
+          700,
+        );
+        const finalText = answer;
         setTimeout(() => {
           this.chatEntries.push({
             id: this.chatEntries.length + 1,
             ts: Date.now(),
             turn,
             role: 'assistant',
-            text: answer,
+            text: finalText,
           });
-          this.emit({
-            jsonrpc: '2.0',
-            method: 'chat/event',
-            params: {
-              project: (params as { project: string }).project,
-              event: {
-                kind: 'assistant',
-                turn,
-                data: { message: { content: [{ type: 'text', text: answer }] } },
-              },
-            },
+          emitEvent({
+            kind: 'assistant',
+            data: { message: { content: [{ type: 'text', text: finalText }] } },
           });
+          emitEvent({ kind: 'result', data: { result: finalText } });
           this.emit({
             jsonrpc: '2.0',
             method: 'chat/event',
@@ -176,7 +194,7 @@ export class MockBridge implements EngineBridge {
             status: 'completed',
             project: (params as { project: string }).project,
           } as ResultOf<M>);
-        }, 1600);
+        }, 1000);
       }) as Promise<ResultOf<M>>;
     }
     if (method === 'chat/stop')

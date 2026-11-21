@@ -7,7 +7,7 @@ export function ChatDrawer({ visible, toggle }: { visible: boolean; toggle: () =
         <span>Chat</span>
         <button onClick={toggle}>Hide ›</button>
       </div>
-      <Chat project={selectedProject.value ?? ''} />
+      <Chat key={selectedProject.value ?? ''} project={selectedProject.value ?? ''} />
     </aside>
   ) : (
     <aside class="chat-tab">

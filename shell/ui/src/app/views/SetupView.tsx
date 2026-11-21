@@ -6,7 +6,7 @@ export function SetupView({ id, state }: { id?: string; state?: string }) {
   const project = selectedProject.value ?? '';
   return (
     <div class="phase-view" data-testid="setup-view">
-      <Chat project={project} />
+      <Chat key={project} project={project} />
       {id && state === 'planned' && <PlanCard job={id} />}
       <span class="sr-only">Job {id}</span>
     </div>

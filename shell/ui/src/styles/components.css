@@ -293,12 +293,16 @@
   width: 100%;
   outline: none;
 }
+.composer:focus-within {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+}
 .composer-actions {
   display: flex;
   justify-content: space-between;
   gap: 8px;
 }
-.composer-actions button,
+.composer-actions button:not(.primary),
 .attach-panel button {
   border: 1px solid var(--line2);
   background: #fff;

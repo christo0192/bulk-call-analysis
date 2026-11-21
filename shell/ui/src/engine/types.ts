@@ -47,6 +47,7 @@ export type ChatEntry = {
   role: 'user' | 'assistant' | 'tool' | 'status';
   text?: string;
   name?: string;
+  toolId?: string;
   status?: 'started' | 'done' | 'failed';
   summary?: string;
 };
@@ -185,7 +186,7 @@ export type MethodMap = {
   // planned (M002-S01)
   'projects/jobs': { params: { project: string }; result: { jobs: JobSummary[] } };
   'chat/history': {
-    params: { project: string; before?: string; limit?: number };
+    params: { project: string; before?: number; limit?: number };
     result: { entries: ChatEntry[]; more: boolean };
   };
   'job/snapshot': { params: { job: string }; result: JobSnapshot };
