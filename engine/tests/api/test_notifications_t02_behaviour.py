@@ -137,11 +137,19 @@ def test_job_progress_identity_holds_through_the_api(tmp_path: Path, monkeypatch
     run(scenario())
     assert sent
     fields = ("done", "inFlight", "retrying", "failed", "heldBack", "remaining", "total")
+    store_remaining = int(
+        backend.store.rows(
+            "SELECT count(*) FROM leads WHERE job_id=? AND status IN "
+            "('pending', 'pulled', 'masked', 'queued', 'not_started') AND in_sample=1",
+            ("job-one",),
+        )[0][0]
+    )
     for message in sent:
         params = cast(dict[str, object], message["params"])
         assert all(isinstance(params[field], int) and not isinstance(params[field], bool) for field in fields)
         values = [cast(int, params[field]) for field in fields]
         assert sum(values[:-1]) == values[-1]
+        assert params["remaining"] == store_remaining
 
 
 def test_heartbeat_publishes_counts_eta_and_activity_while_running(
@@ -165,17 +173,20 @@ def test_heartbeat_publishes_counts_eta_and_activity_while_running(
     monkeypatch.setattr("bca.coordinator.runner.asyncio.sleep", fast_sleep)
 
     async def scenario() -> None:
-        task = asyncio.create_task(runner._heartbeat(), name="bca-heartbeat-test")
-        runner._phase_running = True
-        # Give the heartbeat enough scheduling turns to run at least two 10 s ticks of fake time.
+        await backend.call("job/approvePlan", {"job": "job-one", "expectedSpecVersion": 1})
+        await _wait_state(backend, "sample_running", 30, 0.02)
+        for _ in range(50):
+            if runner._heartbeat_task is not None:
+                break
+            await asyncio.sleep(0)
+        task = runner._heartbeat_task
+        assert task is not None
         for _ in range(50):
             await asyncio.sleep(0)
             events.extend(subscription.drain())
             if len([event for event in events if event.kind == "activity"]) >= 2:
                 break
-        runner._phase_running = False
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        await runner._stop_heartbeat()
 
     run(scenario())
     kinds = {event.kind for event in events}
@@ -187,13 +198,20 @@ def test_heartbeat_publishes_counts_eta_and_activity_while_running(
 
 def test_heartbeat_stops_on_pause_and_on_driver_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     backend, _ = _tiny_job(tmp_path, monkeypatch, latency_ms=500)
+    clock = FakeClock()
+    backend.clock = clock
     runner = backend.jobs.runner("job-one")
+    subscription = backend.event_bus.subscribe()
 
     async def scenario() -> None:
         await backend.call("job/approvePlan", {"job": "job-one", "expectedSpecVersion": 1})
         await _wait_state(backend, "sample_running", 30, 0.02)
+        subscription.drain()
         await backend.call("job/pause", {"job": "job-one"})
         assert runner._heartbeat_task is None
+        clock.advance(30)
+        await asyncio.sleep(0)
+        assert not [event for event in subscription.drain() if event.kind in {"counts", "activity", "eta"}]
         runner.request_stop()
         await backend.jobs.stop("job-one")
         assert runner._heartbeat_task is None
@@ -205,12 +223,10 @@ def test_activity_event_reports_last_activity_and_workers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     backend, _ = _tiny_job(tmp_path, monkeypatch, latency_ms=1)
+    clock = FakeClock()
+    backend.clock = clock
     runner = backend.jobs.runner("job-one")
     subscription = backend.event_bus.subscribe()
-    runner._last_activity_ts = 42.0
-    runner._phase_running = True
-    runner._publish("activity", {"last_activity_ts": runner._last_activity_ts, "in_flight": 2, "workers": 4})
-    event = subscription.drain()[0]
     sent: list[dict[str, object]] = []
 
     async def scenario() -> None:
@@ -220,12 +236,22 @@ def test_activity_event_reports_last_activity_and_workers(
             sent.append(message)
 
         service.notify = notify
-        await service.publish_event(event)
+        await backend.call("job/approvePlan", {"job": "job-one", "expectedSpecVersion": 1})
+        await _wait_state(backend, "sample_ready", 60, 0.02)
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if runner._last_activity_ts is not None:
+                break
+        for event in subscription.drain():
+            await service.publish_event(event)
 
     run(scenario())
-    assert sent[0]["method"] == "engine/event"
-    assert cast(dict[str, object], sent[0]["params"])["workers"] == 4
-    assert cast(dict[str, object], sent[0]["params"])["last_activity_ts"] == 42.0
+    activity = next(
+        message for message in sent if cast(dict[str, object], message["params"]).get("kind") == "activity"
+    )
+    params = cast(dict[str, object], activity["params"])
+    assert cast(int, params["workers"]) >= 1
+    assert isinstance(params["last_activity_ts"], float)
 
 
 def test_chat_send_reports_claude_extra_usage_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
