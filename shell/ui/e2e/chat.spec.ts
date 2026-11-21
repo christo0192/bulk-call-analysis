@@ -33,16 +33,23 @@ test('cards: approve plan → sample card → approve sample → start card → 
 }) => {
   await page.goto('/');
   await page.getByRole('button', { name: /Discount questions/ }).click();
-  const background = await page
-    .getByRole('button', { name: 'Approve plan' })
-    .evaluate((button) => getComputedStyle(button).backgroundColor);
-  expect(background).not.toMatch(/transparent|rgba?\(255, 255, 255/);
   await page.getByRole('button', { name: 'Approve plan' }).click();
   await expect(page.getByRole('heading', { name: /Sample/ })).toBeVisible({ timeout: 5000 });
   await page.getByRole('button', { name: 'Approve sample' }).click();
   await expect(page.getByRole('heading', { name: 'Start the full run?' })).toBeVisible();
   await page.getByRole('button', { name: 'Start full run' }).click();
   await expect(page.getByTestId('run-view')).toBeVisible();
+});
+
+test('primary buttons are visible', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: /Discount questions/ }).click();
+  for (const name of ['Approve plan', 'Send']) {
+    const background = await page
+      .getByRole('button', { name })
+      .evaluate((button) => getComputedStyle(button).backgroundColor);
+    expect(background).not.toMatch(/transparent|rgba?\(255, 255, 255/);
+  }
 });
 
 test('sidebar survives a claude allowance without windows', async ({ page }) => {

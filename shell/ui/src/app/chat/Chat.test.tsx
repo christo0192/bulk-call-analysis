@@ -1,5 +1,35 @@
-import { expect, it } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { beforeEach, expect, it, vi } from 'vitest';
 import { cleanTool } from './Chat';
+import { Chat } from './Chat';
+import { mockBridge } from '../../engine/bridge';
+
+const entry = (id: number, role: 'user' | 'assistant' | 'status', text: string, turn = 't1') => ({
+  id,
+  ts: id,
+  turn,
+  role,
+  text,
+});
+
+beforeEach(() => {
+  mockBridge.calls = [];
+  mockBridge.clearResponses();
+  mockBridge.setResponse('chat/history', async () => ({ entries: [], more: false }));
+  mockBridge.setResponse('chat/send', async () => ({ status: 'completed', project: 'p1' }));
+});
+
+function chat() {
+  return render(<Chat project="p1" />);
+}
+
+function event(kind: string, data: Record<string, unknown>, turn = 'live') {
+  mockBridge.emit({
+    jsonrpc: '2.0',
+    method: 'chat/event',
+    params: { project: 'p1', event: { kind, turn, data } },
+  });
+}
 
 it('labels bq queries', () => expect(cleanTool('bq_query')).toBe('Ran a read-only query'));
 it('labels dry runs', () => expect(cleanTool('bq_dry_run')).toBe('Checked the scan size'));
@@ -22,3 +52,141 @@ it('strips bq tool prefixes', () =>
 it('uses a safe label for unknown tools', () =>
   expect(cleanTool('unknown_tool')).toBe('unknown_tool'));
 it('uses a safe label for missing tools', () => expect(cleanTool()).toBe('Used a tool'));
+
+it('two turns render in order with no duplicates after reload', async () => {
+  const history = [
+    entry(1, 'user', 'first'),
+    entry(2, 'assistant', 'reply one'),
+    entry(3, 'user', 'second'),
+    entry(4, 'assistant', 'reply two'),
+  ];
+  mockBridge.setResponse('chat/history', async () => ({ entries: history, more: false }));
+  const view = chat();
+  await waitFor(() => expect(screen.getAllByText(/reply/)).toHaveLength(2));
+  expect(screen.getAllByText(/reply/).map((item) => item.textContent)).toEqual([
+    'reply one',
+    'reply two',
+  ]);
+  view.unmount();
+  chat();
+  await waitFor(() => expect(screen.getAllByText(/reply/)).toHaveLength(2));
+});
+
+it('streamed text accumulates across many deltas with the same entryId', async () => {
+  chat();
+  event('assistant_delta', { delta: { text: 'one ' } });
+  event('assistant_delta', { delta: { text: 'two ' } });
+  event('assistant_delta', { delta: { text: 'three' } });
+  expect(await screen.findByText('one two three')).toBeInTheDocument();
+  expect(screen.getAllByText('one two three')).toHaveLength(1);
+});
+
+it('text after a tool call shows live', async () => {
+  chat();
+  event('tool_use', { message: { content: [{ type: 'tool_use', id: 'x', name: 'bq_query' }] } });
+  event('assistant_delta', { delta: { text: 'after tool' } });
+  expect(await screen.findByText('after tool')).toBeInTheDocument();
+});
+
+it('stop mid-stream keeps the user message and the partial reply', async () => {
+  mockBridge.setResponse('chat/send', async () => new Promise(() => undefined));
+  chat();
+  fireEvent.input(screen.getByRole('textbox'), { target: { value: 'question' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  event('assistant_delta', { delta: { text: 'partial' } });
+  fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+  expect(screen.getByText('question')).toBeInTheDocument();
+  expect(screen.getByText('partial')).toBeInTheDocument();
+  expect(mockBridge.calls).toContainEqual({ method: 'chat/stop', params: { project: 'p1' } });
+});
+
+it('tool line starts on tool_use and completes on the matching tool_result', async () => {
+  chat();
+  event('tool_use', { message: { content: [{ type: 'tool_use', id: 'x', name: 'bq_query' }] } });
+  const row = await screen.findByText('Ran a read-only query');
+  expect(row.querySelector('.tool-running')).not.toBeNull();
+  event('tool_result', { message: { content: [{ type: 'tool_result', tool_use_id: 'x' }] } });
+  await waitFor(() => expect(row.querySelector('.tool-done')).not.toBeNull());
+});
+
+it('missing chat history shows no error and keeps live items', async () => {
+  mockBridge.setResponse('chat/history', async () => {
+    throw 'RPC error -32601: Method not found';
+  });
+  chat();
+  event('assistant_delta', { delta: { text: 'still live' } });
+  expect(await screen.findByText('still live')).toBeInTheDocument();
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('consecutive turns without history stay separate', async () => {
+  chat();
+  event('assistant_delta', { delta: { text: 'first' } }, 'turn-1');
+  event('assistant_delta', { delta: { text: 'second' } }, 'turn-2');
+  expect(await screen.findByText('first')).toBeInTheDocument();
+  expect(screen.getByText('second')).toBeInTheDocument();
+});
+
+it('show earlier sends the smallest persisted id as a number', async () => {
+  mockBridge.setResponse('chat/history', async (params) =>
+    (params as { before?: number }).before === undefined
+      ? { entries: [entry(8, 'user', 'new'), entry(11, 'assistant', 'new reply')], more: true }
+      : { entries: [entry(2, 'assistant', 'old')], more: false },
+  );
+  chat();
+  fireEvent.click(await screen.findByRole('button', { name: 'Show earlier messages' }));
+  await waitFor(() => expect(screen.getByText('old')).toBeInTheDocument());
+  expect(mockBridge.calls).toContainEqual({
+    method: 'chat/history',
+    params: { project: 'p1', before: 8, limit: 50 },
+  });
+});
+
+it("switching projects shows only that project's chat", async () => {
+  const view = chat();
+  event('assistant_delta', { delta: { text: 'project one' } });
+  view.rerender(<Chat project="p2" />);
+  expect(screen.queryByText('project one')).toBeNull();
+  mockBridge.emit({
+    jsonrpc: '2.0',
+    method: 'chat/event',
+    params: {
+      project: 'p2',
+      event: { kind: 'assistant_delta', turn: 'p2', data: { delta: { text: 'project two' } } },
+    },
+  });
+  expect(await screen.findByText('project two')).toBeInTheDocument();
+});
+
+it('a failed send restores the text and does not show the message as sent', async () => {
+  mockBridge.setResponse('chat/send', async () => {
+    throw new Error('offline');
+  });
+  chat();
+  fireEvent.input(screen.getByRole('textbox'), { target: { value: 'retry me' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('retry me'));
+  expect(screen.queryByText('retry me', { selector: '.chat-user' })).toBeNull();
+});
+
+it('a long history opens scrolled to the latest message', async () => {
+  mockBridge.setResponse('chat/history', async () => ({
+    entries: Array.from({ length: 60 }, (_, i) =>
+      entry(i + 1, i % 2 ? 'assistant' : 'user', `message ${i}`),
+    ),
+    more: false,
+  }));
+  chat();
+  await screen.findByText('message 59');
+  expect(screen.queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+});
+
+it('status entries are not labelled as Claude', async () => {
+  mockBridge.setResponse('chat/history', async () => ({
+    entries: [entry(1, 'status', 'Turn ended')],
+    more: false,
+  }));
+  chat();
+  expect(await screen.findByText('Turn ended')).toBeInTheDocument();
+  expect(screen.queryByText('Claude')).toBeNull();
+});
