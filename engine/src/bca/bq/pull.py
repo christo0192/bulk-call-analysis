@@ -43,6 +43,20 @@ class Bundle:
     chars: int
 
 
+def _scan_allowed(dry_bytes: int, reject_bytes: int, approved_bytes: int | None) -> bool:
+    if dry_bytes <= reject_bytes:
+        return True
+    return approved_bytes is not None and dry_bytes <= int(approved_bytes * 1.10)
+
+
+def _scan_error(dry_bytes: int, approved_bytes: int | None) -> PermissionError:
+    if approved_bytes is None:
+        return PermissionError("scan exceeds reject_bytes without operator approval")
+    return PermissionError(
+        f"scan is {dry_bytes} bytes, above the approved tolerance of {int(approved_bytes * 1.10)} bytes"
+    )
+
+
 def _duration(call: dict[str, object], unit: str) -> float:
     value = call.get("duration")
     if not isinstance(value, (int, float)):
@@ -72,8 +86,8 @@ def run_preflight(
     sql, params, _ = preflight_sql(recipe, usable_rule, scope, window)
     params["lead_ids"] = lead_ids
     dry = runner.dry_run(sql, params)
-    if dry.bytes > cfg.reject_bytes and (approved_bytes is None or approved_bytes < dry.bytes):
-        raise PermissionError("scan exceeds reject_bytes without operator approval")
+    if not _scan_allowed(dry.bytes, cfg.reject_bytes, approved_bytes):
+        raise _scan_error(dry.bytes, approved_bytes)
     rows = []
     for page in runner.iter_pages(sql, params, 1000):
         if stop_requested is not None and stop_requested():
@@ -139,8 +153,8 @@ def pull_transcripts(
     sql, params, _ = pull_sql(recipe, scope, window)
     params["lead_ids"] = lead_ids
     dry = runner.dry_run(sql, params)
-    if dry.bytes > cfg.reject_bytes and (approved_bytes is None or approved_bytes < dry.bytes):
-        raise PermissionError("scan exceeds reject_bytes without operator approval")
+    if not _scan_allowed(dry.bytes, cfg.reject_bytes, approved_bytes):
+        raise _scan_error(dry.bytes, approved_bytes)
     raw_dir = out_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     counts: dict[str, int] = {lead_id: 0 for lead_id in lead_ids}

@@ -31,6 +31,7 @@ from bca.mask.leakscan import Hit, LeakReport
 from bca.mask.masker import MaskingContext
 from bca.monitor.events import EventBus
 from bca.outputs.verify import VerifyReport, verify_job
+from bca.paths import job_dir as canonical_job_dir
 from bca.store import JobSpec, JobState, LeadSourceIds, QuoteField, Store, open_store, reconcile, save_spec
 from tests.fakes import fake_codex
 from tests.fakes.fake_bq import FakeBqRunner
@@ -223,7 +224,7 @@ def _make_rows(
                         "lead_id": lead_id,
                         "call_id": f"call-{lead_id}-synthetic-{call_index}",
                         "transcript_text": text,
-                        "call_start": "synthetic-start",
+                        "call_start": "2026-09-01T10:00:00+00:00",
                         "duration": 30 if group == 2 else 200,
                     }
                 )
@@ -676,7 +677,7 @@ async def _run_stdio_api(
     calls: list[dict[str, object]],
 ) -> SimResult:
     data_dir = root / "stdio-data"
-    job_dir = data_dir / "projects" / "synthetic-project" / "scenario"
+    job_dir = canonical_job_dir(data_dir, "synthetic-project", "scenario")
     data_dir.mkdir()
     (data_dir / ".bca-test-fakes").touch()
     (data_dir / "site.toml").write_text(

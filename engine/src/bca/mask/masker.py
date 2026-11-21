@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .fields import map_free_text_values
 from .names import HarvestMissing, NerBackend, mask_names, roster_pattern
 from .patterns import apply_patterns
 
@@ -78,22 +79,16 @@ def mask_text(text: str, ctx: MaskingContext) -> Masked:
     return Masked(current, counts)
 
 
-def _mask_value(value: Any, ctx: MaskingContext, counts: dict[str, int]) -> Any:
-    if isinstance(value, str):
+def _mask_record(record: dict[str, Any], ctx: MaskingContext) -> tuple[dict[str, Any], dict[str, int]]:
+    counts: dict[str, int] = {}
+
+    def mask_value(value: str) -> str:
         masked = mask_text(value, ctx)
         for name, count in masked.counts_by_detector.items():
             counts[name] = counts.get(name, 0) + count
         return masked.text
-    if isinstance(value, dict):
-        return {key: _mask_value(item, ctx, counts) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_mask_value(item, ctx, counts) for item in value]
-    return value
 
-
-def _mask_record(record: dict[str, Any], ctx: MaskingContext) -> tuple[dict[str, Any], dict[str, int]]:
-    counts: dict[str, int] = {}
-    return _mask_value(record, ctx, counts), counts
+    return map_free_text_values(record, mask_value), counts
 
 
 def mask_lead_stream(raw_file: Path, out_file: Path, ctx: MaskingContext) -> LeadMaskStats:

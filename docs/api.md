@@ -30,7 +30,7 @@ successful results.
 | `job/startFull` | `{job}` | Current job status |
 | `job/pause` | `{job}` | Current job status |
 | `job/resume` | `{job}` | Current job status |
-| `job/rebuildRules` | `{job, rules}` | `{job, path}` |
+| `job/rebuildRules` | `{job, rules}` | `{job, path, rebuild}`; writes `results.v{spec}.rebuild{n}.xlsx` |
 | `auth/claudeLogin` | `{}` | `{started: true, vendor: "claude"}` |
 | `auth/codexLogin` | `{}` | `{started: true, vendor: "codex"}` |
 | `auth/status` | `{}` | Safe Claude and Codex login/plan status |
@@ -42,7 +42,24 @@ successful results.
 It is exempt from the generic 30-second request timeout, but it can be
 cancelled with `chat/stop` or by shutdown. Only one turn per project runs at a
 time. Chat events are streamed while the turn runs. Operator-facing file
-listing excludes chat, model, raw, masked, and other engine-internal files.
+listing excludes chat, model, `jobs/*/raw`, `jobs/*/masked`, and other engine-internal files.
+
+Job specifications and preflight records live in the canonical folder
+`<dataDir>/projects/<project>/jobs/<job>/`. Each proposal writes
+`spec.vN.json` and `preflight.vN.json`; the latter contains bucket counts,
+scan bytes, capped leads, and id-intake counts. An approved scan may vary by
+up to 10% before the runner refuses it.
+
+`job/rebuildRules` parses and validates rules against the stored output schema.
+Invalid rules return `-32602` with
+`{reason: "invalid_rules", detail: "..."}`. Rebuilds do not change stored
+answers and use a per-spec rebuild number.
+
+After output verification, the job folder contains
+`output/verify-report.vN.md` and `output/reconciliation.vN.json`. The report
+includes the reconciliation equation and issue-group counts; the JSON contains
+integer status terms, `selected_distinct_ids`, `duplicates_removed`, and
+`adds_up`.
 
 Job requests validate and schedule work; they do not perform long-running job
 work before returning. There is one driver per job. A pause is persisted
@@ -64,7 +81,8 @@ The engine uses these JSON-RPC errors:
   applicable. Known reasons include `job_not_found`, `job_not_running`,
   `job_not_paused`, `job_stalled`, `sample_not_approved`,
   `stale_spec_version`, `invalid_job_state`, `background_task_failed`,
-  `app_server_unavailable`, `claude_turn_failed`, `filesystem_unavailable`,
+  `app_server_unavailable`, `claude_turn_failed`, `claude_extra_usage_on`,
+  `claude_limit_reached`, `filesystem_unavailable`,
   and `stopping`.
 
 Job errors may also include a safe `stallReason`; project and duplicate-turn
@@ -74,17 +92,32 @@ errors identify the affected job or project. Malformed JSON uses `-32700`.
 
 Notifications have JSON-RPC method names and a `params` object:
 
-* `job/state`: `{job, state}`. Public states include `planned`, `plan_approved`,
-  `running`, `sample_ready`, `paused`, `stalled`, `done`, and
-  `done_with_issues`. Internal phases such as pulling, masking, sample work,
-  full work, quote checks, output building, and verification map to `running`.
-  Exactly one notification is emitted for each stored transition.
-* `job/progress`: `{job, done, total, remaining}`.
+* `job/state`: `{job, project, state, step}`. `state` is the public vocabulary;
+  `step` is the raw internal state. Exactly one notification is emitted for
+  each stored transition.
+* `job/progress`: `{job, project, phase, done, inFlight, retrying, failed,
+  heldBack, remaining, total}`. All count fields are integers. `remaining`
+  means not started, and `done + inFlight + retrying + failed + heldBack +
+  remaining == total`.
+* `engine/event` kinds `counts` and `eta` are also emitted at least every ten
+  seconds while a sample or full phase runs, and after lead completion.
+  `eta` is `{low, high, seeded, known}` in seconds, with null bounds while
+  unknown. The timer also emits `activity` as
+  `{last_activity_ts, in_flight, workers}`.
 * `chat/event`: `{project, event}` for safe, masked Claude events.
 * `engine/event`: the engine event, including `kind` and, for job events, `job`.
 
 Notifications contain application data only. Credentials, tokens, API keys,
 and credential-file contents are never returned.
+
+### Public job states
+
+| Internal step | Public state |
+| --- | --- |
+| `draft`, `plan_proposed` | `planned` |
+| `plan_approved` | `plan_approved` |
+| `pulling`, `masking_sample`, `sample_running`, `full_running`, `quote_check`, `building_output`, `verifying` | `running` |
+| `sample_ready`, `sample_approved`, `paused`, `stalled`, `done`, `done_with_issues`, `failed`, `cancelled` | unchanged |
 
 ## Lifecycle and shutdown
 

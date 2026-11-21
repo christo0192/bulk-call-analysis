@@ -127,9 +127,21 @@ payloads: dict[str, list[dict[str, object]]] = {
             "type": "rate_limit_event",
             "rate_limit_info": {
                 "status": "rejected",
-                "resetsAt": "later",
+                "resetsAt": 1234567890,
                 "overageEnabled": False,
                 "errorCode": "credits_required",
+            },
+        },
+    ],
+    "extra_usage": [
+        init,
+        {
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "allowed",
+                "resetsAt": 1234567890,
+                "overageEnabled": True,
+                "errorCode": None,
             },
         },
     ],

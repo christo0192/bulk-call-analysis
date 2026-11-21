@@ -158,6 +158,11 @@ def test_stop_turn_kills_process_tree(tmp_path: Path, monkeypatch: pytest.Monkey
                 break
             await asyncio.sleep(0.01)
         await started.wait()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if child_pid_file.read_text(encoding="utf-8").strip():
+                break
+            await asyncio.sleep(0.01)
         child_pid = int(child_pid_file.read_text(encoding="utf-8"))
         parent_pid = launch._processes[session.session_id].pid
         stop_turn(session)

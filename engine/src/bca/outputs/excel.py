@@ -259,14 +259,12 @@ def build_workbook(store: Store, job_id: str, spec: JobSpec, out_dir: Path, vers
     return path
 
 
-def rebuild_with_rules(store: Store, job_id: str, new_rules: tuple[object, ...], out_dir: Path) -> Path:
-    paths = list(out_dir.glob("results.v*.xlsx"))
-    numbered = [
-        (int(path.stem.rsplit("v", 1)[-1]), path) for path in paths if path.stem.rsplit("v", 1)[-1].isdigit()
-    ]
-    if not numbered:
+def rebuild_with_rules(
+    store: Store, job_id: str, new_rules: tuple[object, ...], out_dir: Path, spec_version: int
+) -> tuple[Path, int]:
+    source = out_dir / f"results.v{spec_version}.xlsx"
+    if not source.is_file():
         raise FileNotFoundError("no existing workbook to rebuild")
-    source = max(numbered, key=lambda item: item[0])[1]
     old = load_workbook(source, read_only=True, data_only=False)
     try:
         old_sheet_names = old.sheetnames
@@ -283,8 +281,20 @@ def rebuild_with_rules(store: Store, job_id: str, new_rules: tuple[object, ...],
         raise ValueError("stored spec is required for rebuild")
     spec = JobSpec.from_dict(spec.to_dict() | {"rules": [cast(Any, rule).to_dict() for rule in new_rules]})
     columns, rows, not_read = _spec_rows(store, job_id, spec, new_rules)
-    target = out_dir / f"results.v{max(item[0] for item in numbered) + 1}.xlsx"
-    write_results(target, columns, rows, "Results")
-    _write_side_sheets(target, spec, not_read, "rebuilt with new rules")
+    rebuild_number = 1
+    while True:
+        target = out_dir / f"results.v{spec_version}.rebuild{rebuild_number}.xlsx"
+        try:
+            with target.open("xb"):
+                pass
+            break
+        except FileExistsError:
+            rebuild_number += 1
+    try:
+        write_results(target, columns, rows, "Results")
+        _write_side_sheets(target, spec, not_read, "rebuilt with new rules")
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
     store.append_event(job_id, "rules_rebuilt", {"rules": [cast(Any, rule).to_dict() for rule in new_rules]})
-    return target
+    return target, rebuild_number

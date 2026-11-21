@@ -124,7 +124,12 @@ def test_stdio_engine_forwards_job_state_and_progress() -> None:
         service = ApiService(event_bus=EventBus())
         service.notify = notify
         await service.publish_event(
-            Event("state", "job-1", 1.0, {"from": "draft", "to": "running", "source": "store"})
+            Event(
+                "state",
+                "job-1",
+                1.0,
+                {"from": "draft", "to": "running", "project": "project-one", "source": "store"},
+            )
         )
         await service.publish_event(
             Event(
@@ -138,8 +143,18 @@ def test_stdio_engine_forwards_job_state_and_progress() -> None:
     run(exercise())
     state = next(item for item in sent if item["method"] == "job/state")
     progress = next(item for item in sent if item["method"] == "job/progress")
-    assert set(cast(dict[str, object], state["params"])) == {"job", "state"}
-    assert set(cast(dict[str, object], progress["params"])) == {"job", "done", "total", "remaining"}
+    assert set(cast(dict[str, object], state["params"])) == {"job", "project", "state", "step"}
+    assert set(cast(dict[str, object], progress["params"])) == {
+        "job",
+        "phase",
+        "done",
+        "inFlight",
+        "retrying",
+        "failed",
+        "heldBack",
+        "remaining",
+        "total",
+    }
 
 
 class SlowBackend(ApiBackend):
