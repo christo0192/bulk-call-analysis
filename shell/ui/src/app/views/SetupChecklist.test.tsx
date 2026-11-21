@@ -80,10 +80,10 @@ it('groups engine, connector and program items into one row each', () => {
   expect(screen.getByText('BigQuery connector found')).toBeInTheDocument();
 });
 
-it('sign in starts the official flow and polls runChecks until ok', async () => {
+it('signed-out user with the real probe output sees Sign in and can start the official flow', async () => {
   vi.useFakeTimers();
   let checks = 0;
-  const pending = items([{ name: 'claude_login', status: 'pending' }]);
+  const pending = items([{ name: 'claude_login', status: 'failed', detail: 'probe not supplied' }]);
   setChecks(() => {
     checks += 1;
     return checks >= 2 ? items() : pending;
@@ -95,6 +95,7 @@ it('sign in starts the official flow and polls runChecks until ok', async () => 
   await vi.advanceTimersByTimeAsync(0);
   const beforeSignIn = runChecks();
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  expect(mockBridge.calls).toContainEqual({ method: 'auth/claudeLogin', params: {} });
   await vi.advanceTimersByTimeAsync(15000);
   expect(screen.getByText('Signed in to ChatGPT')).toBeInTheDocument();
   const afterSignIn = runChecks();
@@ -133,12 +134,21 @@ it('continue is enabled with the real-shaped checklist and signed-in auth', asyn
   await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled());
 });
 
-it('a missing login probe shows Not signed in yet, never the raw detail', async () => {
+it('login rows never show probe not supplied', async () => {
   const failed = items([{ name: 'claude_login', status: 'failed', detail: 'probe not supplied' }]);
   mockBridge.setResponse('setup/runChecks', async () => ({ items: failed }));
   renderChecklist(failed);
   await waitFor(() => expect(screen.getByText('Not signed in yet')).toBeInTheDocument());
   expect(screen.queryByText('probe not supplied')).toBeNull();
+});
+
+it('a login row shows exactly one Check again', async () => {
+  const failed = items([{ name: 'claude_login', status: 'failed', detail: 'probe not supplied' }]);
+  mockBridge.setResponse('setup/runChecks', async () => ({ items: failed }));
+  renderChecklist(failed);
+  await waitFor(() => expect(screen.getByText('Not signed in yet')).toBeInTheDocument());
+  const row = screen.getByText('Sign in to Claude').closest('.check-row') as HTMLElement;
+  expect(within(row).getAllByRole('button', { name: 'Check again' })).toHaveLength(1);
 });
 
 it("I've checked updates the row from the {item, status} reply", async () => {

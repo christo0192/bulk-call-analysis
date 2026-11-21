@@ -1,7 +1,13 @@
-import { engineStatus } from '../state/store';
+import { engineStatus, load, loadError } from '../state/store';
 export function EngineStatusBanner() {
   const status = engineStatus.value;
-  if (status === 'ready') return null;
+  if (status === 'ready' && !loadError.value) return null;
+  if (status === 'ready' && loadError.value)
+    return (
+      <div class="banner" role="status">
+        {loadError.value} <button onClick={() => void load()}>Try again</button>
+      </div>
+    );
   const text =
     status === 'starting'
       ? 'Starting the engine…'

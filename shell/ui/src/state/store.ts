@@ -21,6 +21,7 @@ export const newProjectOpen = signal(false);
 export const setupRequired = signal(false);
 export const settingsOpen = signal(false);
 export const setupItems = signal<SetupItem[]>([]);
+export const loadError = signal<string | null>(null);
 export type Capability = 'available' | 'unknown' | 'missing';
 export const capabilities = signal<Record<string, Capability>>({});
 let removeNotification: (() => void) | undefined;
@@ -75,6 +76,7 @@ function itemReady(item: SetupItem, auth: AuthStatus): boolean {
 }
 
 async function refetchJobs(names: string[]): Promise<void> {
+  if (capabilities.value['projects/jobs'] === 'missing') return;
   await Promise.all(
     names.map(async (project) => {
       try {
@@ -82,9 +84,10 @@ async function refetchJobs(names: string[]): Promise<void> {
         capabilities.value = { ...capabilities.value, 'projects/jobs': 'available' };
         jobsByProject.value = { ...jobsByProject.value, [project]: result.jobs };
       } catch (error) {
-        if (EngineError.from(error).code !== -32601) throw error;
-        capabilities.value = { ...capabilities.value, 'projects/jobs': 'missing' };
-        jobsByProject.value = { ...jobsByProject.value, [project]: [] };
+        if (EngineError.from(error).code === -32601) {
+          capabilities.value = { ...capabilities.value, 'projects/jobs': 'missing' };
+          jobsByProject.value = { ...jobsByProject.value, [project]: [] };
+        } else console.warn(`Unable to refresh jobs: ${EngineError.from(error).message}`);
       }
     }),
   );
@@ -141,6 +144,7 @@ export async function load(): Promise<void> {
 }
 async function loadOnce(): Promise<void> {
   loadAttempted = true;
+  loadError.value = null;
   engineStatus.value = 'starting';
   if (!removeNotification) removeNotification = bridge.onNotification(reduceNotification);
   if (!removeStatus)
@@ -158,8 +162,6 @@ async function loadOnce(): Promise<void> {
     else if (acceptStatus(initialStatus))
       engineStatus.value = initialStatus as typeof engineStatus.value;
     setupItems.value = await bridge.call('setup/checklist', {});
-    const auth = await bridge.call('auth/status', {});
-    setupRequired.value = setupItems.value.some((item) => !itemReady(item, auth));
     projects.value = await bridge.call('projects/list', {});
     selectedProject.value ??= projects.value[0]?.project ?? null;
     await refetchJobs(projects.value.map((project) => project.project));
@@ -171,6 +173,14 @@ async function loadOnce(): Promise<void> {
       capabilities.value = { ...capabilities.value, 'allowance/status': 'missing' };
       allowances.value = null;
     }
+    try {
+      const auth = await bridge.call('auth/status', {});
+      setupRequired.value = setupItems.value.some((item) => !itemReady(item, auth));
+    } catch (authError) {
+      console.warn(`Unable to load authentication status: ${EngineError.from(authError).message}`);
+      const signedOut: AuthStatus = { claude: { loggedIn: false }, codex: { loggedIn: false } };
+      setupRequired.value = setupItems.value.some((item) => !itemReady(item, signedOut));
+    }
   } catch (error) {
     const e = EngineError.from(error);
     if (e.code === -32002) {
@@ -180,6 +190,19 @@ async function loadOnce(): Promise<void> {
       } catch (checkError) {
         console.warn(`Unable to load setup checklist: ${EngineError.from(checkError).message}`);
       }
-    } else engineStatus.value = 'failed';
+      try {
+        await bridge.call('auth/status', {});
+      } catch (authError) {
+        console.warn(
+          `Unable to load authentication status: ${EngineError.from(authError).message}`,
+        );
+      }
+    } else if (e.code === null) engineStatus.value = 'failed';
+    else {
+      if (e.code === -32601)
+        capabilities.value = { ...capabilities.value, 'projects/list': 'missing' };
+      loadError.value = e.message;
+      console.warn(`Unable to load engine data: ${e.message}`);
+    }
   }
 }

@@ -13,19 +13,24 @@ export function useSignIn(onAuth: (auth: AuthStatus) => void, onError: (message:
   const lastAuthCheck = useRef(0);
   const lastAuth = useRef<AuthStatus | null>(null);
 
-  async function check(vendor: SignInVendor, explicit: boolean): Promise<void> {
+  async function check(vendor: SignInVendor, explicit = false): Promise<void> {
     if (inFlight.current) return;
     inFlight.current = true;
     setIsChecking(true);
     try {
       const shouldCheckAuth =
-        explicit || lastAuth.current === null || Date.now() - lastAuthCheck.current >= 15000;
+        explicit || lastAuthCheck.current === 0 || Date.now() - lastAuthCheck.current >= 15000;
       if (shouldCheckAuth) lastAuthCheck.current = Date.now();
-      const authPromise: Promise<AuthStatus> = shouldCheckAuth
-        ? bridge.call('auth/status', {})
-        : Promise.resolve(lastAuth.current!);
-      const [checks, auth] = await Promise.all([bridge.call('setup/runChecks', {}), authPromise]);
-      if (shouldCheckAuth) lastAuth.current = auth;
+      const checks = await bridge.call('setup/runChecks', {});
+      let auth = lastAuth.current ?? { claude: { loggedIn: false }, codex: { loggedIn: false } };
+      if (shouldCheckAuth) {
+        try {
+          auth = await bridge.call('auth/status', {});
+          lastAuth.current = auth;
+        } catch (cause) {
+          onError(EngineError.from(cause).message);
+        }
+      }
       setupItems.value = checks.items;
       onAuth(auth);
       const name = vendor === 'claude' ? 'claude_login' : 'chatgpt_login';
@@ -45,7 +50,7 @@ export function useSignIn(onAuth: (auth: AuthStatus) => void, onError: (message:
   useEffect(() => {
     if (!waitingFor) return;
     const vendor = waitingFor;
-    const timer = window.setInterval(() => void check(vendor, false), 5000);
+    const timer = window.setInterval(() => void check(vendor), 5000);
     const stop = window.setTimeout(() => setWaitingFor(null), 5 * 60 * 1000);
     return () => {
       window.clearInterval(timer);

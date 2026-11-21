@@ -35,32 +35,17 @@ function ready(item: SetupItem | undefined, auth: AuthStatus | null, name?: stri
 export function SetupChecklist() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [checking, setChecking] = useState(false);
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const {
     waitingFor,
-    isChecking: signInChecking,
+    isChecking: checking,
     signIn,
     checkAgain,
   } = useSignIn(setAuth, (message) => setError(message || null));
   const items = setupItems.value;
-  useEffect(() => {
-    void checks();
-  }, []);
+  useEffect(() => void checkAgain('claude'), []);
   const itemFor = (name: string) => items.find((item) => item.name === name);
   const allReady = items.length > 0 && items.every((item) => ready(item, auth, item.name));
-  async function checks() {
-    setChecking(true);
-    try {
-      const result = await bridge.call('setup/runChecks', {});
-      setupItems.value = result.items;
-      setAuth(await bridge.call('auth/status', {}));
-    } catch (cause) {
-      setError(EngineError.from(cause).message);
-    } finally {
-      setChecking(false);
-    }
-  }
   async function markManual(name: string) {
     try {
       const result = await bridge.call('setup/markManual', { item: name });
@@ -118,8 +103,10 @@ export function SetupChecklist() {
                   {manual && expanded === name && <p class="instructions">{detail[name]}</p>}
                 </div>
                 <div class="check-actions">
-                  {failed && <button onClick={() => void checks()}>Check again</button>}
-                  {login && !good && !failed && (
+                  {!login && failed && (
+                    <button onClick={() => void checkAgain('claude')}>Check again</button>
+                  )}
+                  {login && !good && (
                     <button
                       disabled={waitingFor === (name === 'claude_login' ? 'claude' : 'codex')}
                       onClick={() => void signIn(name === 'claude_login' ? 'claude' : 'codex')}
@@ -129,12 +116,13 @@ export function SetupChecklist() {
                         : 'Sign in'}
                     </button>
                   )}
-                  {login && waitingFor === (name === 'claude_login' ? 'claude' : 'codex') && (
+                  {login && !good && (
                     <button
-                      disabled={signInChecking}
+                      aria-label="Check again"
+                      disabled={checking}
                       onClick={() => checkAgain(name === 'claude_login' ? 'claude' : 'codex')}
                     >
-                      {signInChecking ? 'Checking…' : 'Check again'}
+                      {checking ? 'Checking…' : 'Check again'}
                     </button>
                   )}
                   {manual && !good && (

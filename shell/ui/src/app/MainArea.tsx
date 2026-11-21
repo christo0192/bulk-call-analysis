@@ -47,7 +47,7 @@ export function MainArea() {
       <header>
         <div>
           <h1>{project?.title ?? currentProject}</h1>
-          <Pill state={state} />
+          {current ? <Pill state={state} /> : <span class="pill setup">No job yet</span>}
         </div>
         <div class="actions" />
       </header>

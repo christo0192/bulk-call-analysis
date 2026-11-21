@@ -13,12 +13,21 @@ import {
   newComputerChecklist,
 } from '../mock/fixtures/data';
 const firstRun = typeof window !== 'undefined' && window.location.search.includes('mock=firstrun');
+const noAuth = typeof window !== 'undefined' && window.location.search.includes('mock=noauth');
 let firstRunActive = firstRun;
-const checklistState = (firstRun ? newComputerChecklist : checklist).map((item) => ({ ...item }));
+const checklistState = (firstRun ? newComputerChecklist : checklist).map((item) => ({
+  ...item,
+  ...(item.name === 'claude_login' || item.name === 'chatgpt_login'
+    ? { status: 'failed', detail: 'probe not supplied' }
+    : {}),
+}));
 const authState = {
   // In the first-run mock, Claude starts signed out until the sign-in flow completes.
-  claude: { ...authStatus.claude, loggedIn: firstRun ? false : authStatus.claude.loggedIn },
-  codex: { ...authStatus.codex },
+  claude: {
+    ...authStatus.claude,
+    loggedIn: noAuth || firstRun ? false : authStatus.claude.loggedIn,
+  },
+  codex: { ...authStatus.codex, loggedIn: noAuth || firstRun ? false : authStatus.codex.loggedIn },
 };
 const settingsState = { ...settings };
 type ResponseFn = (params: unknown) => unknown | Promise<unknown>;
@@ -79,7 +88,10 @@ export class MockBridge implements EngineBridge {
       if (firstRun && name === 'extra_usage_off') firstRunActive = false;
       return { item: name, status: item?.status ?? 'manual_done' } as ResultOf<M>;
     }
-    if (method === 'auth/status') return authState as ResultOf<M>;
+    if (method === 'auth/status') {
+      if (noAuth) throw 'RPC error -32001: Codex app-server did not start';
+      return authState as ResultOf<M>;
+    }
     if (method === 'auth/claudeLogin') {
       this.signInStarted = true;
       return { started: true, vendor: 'claude' } as ResultOf<M>;

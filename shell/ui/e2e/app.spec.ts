@@ -44,12 +44,30 @@ test('first run: sign in to Claude, confirm the two manual items, continue to th
 }) => {
   await page.goto('/?mock=firstrun');
   await expect(page.getByRole('heading', { name: 'Set up this computer' })).toBeVisible();
-  await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByRole('button', { name: 'Check again' }).click();
-  await page.getByRole('button', { name: 'Check again' }).click();
+  await page
+    .getByText('Sign in to Claude')
+    .locator('..')
+    .locator('..')
+    .getByRole('button', { name: 'Sign in' })
+    .click();
+  const claudeRow = page.getByText('Sign in to Claude').locator('..').locator('..');
+  const checkAgain = claudeRow.getByRole('button', { name: 'Check again' });
+  await expect(checkAgain).toBeEnabled();
+  await checkAgain.click();
+  await expect(checkAgain).toBeEnabled();
+  await checkAgain.click();
   await page.getByRole('button', { name: "I've checked" }).first().click();
   await page.getByRole('button', { name: "I've checked" }).first().click();
   await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByRole('heading', { name: 'Set up this computer' })).not.toBeVisible();
+  await expect(page.locator('main header h1')).toBeVisible();
+});
+
+test('no auth: auth/status failing still shows the checklist and the projects load', async ({
+  page,
+}) => {
+  await page.goto('/?mock=noauth');
+  await expect(page.getByRole('heading', { name: 'Set up this computer' })).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Projects' })).toBeVisible();
 });
 

@@ -25,22 +25,33 @@ export function SettingsView() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [workersError, setWorkersError] = useState<string | null>(null);
+  const [retentionError, setRetentionError] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [appError, setAppError] = useState<string | null>(null);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const loadSettings = () => {
     setLoading(true);
     setError(null);
     setLoadError(null);
-    void Promise.all([
+    void Promise.allSettled([
       bridge.call('settings/get', {}),
       bridge.call('auth/status', {}),
       bridge.call('app/status', {}),
     ])
       .then(([s, a, p]) => {
-        setValues({ ...s, keyPath: s.keyPath ?? s.connectorPath ?? '' });
-        setAuth(a);
-        setApp(p);
+        if (s.status === 'fulfilled') {
+          setValues({ ...s.value, keyPath: s.value.keyPath ?? s.value.connectorPath ?? '' });
+          setSettingsLoaded(true);
+        } else {
+          const message = EngineError.from(s.reason).message;
+          setLoadError(`Couldn't load settings: ${message}`);
+        }
+        if (a.status === 'fulfilled') setAuth(a.value);
+        else setAuthError(EngineError.from(a.reason).message);
+        if (p.status === 'fulfilled') setApp(p.value);
+        else setAppError(EngineError.from(p.reason).message);
       })
-      .catch((cause) => setLoadError(`Couldn't load settings: ${EngineError.from(cause).message}`))
       .finally(() => setLoading(false));
   };
   useEffect(loadSettings, []);
@@ -55,7 +66,8 @@ export function SettingsView() {
     setFieldError(null);
     setWorkersError(null);
     try {
-      setValues(await bridge.call('settings/set', changes));
+      const next = await bridge.call('settings/set', changes);
+      setValues({ ...next, keyPath: next.keyPath ?? next.connectorPath ?? '' });
       setSaved(label);
       window.setTimeout(() => setSaved(null), 1600);
     } catch (cause) {
@@ -63,7 +75,15 @@ export function SettingsView() {
       const message = e.code === -32602 ? "That value isn't valid" : e.message;
       if (label === 'connector') setFieldError(message);
       else if (label === 'workers') setWorkersError(message);
-      else setError(message);
+      else if (label === 'retention') {
+        setRetentionError(message);
+        try {
+          const current = await bridge.call('settings/get', {});
+          setValues({ ...current, keyPath: current.keyPath ?? current.connectorPath ?? '' });
+        } catch (refreshCause) {
+          setRetentionError(EngineError.from(refreshCause).message);
+        }
+      } else setError(message);
     }
   }
   return (
@@ -85,6 +105,7 @@ export function SettingsView() {
         )}
         <section class="settings-card">
           <h2>Sign-in</h2>
+          {authError && <p class="error">{authError}</p>}
           <p>
             Claude: {auth?.claude.loggedIn ? 'Signed in' : 'Not signed in'}{' '}
             <button
@@ -124,9 +145,13 @@ export function SettingsView() {
             <input
               id="connector-path"
               value={String(values.keyPath ?? values.connectorPath ?? '')}
+              disabled={!settingsLoaded}
               onInput={(e) => setValues({ ...values, keyPath: e.currentTarget.value })}
             />
-            <button onClick={() => void save({ connectorPath: values.keyPath ?? '' }, 'connector')}>
+            <button
+              disabled={!settingsLoaded}
+              onClick={() => void save({ connectorPath: values.keyPath ?? '' }, 'connector')}
+            >
               Save
             </button>
             {saved === 'connector' && <span class="saved">Saved</span>}
@@ -147,6 +172,7 @@ export function SettingsView() {
                 <b>{String(values[key])}</b>
               </span>
               <button
+                disabled={!settingsLoaded}
                 onClick={() => {
                   setModel(key);
                   setDraft(String(values[key]));
@@ -187,6 +213,7 @@ export function SettingsView() {
           <select
             id="workers"
             value={String(values.workerCount)}
+            disabled={!settingsLoaded}
             onChange={(e) => void save({ workerCount: Number(e.currentTarget.value) }, 'workers')}
           >
             {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
@@ -208,11 +235,13 @@ export function SettingsView() {
             min="1"
             max="365"
             value={String(values.retentionDays)}
+            disabled={!settingsLoaded}
             onChange={(e) => {
               const n = Number(e.currentTarget.value);
               if (n >= 1 && n <= 365) void save({ retentionDays: n }, 'retention');
             }}
           />
+          {retentionError && <p class="error">{retentionError}</p>}
         </section>
         <section class="settings-card">
           <h2>Setup</h2>
@@ -227,6 +256,7 @@ export function SettingsView() {
         </section>
         <section class="settings-card">
           <h2>About</h2>
+          {appError && <p class="error">{appError}</p>}
           <p>Engine version: {app?.engineVersion}</p>
           <p class="mono selectable">{app?.dataDir}</p>
           <button disabled>Open folder</button> <span class="muted">(available soon)</span>

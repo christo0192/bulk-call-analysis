@@ -15,16 +15,33 @@ export const stepNames = [
 ];
 export function stepStatuses(state: string | undefined): StepStatus[] {
   const index =
-    state === 'sample_ready'
-      ? 3
-      : state === 'running' || state === 'paused' || state === 'stalled'
-        ? 4
-        : state === 'done' || state === 'done_with_issues'
-          ? 8
-          : 0;
-  return stepNames.map((_, i) =>
-    i < index ? 'done' : i === index ? (state === 'sample_ready' ? 'waiting' : 'current') : 'todo',
+    state === 'plan_approved'
+      ? 1
+      : state === 'sample_ready'
+        ? 3
+        : state === 'sample_approved'
+          ? 4
+          : [
+                'running',
+                'pulling',
+                'masking_sample',
+                'sample_running',
+                'paused',
+                'stalled',
+              ].includes(state ?? '')
+            ? 4
+            : state === 'done' || state === 'done_with_issues'
+              ? 8
+              : 0;
+  const statuses = stepNames.map(
+    (_, i) => (i < index ? 'done' : i === index ? 'current' : 'todo') as StepStatus,
   );
+  if (state === 'sample_ready') statuses[index] = 'waiting';
+  if (state === 'running' || state === 'pulling' || state === 'masking_sample') {
+    statuses[1] = 'current';
+    statuses[2] = 'current';
+  }
+  return statuses;
 }
 export function formatKb(size: number): string {
   return `${Math.max(1, Math.ceil(size / 1024))} KB`;
