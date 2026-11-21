@@ -210,7 +210,7 @@ async fn open_project_file(
     )
     .map_err(path_error)?;
     tauri_plugin_opener::OpenerExt::opener(&app)
-        .open_path(&path, None::<&str>)
+        .open_path(path.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|error| CommandError {
             code: None,
             message: error.to_string(),
@@ -239,7 +239,7 @@ async fn open_project_folder(
     let path =
         paths::validate_project_folder(std::path::Path::new(project_dir)).map_err(path_error)?;
     tauri_plugin_opener::OpenerExt::opener(&app)
-        .open_path(&path, None::<&str>)
+        .open_path(path.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|error| CommandError {
             code: None,
             message: error.to_string(),
@@ -399,9 +399,11 @@ fn start_shutdown(app: tauri::AppHandle) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        exit_action, handle_exit, handle_tray_quit, run_event_action, Engine, ExitAction,
-        RunEventAction, SHUTDOWN_STARTED,
+        exit_action, handle_exit, handle_tray_quit, method_not_allowed_error, run_event_action,
+        ui_method_allowed, CommandError, Engine, ExitAction, RunEventAction, SHUTDOWN_STARTED,
     };
+    use crate::rpc::RpcError;
+    use serde_json::json;
     use std::time::{Duration, Instant};
     use tokio::sync::Notify;
 
@@ -434,16 +436,16 @@ mod tests {
 
     #[test]
     fn local_errors_have_structured_reasons() {
-        let timeout = CommandError::from(rpc::RpcError::Timeout);
+        let timeout = CommandError::from(RpcError::Timeout);
         assert_eq!(timeout.code, None);
         assert_eq!(timeout.data, Some(json!({"reason":"timeout"})));
-        let closed = CommandError::from(rpc::RpcError::Closed);
+        let closed = CommandError::from(RpcError::Closed);
         assert_eq!(closed.data, Some(json!({"reason":"engine_unavailable"})));
     }
 
     #[test]
     fn remote_error_preserves_code_message_and_data() {
-        let error = CommandError::from(rpc::RpcError::Remote {
+        let error = CommandError::from(RpcError::Remote {
             code: -32001,
             message: "failed".into(),
             data: Some(json!({"reason":"safe"})),

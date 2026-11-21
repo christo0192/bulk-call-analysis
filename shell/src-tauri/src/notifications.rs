@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct NotifyCtx {
     pub project_titles: HashMap<String, String>,
     pub now: SystemTime,
@@ -12,6 +12,19 @@ pub struct NotifyCtx {
     pub previous_on_ac: Option<bool>,
     pub battery_percent: Option<u8>,
     seen: HashMap<(String, String), SystemTime>,
+}
+
+impl Default for NotifyCtx {
+    fn default() -> Self {
+        Self {
+            project_titles: HashMap::new(),
+            now: SystemTime::UNIX_EPOCH,
+            job_running: false,
+            previous_on_ac: None,
+            battery_percent: None,
+            seen: HashMap::new(),
+        }
+    }
 }
 
 pub fn notification_for(event: &Value, ctx: &NotifyCtx) -> Option<(String, String)> {
