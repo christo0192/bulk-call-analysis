@@ -1,3 +1,4 @@
+use crate::notifications::NotifyCtx;
 use crate::power::{self, KeepAwake, PowerStatus};
 use crate::procguard;
 use crate::rpc::{self, Client, RpcError};
@@ -6,7 +7,7 @@ use serde_json::{json, Value};
 use std::{
     collections::VecDeque,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant, SystemTime},
 };
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -48,6 +49,7 @@ struct Inner<R: Runtime> {
     shutting_down: AtomicBool,
     guard: Mutex<Option<Arc<procguard::Guard>>>,
     power: KeepAwake<Box<dyn power::PowerOs>>,
+    notifications: StdMutex<NotifyCtx>,
 }
 
 #[derive(Debug)]
@@ -102,6 +104,7 @@ impl<R: Runtime> Engine<R> {
                 shutting_down: AtomicBool::new(false),
                 guard: Mutex::new(None),
                 power: power::platform(),
+                notifications: StdMutex::new(NotifyCtx::default()),
             }),
         }
     }
@@ -117,6 +120,7 @@ impl<R: Runtime> Engine<R> {
                 shutting_down: AtomicBool::new(false),
                 guard: Mutex::new(None),
                 power: power::platform(),
+                notifications: StdMutex::new(NotifyCtx::default()),
             }),
         }
     }
@@ -445,16 +449,19 @@ impl<R: Runtime> Engine<R> {
     fn emit(&self, event: &str, payload: Value) {
         if let Some(app) = &self.inner.app {
             if event == "engine-event" {
-                let ctx = crate::notifications::NotifyCtx {
-                    now: SystemTime::now(),
-                    ..Default::default()
-                };
-                if let Some((title, body)) = crate::notifications::notification_for(&payload, &ctx)
-                {
-                    if let Err(error) = app.notification().builder().title(title).body(body).show()
-                    {
-                        log::debug!("could not show notification: {error}");
-                    }
+                let mut ctx = self
+                    .inner
+                    .notifications
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let result = crate::notifications::dispatch_notification(
+                    &mut ctx,
+                    &payload,
+                    SystemTime::now(),
+                    |title, body| app.notification().builder().title(title).body(body).show(),
+                );
+                if let Err(error) = result {
+                    log::debug!("could not show notification: {error}");
                 }
             }
             let _ = app.emit(event, payload);
@@ -894,9 +901,9 @@ pub fn format_eta(low_seconds: Option<u64>, high_seconds: Option<u64>) -> Option
         return None;
     }
     if seconds >= 3600 {
-        Some(format!("about {} h left", (seconds + 3599) / 3600))
+        Some(format!("about {} h left", seconds.div_ceil(3600)))
     } else {
-        Some(format!("about {} m left", (seconds + 59) / 60))
+        Some(format!("about {} m left", seconds.div_ceil(60)))
     }
 }
 

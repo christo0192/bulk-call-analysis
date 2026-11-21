@@ -132,6 +132,26 @@ pub fn should_notify(ctx: &mut NotifyCtx, event: &Value) -> bool {
     true
 }
 
+pub fn dispatch_notification<F, E>(
+    ctx: &mut NotifyCtx,
+    event: &Value,
+    now: SystemTime,
+    send: F,
+) -> Result<bool, E>
+where
+    F: FnOnce(String, String) -> Result<(), E>,
+{
+    ctx.now = now;
+    let Some((title, body)) = notification_for(event, ctx) else {
+        return Ok(false);
+    };
+    if !should_notify(ctx, event) {
+        return Ok(false);
+    }
+    send(title, body)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,7 +260,7 @@ mod tests {
         .is_none());
     }
     #[test]
-    fn deduplicates_for_ten_minutes() {
+    fn notifications_are_deduplicated_per_job_and_kind_within_ten_minutes() {
         let mut c = NotifyCtx {
             now: SystemTime::UNIX_EPOCH,
             ..Default::default()
@@ -248,8 +268,35 @@ mod tests {
         let e = json!({"method":"job/state","params":{"job":"j","state":"done"}});
         assert!(should_notify(&mut c, &e));
         assert!(!should_notify(&mut c, &e));
+        assert!(should_notify(
+            &mut c,
+            &json!({"method":"job/state","params":{"job":"other-job","state":"done"}})
+        ));
+        assert!(should_notify(
+            &mut c,
+            &json!({"method":"job/state","params":{"job":"j","state":"stalled"}})
+        ));
         c.now += Duration::from_secs(601);
         assert!(should_notify(&mut c, &e));
+    }
+
+    #[test]
+    fn the_engine_handler_sends_a_notification_for_sample_ready_once() {
+        let mut ctx = NotifyCtx::default();
+        let event = json!({
+            "method": "job/state",
+            "params": {"job": "job-1", "project": "project-1", "state": "sample_ready", "total": 12}
+        });
+        let mut sent = Vec::new();
+        for _ in 0..2 {
+            dispatch_notification(&mut ctx, &event, SystemTime::UNIX_EPOCH, |title, body| {
+                sent.push((title, body));
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        }
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "Sample ready to check");
     }
     #[test]
     fn battery_notification_requires_running_job_and_ac_transition() {
