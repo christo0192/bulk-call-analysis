@@ -53,16 +53,19 @@ export function formatKb(size: number): string {
   return `${Math.max(1, Math.ceil(size / 1024))} KB`;
 }
 export function Rail({ project, state }: { project: string; state?: string }) {
-  const [files, setFiles] = useState<FileInfo[]>([]);
+  const [filesByProject, setFilesByProject] = useState<Record<string, FileInfo[]>>({});
   useEffect(() => {
     let active = true;
     void bridge.call('files/list', { project }).then((value) => {
-      if (active) setFiles(value);
+      if (active) setFilesByProject((current) => ({ ...current, [project]: value }));
     });
     const unsubscribe = bridge.onNotification((notification) => {
       if (notification.method !== 'job/state') return;
       const params = notification.params as { project?: string };
-      if (params.project === project) void bridge.call('files/list', { project }).then(setFiles);
+      if (params.project === project)
+        void bridge
+          .call('files/list', { project })
+          .then((value) => setFilesByProject((current) => ({ ...current, [project]: value })));
     });
     return () => {
       active = false;
@@ -86,7 +89,7 @@ export function Rail({ project, state }: { project: string; state?: string }) {
       </ol>
       <h3>Files</h3>
       <ul class="files">
-        {files.map((file) => (
+        {(filesByProject[project] ?? []).map((file) => (
           <li key={file.name}>
             <FileIcon />
             <span>{file.name}</span>

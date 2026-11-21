@@ -423,6 +423,21 @@
   background: #fff;
   padding: 7px 11px;
 }
+.approval-card footer button.primary,
+.composer-actions button.primary,
+.settings-card button.primary {
+  background: var(--acc);
+  color: #fff;
+  border-color: var(--acc);
+}
+.view-error {
+  margin: 24px;
+  padding: 12px;
+  color: var(--red);
+  background: var(--red-soft);
+  border: 1px solid #e8b5af;
+  border-radius: 7px;
+}
 .approval-card footer button:disabled {
   opacity: 0.55;
   cursor: wait;

@@ -235,7 +235,7 @@ export class MockBridge implements EngineBridge {
       return settingsState as ResultOf<M>;
     }
     if (method === 'app/status') return appStatus as ResultOf<M>;
-    if (method === 'files/list') return files as ResultOf<M>;
+    if (method === 'files/list') return files.map((file) => ({ ...file })) as ResultOf<M>;
     if (method === 'job/status')
       return (
         jobs.find((j) => j.job === (params as { job: string }).job) ?? (jobs[0] as ResultOf<M>)
@@ -272,6 +272,7 @@ export class MockBridge implements EngineBridge {
         throw new EngineError(-32001, 'The plan changed', 'stale_spec_version');
       const job = jobs.find((item) => item.job === (params as { job: string }).job);
       if (job) {
+        job.approvedAt = Math.floor(Date.now() / 1000);
         job.state = 'sample_approved';
         this.emit({
           jsonrpc: '2.0',
@@ -280,6 +281,10 @@ export class MockBridge implements EngineBridge {
         });
       }
       return job as ResultOf<M>;
+    }
+    if (method === 'job/snapshot') {
+      const job = jobs.find((item) => item.job === (params as { job: string }).job);
+      return { ...(job ?? jobs[0]), approvedAt: job?.approvedAt } as ResultOf<M>;
     }
     if (method === 'job/startFull') {
       const job = jobs.find((item) => item.job === (params as { job: string }).job);

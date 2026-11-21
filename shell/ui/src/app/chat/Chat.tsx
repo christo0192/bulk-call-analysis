@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
+import type { ComponentChildren } from 'preact';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import { formatCount } from '../format';
@@ -26,6 +27,12 @@ function errorText(error: unknown): ChatError {
   const e = EngineError.from(error);
   return { reason: e.reason, message: e.message, code: e.code, data: e.data };
 }
+function hasReason(error: ChatError, reason: string): boolean {
+  // The current shell drops data.reason; retain message matching until that shell slice lands.
+  return (
+    error.reason === reason || error.message.toLowerCase().includes(reason.replaceAll('_', ' '))
+  );
+}
 function blocks(event: Record<string, unknown>): Record<string, unknown>[] {
   const data = (event.data ?? {}) as Record<string, unknown>;
   const message = (data.message ?? data) as Record<string, unknown>;
@@ -42,7 +49,15 @@ function historyMissing(error: unknown): boolean {
   return errorText(error).code === -32601;
 }
 
-export function Chat({ project, onFocus }: { project: string; onFocus?: () => void }) {
+export function Chat({
+  project,
+  composer,
+  children,
+}: {
+  project: string;
+  composer?: { current: ((prefix?: string) => void) | null };
+  children?: ComponentChildren;
+}) {
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [more, setMore] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -61,7 +76,13 @@ export function Chat({ project, onFocus }: { project: string; onFocus?: () => vo
   const nextId = useRef(-1);
   const activeTurn = useRef<string | null>(null);
   const wasAtBottom = useRef(true);
+  const textarea = useRef<HTMLTextAreaElement>(null);
   const allLive = () => [...live.current.values()].flat();
+  if (composer)
+    composer.current = (prefix = '') => {
+      setText((current) => (current.startsWith(prefix) ? current : `${prefix}${current}`));
+      textarea.current?.focus();
+    };
   const publish = () => setEntries([...persisted.current, ...allLive()]);
   const scrollLatest = () => end.current?.scrollIntoView({ block: 'end' });
   const loadHistory = async (before?: number): Promise<boolean> => {
@@ -363,7 +384,7 @@ export function Chat({ project, onFocus }: { project: string; onFocus?: () => vo
       )}
       {error && (
         <div class="chat-error" role="alert">
-          {error.reason === 'claude_extra_usage_on' ? (
+          {hasReason(error, 'claude_extra_usage_on') ? (
             <>
               Chat is off: extra usage is switched on in your Claude settings. Turn it off to chat.
               A running job is not affected.{' '}
@@ -377,8 +398,8 @@ export function Chat({ project, onFocus }: { project: string; onFocus?: () => vo
                 Check again
               </button>
             </>
-          ) : error.reason === 'claude_limit_reached' ? (
-            `Claude's allowance is used up until ${new Date(Number(((error.data as { resetsAt?: number } | null)?.resetsAt ?? Date.now()) * (((error.data as { resetsAt?: number } | null)?.resetsAt ?? 0) < 1e12 ? 1000 : 1))).toLocaleString()}.`
+          ) : hasReason(error, 'claude_limit_reached') ? (
+            `Claude's allowance is used up until ${new Date(Number(((error.data as { resetsAt?: number } | null)?.resetsAt ?? 0) * (((error.data as { resetsAt?: number } | null)?.resetsAt ?? 0) < 1e12 ? 1000 : 1))).toLocaleString()}.`
           ) : (
             "Claude couldn't finish that reply. Try again."
           )}
@@ -396,6 +417,7 @@ export function Chat({ project, onFocus }: { project: string; onFocus?: () => vo
         </div>
       )}
       {attachMessage && <p class="attach-message">{attachMessage}</p>}
+      {children}
       <form
         class="composer"
         onSubmit={(event) => {
@@ -406,8 +428,8 @@ export function Chat({ project, onFocus }: { project: string; onFocus?: () => vo
       >
         <textarea
           value={text}
+          ref={textarea}
           placeholder="Ask Claude about this job…"
-          onFocus={onFocus}
           onInput={(event) => setText((event.currentTarget as HTMLTextAreaElement).value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {

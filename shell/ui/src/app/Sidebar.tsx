@@ -14,6 +14,7 @@ import {
 import { BrandIcon, GearIcon } from './ui/icons';
 import { Pill } from './ui/Pill';
 import { formatCount } from './format';
+import { fiveHourPercent, weeklyPercent } from './allowance';
 
 export function slugFor(title: string, existing: Project[]): string {
   const base =
@@ -129,11 +130,11 @@ export function Sidebar() {
       <footer>
         <div>
           <span>ChatGPT this week</span>
-          <b>{allowanceText(allowances.value?.codex?.windows[0]?.usedPercent)}</b>
+          <b>{allowanceText(weeklyPercent(allowances.value))}</b>
         </div>
         <div>
           <span>Claude 5-hour</span>
-          <b>{allowanceText(allowances.value?.claude?.windows[0]?.usedPercent)}</b>
+          <b>{allowanceText(fiveHourPercent(allowances.value))}</b>
         </div>
         <button class="settings" onClick={() => (settingsOpen.value = true)}>
           <GearIcon /> Settings

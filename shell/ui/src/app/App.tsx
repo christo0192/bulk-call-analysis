@@ -7,6 +7,7 @@ import { SetupChecklist } from './views/SetupChecklist';
 import { SettingsView } from './views/SettingsView';
 import '../styles/base.css';
 import '../styles/components.css';
+import { ErrorBoundary } from './ErrorBoundary';
 
 export function App() {
   useEffect(() => {
@@ -14,11 +15,13 @@ export function App() {
   }, []);
   return (
     <>
-      <EngineStatusBanner />
-      <div class="window">
-        {settingsOpen.value ? <SettingsView /> : <Sidebar />}
-        {settingsOpen.value ? null : setupRequired.value ? <SetupChecklist /> : <MainArea />}
-      </div>
+      <ErrorBoundary>
+        <EngineStatusBanner />
+        <div class="window">
+          {settingsOpen.value ? <SettingsView /> : <Sidebar />}
+          {settingsOpen.value ? null : setupRequired.value ? <SetupChecklist /> : <MainArea />}
+        </div>
+      </ErrorBoundary>
     </>
   );
 }

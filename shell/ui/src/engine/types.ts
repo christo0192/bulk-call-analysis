@@ -29,6 +29,7 @@ export type JobSummary = {
   done?: number;
   total?: number;
   remaining?: number | string;
+  approvedAt?: number;
 };
 export type FileInfo = { name: string; size: number };
 export type SetupStatus = 'pending' | 'ok' | 'failed' | 'manual_pending' | 'manual_done';
@@ -118,7 +119,12 @@ export type DoneView = { total: number; completed: number; issues: string[] };
 export type AllowanceWindow = { name: string; usedPercent: number; resetsAt: number };
 export type AllowanceStatus = {
   codex: { windows: AllowanceWindow[]; stopAtPercent: number } | null;
-  claude: { windows: AllowanceWindow[]; stopAtPercent?: number } | null;
+  claude: {
+    windows?: AllowanceWindow[];
+    stopAtPercent?: number;
+    checkedAt?: number;
+    rateLimitInfo?: unknown;
+  } | null;
 };
 export type Allowances = AllowanceStatus;
 export type EngineStatus = {

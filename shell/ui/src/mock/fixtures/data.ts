@@ -28,10 +28,13 @@ export const jobs: JobSummary[] = projects.map((p, i) => ({
 }));
 export const allowances: Allowances = {
   codex: {
-    windows: [{ name: 'weekly', usedPercent: 12, resetsAt: Date.now() + 86400000 * 3 }],
+    windows: [
+      { name: '5-hour', usedPercent: 4, resetsAt: Math.floor((Date.now() + 3600000) / 1000) },
+      { name: 'weekly', usedPercent: 12, resetsAt: Math.floor((Date.now() + 86400000 * 3) / 1000) },
+    ],
     stopAtPercent: 95,
   },
-  claude: { windows: [{ name: '5-hour', usedPercent: 9, resetsAt: Date.now() + 3600000 * 2 }] },
+  claude: { checkedAt: Date.now(), rateLimitInfo: { status: 'ok' } },
 };
 export const plan: PlanCard = {
   job: 'synthetic-job-1',
