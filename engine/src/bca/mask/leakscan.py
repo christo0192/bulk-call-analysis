@@ -20,7 +20,6 @@ from .patterns import (
     _pan,
     _phone,
     _spelled_pan,
-    _spoken_email_replacements,
     _upi,
     _url,
 )
@@ -55,6 +54,15 @@ _detectors: dict[str, tuple[re.Pattern[str], str]] = {
     "HANDLE": (re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,}"), "medium"),
 }
 _placeholder = re.compile(r"\[[A-Z_]+\]")
+_spoken_email_net = re.compile(
+    r"(?ix)(?:@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*"
+    r"(?:[a-z0-9_-]+\s+){0,6}(?:dot|\.)\s+[a-z]{2,}\b"
+)
+
+
+def _scan_spoken_email_net(text: str) -> list[Hit]:
+    scrubbed = _placeholder.sub(lambda match: " " * len(match.group()), text)
+    return [Hit("EMAIL_LIKE", match.start(), match.end()) for match in _spoken_email_net.finditer(scrubbed)]
 
 
 def scan_text(
@@ -80,8 +88,7 @@ def scan_text(
     if precision is None or "high" in precision:
         for start, end in _number_word_spans(text):
             hits.append(Hit("NUMBER_WORDS", start, end))
-        for start, end in _spoken_email_replacements(text):
-            hits.append(Hit("EMAIL_LIKE", start, end))
+        hits.extend(_scan_spoken_email_net(text))
     return sorted(hits, key=lambda hit: (hit.start, hit.end, hit.detector))
 
 

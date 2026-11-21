@@ -153,11 +153,21 @@ def mask_names(
     collect(_cap_slot, (2, 3))
     collect(_calling, (1,))
     candidate_spans = regex_spans + [(span.start, span.end) for span in ner_spans]
-    spans: list[tuple[int, int, bool]] = [
-        (start, end, False)
-        for start, end in candidate_spans
-        if not any(start < roster_end and end > roster_start for roster_start, roster_end in roster_spans)
-    ] + [(start, end, True) for start, end in roster_spans]
+    spans: list[tuple[int, int, bool]] = []
+    for start, end in candidate_spans:
+        overlaps = [
+            (roster_start, roster_end)
+            for roster_start, roster_end in roster_spans
+            if start < roster_end and end > roster_start
+        ]
+        if overlaps and any(
+            start >= roster_start and end <= roster_end for roster_start, roster_end in overlaps
+        ):
+            continue
+        # A longer NER/rule span wins over a partial roster match: the full lead
+        # name must be masked, even when it shares an advisor's first or surname.
+        spans.append((start, end, False))
+    spans.extend((start, end, True) for start, end in roster_spans)
     merged: list[tuple[int, int, bool]] = []
     for start, end, is_roster in sorted(spans):
         if start < 0 or end <= start or end > len(original):
@@ -165,7 +175,7 @@ def mask_names(
         if merged and (
             start <= merged[-1][1] or all(char in " \t" for char in original[merged[-1][1] : start])
         ):
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end), merged[-1][2] or is_roster)
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end), merged[-1][2] and is_roster)
         else:
             merged.append((start, end, is_roster))
     for start, end, is_roster in reversed(merged):

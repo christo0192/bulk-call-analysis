@@ -48,7 +48,9 @@ class PoolCallbacks(Protocol):
 
     async def on_failure(self, task: LeadTask, error_code: str, counted: bool, detail: str) -> None: ...
 
-    async def on_activity(self, ts: float) -> None: ...
+    async def on_codex_activity(self, ts: float) -> None: ...
+
+    async def on_check_tick(self, ts: float) -> None: ...
 
     async def on_quota(self, snapshot: QuotaSnapshot, decision: Decision) -> None: ...
 
@@ -282,6 +284,8 @@ class LunaPool:
     async def _heartbeat(self) -> None:
         while True:
             await asyncio.sleep(5)
+            ts = self.clock.now() if self.clock is not None else time.time()
+            await self.callbacks.on_check_tick(ts)
 
     async def stop(self) -> None:
         self._stopping = True
@@ -554,7 +558,9 @@ class LunaPool:
         if lead is None and thread_id:
             lead = next((item for item in self._leads.values() if item.thread_id == thread_id), None)
         if lead is not None:
-            await self.callbacks.on_activity(self.clock.now() if self.clock is not None else time.time())
+            await self.callbacks.on_codex_activity(
+                self.clock.now() if self.clock is not None else time.time()
+            )
         if method == "account/rateLimits/updated":
             if self._snapshot is not None:
                 self._snapshot = merge_update(self._snapshot, params)

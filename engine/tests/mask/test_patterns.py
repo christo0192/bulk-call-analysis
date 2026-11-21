@@ -30,6 +30,19 @@ def test_detector(source: str, placeholder: str) -> None:
     assert placeholder in mask_text(source, MaskingContext()).text
 
 
+def test_longest_span_decides_the_placeholder() -> None:
+    assert mask_text("Card 4111 1111 1111 1111", MaskingContext()).text == "Card [CARD]"
+
+
+def test_local_part_with_internal_dots_is_fully_masked() -> None:
+    assert mask_text("ravi.kumar at the rate gmail.com", MaskingContext()).text == "[EMAIL]"
+
+
+def test_split_webmail_domain_is_masked() -> None:
+    for provider in ("g mail", "hot mail", "yahoo mail"):
+        assert mask_text(f"ravi kumar at {provider} dot com", MaskingContext()).text == "[EMAIL]"
+
+
 @pytest.mark.parametrize("money", ["Rs 30,000", "₹ 45k", "30 thousand", "1.2 lakh", "50k"])
 def test_money_survives(money: str) -> None:
     assert money in mask_text(f"The fee is {money} today", MaskingContext()).text

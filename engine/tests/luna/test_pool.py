@@ -48,6 +48,12 @@ class Callbacks:
     async def on_activity(self, ts: float) -> None:
         self.activities += 1
 
+    async def on_codex_activity(self, ts: float) -> None:
+        await self.on_activity(ts)
+
+    async def on_check_tick(self, ts: float) -> None:
+        return
+
     async def on_quota(self, snapshot: Any, decision: Any) -> None:
         self.quota.append(decision.kind)
 
