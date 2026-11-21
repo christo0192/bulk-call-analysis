@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bulk Call Analysis · UI mockups (layout B)</title>
+<style>
+:root{
+  --bg:#e7e5e0; --win:#fbfaf8; --side:#f2f0ec; --line:#e4e1da; --line2:#d5d1c8;
+  --ink:#1c1b19; --mut:#67635b; --faint:#8d887e;
+  --acc:#0d6b5b; --acc-soft:#e1efea; --acc-ink:#0a5145;
+  --amb:#9a5208; --amb-soft:#fbefdb; --red:#ae2a20; --red-soft:#fbe8e5;
+  --blue:#235d9f; --blue-soft:#e5edf7;
+  --mono:"Cascadia Mono",Consolas,ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:14px/1.45 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;font-variant-numeric:tabular-nums}
+.page{max-width:1280px;margin:0 auto;padding:36px 28px 90px}
+h1{font-size:26px;margin:0 0 6px;font-weight:650;letter-spacing:-.01em}
+.lead{color:var(--mut);margin:0;max-width:820px}
+.flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:18px 0 0}
+.flow a{display:inline-flex;gap:6px;align-items:center;background:#fff;border:1px solid var(--line2);border-radius:999px;padding:4px 12px;font-size:13px;color:var(--ink);text-decoration:none}
+.flow a b{color:var(--acc);font-weight:600}
+.flow i{color:var(--faint);font-style:normal}
+section.screen{margin-top:54px}
+.stitle{display:flex;gap:14px;align-items:baseline;margin-bottom:6px}
+.stitle .num{font-weight:700;color:var(--acc);font-size:15px}
+.stitle h2{margin:0;font-size:19px;font-weight:650}
+.sdesc{color:var(--mut);margin:0 0 16px;max-width:900px}
+.sdesc b{color:var(--ink);font-weight:600}
+
+/* window chrome */
+.win{background:var(--win);border:1px solid #cdc9c0;border-radius:10px;box-shadow:0 1px 2px rgba(0,0,0,.05),0 14px 36px rgba(45,38,25,.13);overflow:hidden;display:flex;flex-direction:column;height:780px}
+.tb{height:34px;flex:none;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);background:#f5f3ef;font-size:12px;color:var(--mut);padding-left:14px}
+.wc{display:flex}
+.wc span{width:46px;height:34px;display:grid;place-items:center;color:#7a766e;font-size:12px}
+.wbody{flex:1;display:flex;min-height:0}
+
+/* sidebar */
+.side{width:228px;flex:none;background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 10px 12px}
+.brand{display:flex;gap:9px;align-items:center;font-weight:650;padding:2px 6px 14px;font-size:14px}
+.logo{width:24px;height:24px;border-radius:6px;background:var(--acc);display:grid;place-items:center;flex:none}
+.newp{display:flex;align-items:center;gap:8px;border:1px solid var(--line2);background:#fff;border-radius:8px;padding:7px 10px;font-size:13px;margin-bottom:16px}
+.slabel{font-size:12px;color:var(--faint);padding:0 8px 6px}
+.proj{padding:8px 9px;border-radius:8px;margin-bottom:2px}
+.proj .t{font-size:13px;font-weight:550}
+.proj .s{font-size:12px;color:var(--mut);display:flex;gap:6px;align-items:center}
+.proj.on{background:#fff;box-shadow:0 0 0 1px var(--line)}
+.sfoot{margin-top:auto;border-top:1px solid var(--line);padding:12px 6px 0;font-size:12px;color:var(--mut)}
+.sfoot .row{display:flex;justify-content:space-between;margin-bottom:5px}
+.sfoot .row b{color:var(--ink);font-weight:550}
+.sfoot .set{display:flex;gap:7px;align-items:center;margin-top:10px;color:var(--ink);font-size:13px}
+
+/* main */
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.mhead{height:54px;flex:none;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 20px;gap:12px}
+.mhead h3{margin:0;font-size:16px;font-weight:650}
+.mhead .l{display:flex;gap:10px;align-items:center}
+.mhead .r{display:flex;gap:8px;align-items:center}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:550;white-space:nowrap}
+.pill .d{width:7px;height:7px;border-radius:50%;background:currentColor}
+.p-set{background:var(--blue-soft);color:var(--blue)}
+.p-run{background:var(--acc-soft);color:var(--acc-ink)}
+.p-amb{background:var(--amb-soft);color:var(--amb)}
+.p-red{background:var(--red-soft);color:var(--red)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line2);background:#fff;border-radius:7px;padding:6px 12px;font-size:13px;color:var(--ink);white-space:nowrap}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:550}
+.btn.sm{padding:4px 10px;font-size:12px}
+.btn.dis{opacity:.45}
+
+/* chat */
+.chat{flex:1;overflow:hidden;padding:18px 28px 10px;display:flex;flex-direction:column;gap:12px}
+.you{align-self:flex-end;max-width:72%;background:#ece9e2;border-radius:12px 12px 4px 12px;padding:9px 13px}
+.ai{max-width:92%}
+.who{font-size:12px;color:var(--faint);margin-bottom:4px}
+.tool{font-size:12.5px;color:var(--mut);display:flex;gap:7px;align-items:center;margin:2px 0}
+.tool .ck{color:var(--acc);font-weight:700}
+.ai p{margin:6px 0}
+.card{border:1px solid var(--line2);background:#fff;border-radius:10px;overflow:hidden;margin-top:8px}
+.ch{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:10px}
+.ch .t{font-weight:650;font-size:14px}
+.ch .v{font-size:12px;color:var(--faint)}
+dl.kv{display:grid;grid-template-columns:158px 1fr;gap:7px 16px;padding:12px 14px;margin:0;font-size:13px}
+dl.kv dt{color:var(--mut)}
+dl.kv dd{margin:0}
+.link{color:var(--blue)}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chips span{border:1px solid var(--line);border-radius:5px;padding:0 7px;font:11.5px/20px var(--mono);background:#faf9f6;color:#3d3a35}
+.cf{padding:10px 14px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;background:#faf9f7;flex-wrap:wrap}
+.cf .note{font-size:12px;color:var(--mut);flex:1;min-width:240px}
+.composer{border-top:1px solid var(--line);padding:12px 20px 14px;flex:none}
+.box{border:1px solid var(--line2);border-radius:10px;background:#fff;padding:10px 12px;display:flex;align-items:center;gap:8px;color:var(--faint);font-size:13.5px}
+.box .sp{flex:1}
+.hint{font-size:11.5px;color:var(--faint);margin-top:6px;display:flex;gap:14px}
+
+/* right rail */
+.rail{width:272px;flex:none;border-left:1px solid var(--line);background:#f8f7f4;padding:16px 16px;overflow:hidden}
+.rail h4{margin:0 0 8px;font-size:13px;font-weight:650}
+ul.steps{list-style:none;margin:0 0 18px;padding:0}
+ul.steps li{display:flex;gap:10px;align-items:flex-start;padding:4px 0;font-size:13px}
+ul.steps .ic{width:18px;height:18px;border-radius:50%;border:1.5px solid var(--line2);flex:none;display:grid;place-items:center;font-size:10px;margin-top:1px;background:#fff}
+ul.steps .x{color:var(--mut)}
+ul.steps li.ok .ic{background:var(--acc);border-color:var(--acc);color:#fff}
+ul.steps li.now .ic{border-color:var(--acc);background:radial-gradient(circle,var(--acc) 0 4px,#fff 5px)}
+ul.steps li.wt .ic{border-color:var(--blue);background:radial-gradient(circle,var(--blue) 0 4px,#fff 5px)}
+ul.steps li.todo{color:var(--faint)}
+ul.steps .sub{display:block;font-size:12px;color:var(--mut)}
+ul.files{list-style:none;margin:0;padding:0}
+ul.files li{display:flex;gap:8px;align-items:center;font-size:13px;padding:5px 0;border-bottom:1px solid var(--line)}
+ul.files li span.sz{margin-left:auto;color:var(--faint);font-size:12px}
+.fi{width:16px;height:18px;border:1.5px solid #9d978c;border-radius:2px 5px 2px 2px;flex:none;position:relative}
+.fi.x{border-color:#2f7d4f}
+
+/* table */
+table.t{width:100%;border-collapse:collapse;font-size:12.5px}
+table.t th{text-align:left;font-weight:600;color:var(--mut);padding:7px 10px;border-bottom:1px solid var(--line);background:#faf9f6;white-space:nowrap}
+table.t td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+table.t td.q{color:#3b3833}
+.mask{background:#ece9e2;border-radius:3px;padding:0 4px;font:11px/18px var(--mono);color:#5e5a52}
+.ok{color:var(--acc-ink)}
+.tag{display:inline-block;font-size:11.5px;border-radius:4px;padding:0 6px;line-height:18px}
+.tag.y{background:var(--acc-soft);color:var(--acc-ink)}
+.tag.n{background:#efede8;color:var(--mut)}
+.tag.f{background:var(--amb-soft);color:var(--amb)}
+
+/* job view */
+.job{flex:1;overflow:hidden;padding:18px 22px;display:flex;flex-direction:column;gap:14px}
+.hero{border:1px solid var(--line2);background:#fff;border-radius:12px;padding:16px 18px}
+.bignum{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.bignum .n{font-size:34px;font-weight:650;letter-spacing:-.02em;line-height:1.1}
+.bignum .of{font-size:15px;color:var(--mut)}
+.bignum .pc{margin-left:auto;font-size:14px;color:var(--mut)}
+.bar{height:10px;border-radius:6px;background:#ecebe6;display:flex;overflow:hidden;margin:10px 0 14px}
+.bar i{display:block;height:100%}
+.heroRow{display:grid;grid-template-columns:1.1fr 1fr;gap:18px}
+.eta .v{font-size:20px;font-weight:650}
+.eta .s,.live .s{font-size:12.5px;color:var(--mut)}
+.live .v{font-size:14px;font-weight:550;display:flex;gap:7px;align-items:center}
+.live .v .d{width:8px;height:8px;border-radius:50%;background:var(--acc)}
+.why{font-size:11.5px;color:var(--faint);margin-top:8px}
+.tiles{display:grid;grid-template-columns:1.35fr 1fr .8fr;gap:12px}
+.tile{border:1px solid var(--line2);background:#fff;border-radius:10px;padding:12px 14px}
+.tile .h{font-size:12px;color:var(--mut);margin-bottom:4px}
+.tile .v{font-size:16px;font-weight:650}
+.tile .s{font-size:12px;color:var(--mut);margin-top:3px}
+.meter{position:relative;height:8px;border-radius:5px;background:#ecebe6;margin:9px 0 4px}
+.meter .u{position:absolute;left:0;top:0;bottom:0;border-radius:5px;background:var(--acc)}
+.meter .p{position:absolute;top:0;bottom:0;background:repeating-linear-gradient(135deg,#a7cfc4 0 4px,#d3e7e1 4px 8px)}
+.meter .stop{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--amb)}
+.mlab{display:flex;justify-content:space-between;font-size:11.5px;color:var(--faint)}
+.counts{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line2);border-radius:10px;background:#fff;overflow:hidden}
+.counts>div{padding:9px 12px;border-right:1px solid var(--line);border-bottom:1px solid var(--line)}
+.counts>div:nth-child(4n){border-right:0}
+.counts>div:nth-last-child(-n+4){border-bottom:0}
+.counts .k{font-size:12px;color:var(--mut)}
+.counts .n{font-size:17px;font-weight:650}
+.counts .c{font-size:11.5px;color:var(--faint)}
+.eq{font-size:12px;color:var(--mut);margin-top:-6px}
+.eq b{color:var(--acc-ink);font-weight:600}
+.two{display:grid;grid-template-columns:1fr 1.15fr;gap:14px;min-height:0}
+.panel{border:1px solid var(--line2);background:#fff;border-radius:10px;padding:12px 14px;overflow:hidden}
+.panel h4{margin:0 0 8px;font-size:13px;font-weight:650}
+ul.act{list-style:none;margin:0;padding:0;font-size:12.5px}
+ul.act li{display:grid;grid-template-columns:62px 1fr;gap:8px;padding:5px 0;border-bottom:1px solid var(--line)}
+ul.act li:last-child{border-bottom:0}
+ul.act .tm{color:var(--faint);font-family:var(--mono);font-size:11.5px}
+
+/* chat drawer */
+.drawer{width:300px;flex:none;border-left:1px solid var(--line);background:#f8f7f4;display:flex;flex-direction:column}
+.drawer .dh{height:54px;flex:none;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 14px}
+.drawer .dh b{font-size:14px}
+.drawer .chat{padding:14px 14px 8px}
+.drawer .you{max-width:88%}
+.drawer .composer{padding:10px 14px 12px}
+.tab{width:38px;flex:none;border-left:1px solid var(--line);background:#f8f7f4;display:flex;flex-direction:column;align-items:center;padding-top:14px;gap:10px;font-size:12px;color:var(--mut)}
+.tab .vt{writing-mode:vertical-rl;transform:rotate(180deg);letter-spacing:.02em}
+
+/* banners */
+.bgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.ban{border-radius:10px;padding:13px 15px;border:1px solid;background:#fff;display:flex;flex-direction:column;gap:6px}
+.ban .top{display:flex;gap:10px;align-items:center;justify-content:space-between}
+.ban .tt{font-weight:650;font-size:14px}
+.ban p{margin:0;font-size:13px;color:#3b3833}
+.ban .acts{display:flex;gap:8px;margin-top:4px;flex-wrap:wrap}
+.ban.amb{border-color:#ecd2a8;background:#fffaf1}
+.ban.red{border-color:#efc4be;background:#fff8f7}
+.ban.blue{border-color:#c7d7ec;background:#f8fbff}
+.ban.grn{border-color:#bfdcd3;background:#f6fbf9}
+.sys{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+.toast{background:#202020;color:#f2f2f2;border-radius:8px;padding:12px 14px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.toast .a{font-size:11.5px;color:#a9a9a9;margin-bottom:6px;display:flex;gap:6px;align-items:center}
+.toast b{display:block;margin-bottom:2px}
+.toast .bb{display:flex;gap:8px;margin-top:10px}
+.toast .bb span{background:#3a3a3a;border-radius:4px;padding:4px 10px;font-size:12px}
+.tray{background:#2b2b2b;color:#eee;border-radius:6px;padding:9px 12px;font-size:12.5px;display:inline-block;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+
+/* done */
+.recon{font-size:13px}
+.recon .line{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed var(--line)}
+.recon .line.tot{font-weight:650;border-bottom:1px solid var(--line2)}
+.recon .line.ok{border-bottom:0;color:var(--acc-ink);font-weight:600;padding-top:8px}
+.iss li{margin-bottom:6px}
+
+/* first run */
+.fr{flex:1;overflow:hidden;display:flex;justify-content:center;padding:26px}
+.frc{width:720px}
+.frc h3{margin:0 0 4px;font-size:20px}
+.frc .sub{color:var(--mut);margin:0 0 16px;font-size:13.5px}
+.chk{border:1px solid var(--line2);border-radius:10px;background:#fff;overflow:hidden}
+.chk .it{display:flex;gap:12px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line)}
+.chk .it:last-child{border-bottom:0}
+.chk .ic{width:20px;height:20px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:11px;border:1.5px solid var(--line2);color:#fff}
+.chk .it.ok .ic{background:var(--acc);border-color:var(--acc)}
+.chk .it.do .ic{border-color:var(--blue)}
+.chk .tx{flex:1}
+.chk .tx b{font-weight:600;font-size:13.5px}
+.chk .it{color:var(--ink)}
+.chk .tx>span{display:block;font-size:12px;color:var(--mut)}
+.chk .tx .link{display:inline;color:var(--blue)}
+
+/* feedback */
+.fb{margin-top:60px;background:#fff;border:1px solid var(--line2);border-radius:12px;padding:20px 22px}
+.fb h2{margin:0 0 4px;font-size:18px}
+.opts{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+.option{border:1.5px solid var(--line2);border-radius:10px;padding:12px 14px;cursor:pointer;background:#fbfaf8}
+.option h3{margin:0 0 3px;font-size:14px}
+.option p{margin:0;font-size:12.5px;color:var(--mut)}
+.option.selected{border-color:var(--acc);background:var(--acc-soft)}
+.caveat{font-size:12px;color:var(--faint);margin-top:10px}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>Bulk Call Analysis: UI mockups</h1>
+  <p class="lead">Layout B, where the screen follows the job: chat is the main pane while you set a job up, and a large job view takes over once the full run starts. All names and numbers are made up, and quotes are shown masked exactly as the reader sees them.</p>
+  <div class="flow">
+    <a href="#s1"><b>1</b> Plan in chat</a><i>→</i>
+    <a href="#s2"><b>2</b> Check the sample</a><i>→</i>
+    <a href="#s3"><b>3</b> Full run</a><i>→</i>
+    <a href="#s4"><b>4</b> When something happens</a><i>→</i>
+    <a href="#s5"><b>5</b> Done</a><i>·</i>
+    <a href="#s6"><b>6</b> First run on a new computer</a>
+  </div>
+
+  <!-- ============ 1. PLAN ============ -->
+  <section class="screen" id="s1">
+    <div class="stitle"><span class="num">1</span><h2>Plan in chat</h2></div>
+    <p class="sdesc">You describe what you want in plain words. Claude checks the data (read-only, masked), then puts a <b>plan card</b> in the chat. Nothing is pulled or read until you press <b>Approve plan</b>. The right-hand rail shows where the job is and the files it has made so far.</p>
+    <div class="win" style="height:900px">
+      <div class="tb"><span>Bulk Call Analysis</span><div class="wc"><span>&#8212;</span><span>&#9744;</span><span>&#10005;</span></div></div>
+      <div class="wbody">
+        <aside class="side">
+          <div class="brand"><span class="logo"><svg width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="5" width="2" height="4" rx="1" fill="#fff"/><rect x="4.5" y="2" width="2" height="10" rx="1" fill="#fff"/><rect x="8" y="4" width="2" height="6" rx="1" fill="#fff"/><rect x="11.5" y="6" width="2" height="2" rx="1" fill="#fff"/></svg></span>Bulk Call Analysis</div>
+          <div class="newp"><span style="font-size:16px;line-height:1">+</span> New project</div>
+          <div class="slabel">Projects</div>
+          <div class="proj on"><div class="t">Discount asks · Sep–Oct</div><div class="s"><span class="pill p-set" style="padding:0 7px">Setting up</span></div></div>
+          <div class="proj"><div class="t">Certificate mentions · Jul–Oct</div><div class="s">Done · 9,412 leads</div></div>
+          <div class="proj"><div class="t">Webinar objections · Oct</div><div class="s">Done with issues · 2,104 leads</div></div>
+          <div class="sfoot">
+            <div class="row"><span>ChatGPT this week</span><b>12% used</b></div>
+            <div class="row"><span>Claude 5-hour</span><b>9% used</b></div>
+            <div class="set"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#67635b" stroke-width="1.4"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>Settings</div>
+          </div>
+        </aside>
+        <div class="main">
+          <div class="mhead"><div class="l"><h3>Discount asks · Sep–Oct</h3><span class="pill p-set"><span class="d"></span>Setting up</span></div><div class="r"><span class="btn sm">Brief</span></div></div>
+          <div class="chat">
+            <div class="you">India leads from 1 Sep to 31 Oct with at least one call over 5 minutes. For each lead: did they ask for a discount, how much, and what did the advisor offer? Quote the line.</div>
+            <div class="ai">
+              <div class="who">Claude</div>
+              <div class="tool"><span class="ck">✓</span> Read the data notes</div>
+              <div class="tool"><span class="ck">✓</span> Counted the leads (read-only dry run, 6.3 GB)</div>
+              <div class="tool"><span class="ck">✓</span> Looked at 5 transcripts, with personal details masked</div>
+              <p>Here's the plan. 331 leads have no transcript, so they'll be listed in the sheet but not read. 57 leads have more call text than one read can take; the sheet will show which of their calls were not read.</p>
+              <div class="card">
+                <div class="ch"><span class="t">Plan</span><span class="v">version 1</span></div>
+                <dl class="kv">
+                  <dt>Leads</dt><dd>SQL query · India · 1 Sep – 31 Oct · at least one call over 5 min &nbsp;<span class="link">View SQL</span></dd>
+                  <dt>Calls read</dt><dd>All of each lead's calls, oldest first</dd>
+                  <dt>Count</dt><dd><b>11,058</b> leads → <b>10,727</b> with a usable transcript · 331 with none</dd>
+                  <dt>Over the size limit</dt><dd>57 leads (some calls not read, listed in the sheet)</dd>
+                  <dt>Data scanned</dt><dd>6.3 GB, read-only</dd>
+                  <dt>Output columns (9)</dt><dd><div class="chips"><span>asked_discount</span><span>amount_asked</span><span>amount_type</span><span>offer_made</span><span>offer_amount</span><span>who_raised_it</span><span>reason_given</span><span>evidence_quote</span><span>evidence_call</span></div></dd>
+                  <dt>Rules (3)</dt><dd>In scope if asked_discount is yes · amount bands &lt;10%, 10–20%, &gt;20% · review flag if the offer is over 25%</dd>
+                  <dt>Estimate</dt><dd>Sample of 20 leads: about 4 min · Full run: 7–9 h · ChatGPT weekly allowance: about 35–42%</dd>
+                </dl>
+                <div class="cf"><span class="btn pri">Approve plan</span><span class="btn">Change something</span><span class="note">Approving pulls and masks the transcripts, then reads a 20-lead sample for you to check. The full run waits for you.</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="composer">
+            <div class="box"><span class="sp">Message Claude…</span><span class="btn sm">Paste lead ids</span><span class="btn sm pri">Send</span></div>
+            <div class="hint"><span>Claude only sees masked data.</span><span>Uses your Claude allowance.</span></div>
+          </div>
+        </div>
+        <aside class="rail">
+          <h4>This job</h4>
+          <ul class="steps">
+            <li class="wt"><span class="ic"></span><span>Plan<span class="sub">Waiting for you</span></span></li>
+            <li class="todo"><span class="ic"></span><span>Pull and mask transcripts</span></li>
+            <li class="todo"><span class="ic"></span><span>Read a 20-lead sample</span></li>
+            <li class="todo"><span class="ic"></span><span>You check the sample</span></li>
+            <li class="todo"><span class="ic"></span><span>Full run</span></li>
+            <li class="todo"><span class="ic"></span><span>Quote check and repair</span></li>
+            <li class="todo"><span class="ic"></span><span>Excel built and verified</span></li>
+            <li class="todo"><span class="ic"></span><span>Summary written</span></li>
+          </ul>
+          <h4>Files</h4>
+          <ul class="files">
+            <li><span class="fi"></span>brief.md<span class="sz">2 KB</span></li>
+            <li><span class="fi"></span>plan.md<span class="sz">4 KB</span></li>
+          </ul>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 2. SAMPLE ============ -->
+  <section class="screen" id="s2">
+    <div class="stitle"><span class="num">2</span><h2>Check the sample, then start the full run</h2></div>
+    <p class="sdesc">Twenty leads are read first. The <b>sample card</b> shows real answers next to the quotes behind them, so you can see whether the questions are being understood. Approving the sample and starting the full run are two separate clicks: the start card says how long it will take and how much allowance it will use <b>before</b> you commit.</p>
+    <div class="win" style="height:1080px">
+      <div class="tb"><span>Bulk Call Analysis</span><div class="wc"><span>&#8212;</span><span>&#9744;</span><span>&#10005;</span></div></div>
+      <div class="wbody">
+        <aside class="side">
+          <div class="brand"><span class="logo"><svg width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="5" width="2" height="4" rx="1" fill="#fff"/><rect x="4.5" y="2" width="2" height="10" rx="1" fill="#fff"/><rect x="8" y="4" width="2" height="6" rx="1" fill="#fff"/><rect x="11.5" y="6" width="2" height="2" rx="1" fill="#fff"/></svg></span>Bulk Call Analysis</div>
+          <div class="newp"><span style="font-size:16px;line-height:1">+</span> New project</div>
+          <div class="slabel">Projects</div>
+          <div class="proj on"><div class="t">Discount asks · Sep–Oct</div><div class="s"><span class="pill p-set" style="padding:0 7px">Sample ready</span></div></div>
+          <div class="proj"><div class="t">Certificate mentions · Jul–Oct</div><div class="s">Done · 9,412 leads</div></div>
+          <div class="proj"><div class="t">Webinar objections · Oct</div><div class="s">Done with issues · 2,104 leads</div></div>
+          <div class="sfoot">
+            <div class="row"><span>ChatGPT this week</span><b>12% used</b></div>
+            <div class="row"><span>Claude 5-hour</span><b>11% used</b></div>
+            <div class="set"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#67635b" stroke-width="1.4"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>Settings</div>
+          </div>
+        </aside>
+        <div class="main">
+          <div class="mhead"><div class="l"><h3>Discount asks · Sep–Oct</h3><span class="pill p-set"><span class="d"></span>Sample ready</span></div><div class="r"><span class="btn sm">Brief</span></div></div>
+          <div class="chat">
+            <div class="ai">
+              <div class="who">Claude</div>
+              <div class="tool"><span class="ck">✓</span> Pulled 11,058 leads · masked the 20 sample leads · all 20 passed the leak check</div>
+              <div class="tool"><span class="ck">✓</span> Read the sample · 20 of 20 in 3 min 52 s</div>
+              <div class="card">
+                <div class="ch"><span class="t">Sample · 20 leads</span><span class="v">quotes verified 19 of 20 · 1 fixed on retry</span></div>
+                <table class="t">
+                  <tr><th>Lead</th><th>Asked?</th><th>Amount</th><th>Offer</th><th>Quote (as the reader saw it)</th></tr>
+                  <tr><td>#48213</td><td><span class="tag y">Yes</span></td><td>20%</td><td>10% if paid this week</td><td class="q">“Can you do something on the fee, like 20% off? <span class="mask">[NAME]</span> said she got a discount.”</td></tr>
+                  <tr><td>#47002</td><td><span class="tag y">Yes</span></td><td>₹15,000</td><td>None</td><td class="q">“If you take fifteen thousand off I'll pay today, my number is <span class="mask">[PHONE]</span>.”</td></tr>
+                  <tr><td>#46551</td><td><span class="tag n">No</span></td><td>–</td><td>–</td><td class="q">“The price is fine, I just need to check the schedule with my manager.”</td></tr>
+                  <tr><td>#46190</td><td><span class="tag y">Yes</span></td><td>Not stated</td><td>EMI option</td><td class="q">“Is there any scholarship or something? It's a bit much for me right now.”</td></tr>
+                  <tr><td>#45874</td><td><span class="tag y">Yes</span></td><td>30%</td><td>15%</td><td class="q">“Another program gave me 30% off, can you match that?”</td></tr>
+                </table>
+                <div class="cf"><span class="btn pri">Approve sample</span><span class="btn">Open sample.xlsx</span><span class="btn">Change the plan</span><span class="note">15 more rows in the file.</span></div>
+              </div>
+            </div>
+            <div class="you">Looks right. Go.</div>
+            <div class="ai">
+              <div class="card" style="border-color:#a9cfc4">
+                <div class="ch"><span class="t">Start the full run?</span><span class="v">sample approved 14:31</span></div>
+                <dl class="kv">
+                  <dt>Leads to read</dt><dd><b>10,707</b> (the 20 sample leads are already done)</dd>
+                  <dt>Time</dt><dd>About 7–9 h at the sample's speed · likely done around 23:00 tonight</dd>
+                  <dt>ChatGPT allowance</dt><dd>12% used now → about <b>47–55%</b> after this job · resets Tue 24 Nov, 09:00</dd>
+                  <dt>Safety stop</dt><dd>New leads stop at 95% and the job waits for the reset. It never uses paid credits.</dd>
+                  <dt>This computer</dt><dd>Keep it plugged in with the lid open. It's kept awake until the job ends.</dd>
+                </dl>
+                <div class="cf"><span class="btn pri">Start full run</span><span class="btn">Not now</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="composer">
+            <div class="box"><span class="sp">Message Claude…</span><span class="btn sm">Paste lead ids</span><span class="btn sm pri">Send</span></div>
+          </div>
+        </div>
+        <aside class="rail">
+          <h4>This job</h4>
+          <ul class="steps">
+            <li class="ok"><span class="ic">✓</span><span>Plan approved<span class="sub">14:02</span></span></li>
+            <li class="ok"><span class="ic">✓</span><span>Transcripts pulled<span class="sub">11,058 leads</span></span></li>
+            <li class="ok"><span class="ic">✓</span><span>Sample read<span class="sub">20 of 20</span></span></li>
+            <li class="wt"><span class="ic"></span><span>You check the sample<span class="sub">Waiting for you</span></span></li>
+            <li class="now"><span class="ic"></span><span>Masking the rest<span class="sub">6,930 of 10,707, while you check</span></span></li>
+            <li class="todo"><span class="ic"></span><span>Full run</span></li>
+            <li class="todo"><span class="ic"></span><span>Quote check and repair</span></li>
+            <li class="todo"><span class="ic"></span><span>Excel built and verified</span></li>
+            <li class="todo"><span class="ic"></span><span>Summary written</span></li>
+          </ul>
+          <h4>Files</h4>
+          <ul class="files">
+            <li><span class="fi"></span>brief.md<span class="sz">2 KB</span></li>
+            <li><span class="fi"></span>plan.md<span class="sz">4 KB</span></li>
+            <li><span class="fi x"></span>sample.xlsx<span class="sz">38 KB</span></li>
+          </ul>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 3. FULL RUN ============ -->
+  <section class="screen" id="s3">
+    <div class="stitle"><span class="num">3</span><h2>Full run: the job view takes over</h2></div>
+    <p class="sdesc">Once you press Start, the main pane becomes the <b>job view</b> and chat moves into a <b>drawer</b> on the right, which you can close to a thin tab. Everything here comes from real activity: the time left is worked out from the actual reading speed over the last 30 minutes, leaving out pauses and sleep, and "last activity" turns into a warning if nothing happens for 3 minutes.</p>
+    <div class="win" style="height:1070px">
+      <div class="tb"><span>Bulk Call Analysis</span><div class="wc"><span>&#8212;</span><span>&#9744;</span><span>&#10005;</span></div></div>
+      <div class="wbody">
+        <aside class="side">
+          <div class="brand"><span class="logo"><svg width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="5" width="2" height="4" rx="1" fill="#fff"/><rect x="4.5" y="2" width="2" height="10" rx="1" fill="#fff"/><rect x="8" y="4" width="2" height="6" rx="1" fill="#fff"/><rect x="11.5" y="6" width="2" height="2" rx="1" fill="#fff"/></svg></span>Bulk Call Analysis</div>
+          <div class="newp"><span style="font-size:16px;line-height:1">+</span> New project</div>
+          <div class="slabel">Projects</div>
+          <div class="proj on"><div class="t">Discount asks · Sep–Oct</div><div class="s"><span class="pill p-run" style="padding:0 7px">Reading 40%</span></div></div>
+          <div class="proj"><div class="t">Certificate mentions · Jul–Oct</div><div class="s">Done · 9,412 leads</div></div>
+          <div class="proj"><div class="t">Webinar objections · Oct</div><div class="s">Done with issues · 2,104 leads</div></div>
+          <div class="sfoot">
+            <div class="row"><span>ChatGPT this week</span><b>28% used</b></div>
+            <div class="row"><span>Claude 5-hour</span><b>12% used</b></div>
+            <div class="set"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#67635b" stroke-width="1.4"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>Settings</div>
+          </div>
+        </aside>
+        <div class="main">
+          <div class="mhead"><div class="l"><h3>Discount asks · Sep–Oct</h3><span class="pill p-run"><span class="d"></span>Reading</span></div><div class="r"><span class="btn">Pause</span><span class="btn">Open folder</span></div></div>
+          <div class="job">
+            <div class="hero">
+              <div class="bignum"><span class="n">4,312</span><span class="of">of 10,727 leads read</span><span class="pc">40%</span></div>
+              <div class="bar"><i style="width:40.2%;background:var(--acc)"></i><i style="width:.6%;background:#7fb8aa"></i><i style="width:.4%;background:var(--amb)"></i></div>
+              <div class="heroRow">
+                <div class="eta"><div class="v">About 5 h left</div><div class="s">Somewhere between 4 h 30 m and 5 h 30 m · likely done around 22:45 tonight</div></div>
+                <div class="live"><div class="v"><span class="d"></span>Last activity 8 s ago</div><div class="s">6 readers working · 22.6 leads a minute over the last 30 min</div></div>
+              </div>
+              <div class="why">Time left counts the quote-check pass at the end. It leaves out pauses and sleep.</div>
+            </div>
+            <div class="tiles">
+              <div class="tile">
+                <div class="h">ChatGPT allowance (reading)</div>
+                <div class="v">28% used this week</div>
+                <div class="meter"><span class="u" style="width:28%"></span><span class="p" style="left:28%;width:24%"></span><span class="stop" style="left:95%"></span></div>
+                <div class="mlab"><span>This job ends near 52%</span><span>Pauses at 95%</span></div>
+                <div class="s">Resets Tue 24 Nov, 09:00 · enough for this job</div>
+              </div>
+              <div class="tile">
+                <div class="h">Claude allowance (chat)</div>
+                <div class="v">12% of 5-hour limit</div>
+                <div class="s">30% this week · chat is available, and the run doesn't use it</div>
+              </div>
+              <div class="tile">
+                <div class="h">This computer</div>
+                <div class="v">Plugged in</div>
+                <div class="s">Kept awake until the job ends</div>
+              </div>
+            </div>
+            <div class="counts">
+              <div><div class="k">Read</div><div class="n">4,312</div><div class="c">answers saved</div></div>
+              <div><div class="k">Reading now</div><div class="n">6</div><div class="c">plus 3 retrying</div></div>
+              <div><div class="k">Left</div><div class="n">6,400</div><div class="c">not started yet</div></div>
+              <div><div class="k">Failed</div><div class="n">2</div><div class="c link">after 2 tries · see why</div></div>
+              <div><div class="k">Held back</div><div class="n">4</div><div class="c">possible personal data, never sent</div></div>
+              <div><div class="k">No transcript</div><div class="n">331</div><div class="c">listed, not read</div></div>
+              <div><div class="k">Over size limit</div><div class="n">57</div><div class="c">some calls not read</div></div>
+              <div><div class="k">Selected</div><div class="n">11,058</div><div class="c">from the plan</div></div>
+            </div>
+            <div class="eq"><b>Every lead accounted for:</b> 11,058 = 4,312 read + 9 in progress + 6,400 left + 2 failed + 4 held back + 331 no transcript</div>
+            <div class="two">
+              <div class="panel">
+                <h4>Steps</h4>
+                <ul class="steps" style="margin:0">
+                  <li class="ok"><span class="ic">✓</span><span>Plan approved · sample approved</span></li>
+                  <li class="ok"><span class="ic">✓</span><span>Masking<span class="sub">10,723 passed · 4 held back</span></span></li>
+                  <li class="now"><span class="ic"></span><span>Full run<span class="sub">4,312 of 10,727</span></span></li>
+                  <li class="todo"><span class="ic"></span><span>Quote check and repair</span></li>
+                  <li class="todo"><span class="ic"></span><span>Excel built and verified</span></li>
+                  <li class="todo"><span class="ic"></span><span>Summary written</span></li>
+                </ul>
+              </div>
+              <div class="panel">
+                <h4>Recent activity</h4>
+                <ul class="act">
+                  <li><span class="tm">17:42</span><span>Lead #48213: retry 1 of 2 (connection reset)</span></li>
+                  <li><span class="tm">17:40</span><span>Back up to speed after waking</span></li>
+                  <li><span class="tm">17:12</span><span>Laptop slept for 28 min. 6 leads put back in the queue, nothing lost.</span></li>
+                  <li><span class="tm">16:55</span><span>Lead #47002 held back: a phone number may have survived masking</span></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+        <aside class="drawer">
+          <div class="dh"><b>Chat</b><span class="btn sm">Hide ›</span></div>
+          <div class="chat">
+            <div class="you">How many have asked for a discount so far?</div>
+            <div class="ai">
+              <div class="who">Claude</div>
+              <div class="tool"><span class="ck">✓</span> Read the results so far</div>
+              <p>Of the 4,312 leads read, 1,268 asked for a discount (29.4%). Most asked for 10–20% off.</p>
+              <p style="color:var(--mut);font-size:12.5px">These are partial numbers. The final count comes with the summary.</p>
+            </div>
+          </div>
+          <div class="composer">
+            <div class="box"><span class="sp">Ask about this job…</span></div>
+            <div class="hint"><span>Uses Claude, not ChatGPT.</span></div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 4. STATES ============ -->
+  <section class="screen" id="s4">
+    <div class="stitle"><span class="num">4</span><h2>When something happens</h2></div>
+    <p class="sdesc">Each of these replaces the "Reading" line at the top of the job view, and the important ones also pop up as a Windows notification. The rule is always the same: <b>say what happened, what the app is doing about it, and whether anything was lost.</b></p>
+    <div class="bgrid">
+      <div class="ban amb">
+        <div class="top"><span class="tt">Paused: ChatGPT allowance at 95%</span><span class="pill p-amb"><span class="d"></span>Paused</span></div>
+        <p>The app stopped sending new leads so it never runs onto paid credits. It starts again on its own when the allowance resets: <b>Tue 24 Nov, 09:00</b> (in 3 days 15 h). 6,400 leads are waiting, and nothing was lost.</p>
+        <div class="acts"><span class="btn sm">Open folder</span></div>
+      </div>
+      <div class="ban blue">
+        <div class="top"><span class="tt">The laptop was asleep (17:12 – 17:40)</span><span class="pill p-run"><span class="d"></span>Reading</span></div>
+        <p>Sleep doesn't count as a stall. The 6 leads being read at the time went back in the queue, and nothing was lost. The time left leaves out the 28 minutes.</p>
+      </div>
+      <div class="ban amb">
+        <div class="top"><span class="tt">On battery: 64%, about 2 h left</span><span class="pill p-run"><span class="d"></span>Reading</span></div>
+        <p>Still reading. Below 20% the app stops starting new leads and pauses cleanly. Plug in to keep going overnight; it carries on by itself when power returns.</p>
+      </div>
+      <div class="ban red">
+        <div class="top"><span class="tt">Stalled: no reply for 3 minutes</span><span class="pill p-red"><span class="d"></span>Stalled</span></div>
+        <p>6 leads are in progress, but the reader hasn't answered. The internet connection may be down. Leads don't count as failed while the connection is down.</p>
+        <div class="acts"><span class="btn sm">Pause</span><span class="btn sm">Show details</span></div>
+      </div>
+      <div class="ban red">
+        <div class="top"><span class="tt">Paused to avoid paid credits</span><span class="pill p-amb"><span class="d"></span>Paused</span></div>
+        <p>ChatGPT reported a credit charge. Every lead in progress was stopped at once and put back in the queue (no tries used up). Check that automatic top-up is off in ChatGPT, then resume.</p>
+        <div class="acts"><span class="btn sm pri">I've checked, resume</span><span class="btn sm">How to check</span></div>
+      </div>
+      <div class="ban amb">
+        <div class="top"><span class="tt">Chat is off: extra usage is on in Claude</span><span class="pill p-run"><span class="d"></span>Reading</span></div>
+        <p>To stay on the plan's included usage, chat is blocked while extra usage is switched on in your Claude settings. The running job is not affected.</p>
+        <div class="acts"><span class="btn sm">How to switch it off</span><span class="btn sm">Check again</span></div>
+      </div>
+    </div>
+    <div class="sys">
+      <div>
+        <div class="slabel" style="padding:0 0 6px">Windows notification</div>
+        <div class="toast"><div class="a"><span class="logo" style="width:14px;height:14px;border-radius:3px"></span>Bulk Call Analysis</div><b>Sample ready to check</b>Discount asks · Sep–Oct: 20 leads read in 4 min.<div class="bb"><span>Open</span><span>Dismiss</span></div></div>
+      </div>
+      <div>
+        <div class="slabel" style="padding:0 0 6px">Tray icon, on hover</div>
+        <div class="tray">Bulk Call Analysis<br>Discount asks: reading 4,312 of 10,727<br>About 5 h left</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 5. DONE ============ -->
+  <section class="screen" id="s5">
+    <div class="stitle"><span class="num">5</span><h2>Done</h2></div>
+    <p class="sdesc">The finished view leads with the files, then shows <b>the check that every lead is accounted for</b>, then lists anything that needs a look. Here the chat drawer is hidden as a thin tab. <b>Rebuild with new rules</b> re-sorts the stored answers in seconds, with no re-reading and no allowance used.</p>
+    <div class="win" style="height:720px">
+      <div class="tb"><span>Bulk Call Analysis</span><div class="wc"><span>&#8212;</span><span>&#9744;</span><span>&#10005;</span></div></div>
+      <div class="wbody">
+        <aside class="side">
+          <div class="brand"><span class="logo"><svg width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="5" width="2" height="4" rx="1" fill="#fff"/><rect x="4.5" y="2" width="2" height="10" rx="1" fill="#fff"/><rect x="8" y="4" width="2" height="6" rx="1" fill="#fff"/><rect x="11.5" y="6" width="2" height="2" rx="1" fill="#fff"/></svg></span>Bulk Call Analysis</div>
+          <div class="newp"><span style="font-size:16px;line-height:1">+</span> New project</div>
+          <div class="slabel">Projects</div>
+          <div class="proj on"><div class="t">Discount asks · Sep–Oct</div><div class="s"><span class="pill p-amb" style="padding:0 7px">Done with issues</span></div></div>
+          <div class="proj"><div class="t">Certificate mentions · Jul–Oct</div><div class="s">Done · 9,412 leads</div></div>
+          <div class="proj"><div class="t">Webinar objections · Oct</div><div class="s">Done with issues · 2,104 leads</div></div>
+          <div class="sfoot">
+            <div class="row"><span>ChatGPT this week</span><b>53% used</b></div>
+            <div class="row"><span>Claude 5-hour</span><b>4% used</b></div>
+            <div class="set"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#67635b" stroke-width="1.4"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>Settings</div>
+          </div>
+        </aside>
+        <div class="main">
+          <div class="mhead"><div class="l"><h3>Discount asks · Sep–Oct</h3><span class="pill p-amb"><span class="d"></span>Done with issues</span></div><div class="r"><span class="btn">Rebuild with new rules</span><span class="btn">Run again with new dates</span></div></div>
+          <div class="job">
+            <div class="hero">
+              <div class="bignum"><span class="n">10,721</span><span class="of">of 10,727 leads read · finished Fri 20 Nov, 22:51 · 8 h 16 m, including 28 min asleep</span></div>
+              <div style="margin-top:10px;font-size:15px">3,152 asked for a discount (29.4%). Most asked for 10–20% off; 412 were offered something.</div>
+              <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><span class="btn pri">Open results.xlsx</span><span class="btn">Open summary</span><span class="btn">Open verify report</span><span class="btn">Open folder</span></div>
+            </div>
+            <div class="two" style="grid-template-columns:1fr 1fr">
+              <div class="panel recon">
+                <h4>Every lead accounted for</h4>
+                <div class="line tot"><span>Leads selected</span><span>11,058</span></div>
+                <div class="line"><span>Read</span><span>10,721</span></div>
+                <div class="line"><span>No transcript</span><span>331</span></div>
+                <div class="line"><span>Held back by masking</span><span>4</span></div>
+                <div class="line"><span>Failed after 2 tries</span><span>2</span></div>
+                <div class="line"><span>Not started</span><span>0</span></div>
+                <div class="line ok"><span>✓ Adds up: 11,058, no lead counted twice</span><span></span></div>
+              </div>
+              <div class="panel">
+                <h4>Worth a look (all marked in the sheet)</h4>
+                <ul class="iss" style="margin:0;padding-left:18px;font-size:13px">
+                  <li><b>12 quotes</b> still didn't match the transcript word for word after one retry, so they're flagged.</li>
+                  <li><b>4 leads held back:</b> possible personal data left after masking, so they were never sent to the reader. <span class="link">View</span></li>
+                  <li><b>2 leads failed</b> twice because the reader's answer wasn't in the expected shape. <span class="link">View</span></li>
+                  <li><b>57 leads</b> were over the size limit, and the sheet lists their calls not read.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="tab"><span>‹</span><span class="vt">Chat</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 6. FIRST RUN ============ -->
+  <section class="screen" id="s6">
+    <div class="stitle"><span class="num">6</span><h2>First run on a new computer</h2></div>
+    <p class="sdesc">What a teammate sees the first time they open the app. Each sign-in opens the vendor's own page; the app never sees the password. The last two items are things the app can't check for itself, so it asks you to confirm them.</p>
+    <div class="win" style="height:690px">
+      <div class="tb"><span>Bulk Call Analysis</span><div class="wc"><span>&#8212;</span><span>&#9744;</span><span>&#10005;</span></div></div>
+      <div class="wbody">
+        <div class="fr">
+          <div class="frc">
+            <h3>Set up this computer</h3>
+            <p class="sub">About 5 minutes. You only do this once.</p>
+            <div class="chk">
+              <div class="it ok"><span class="ic">✓</span><div class="tx"><b>App engine installed</b><span>Python and its packages, in the app's own folder</span></div></div>
+              <div class="it ok"><span class="ic">✓</span><div class="tx"><b>Masking tools ready</b><span>The name detector used to hide personal details</span></div></div>
+              <div class="it ok"><span class="ic">✓</span><div class="tx"><b>BigQuery connector found</b><span>Read-only access with your own key</span></div></div>
+              <div class="it ok"><span class="ic">✓</span><div class="tx"><b>Chat and reader programs downloaded and verified</b><span>Private copies, separate from anything else on this computer</span></div></div>
+              <div class="it do"><span class="ic"></span><div class="tx"><b>Sign in to Claude</b><span>Opens Claude's sign-in page in your browser</span></div><span class="btn sm pri">Sign in</span></div>
+              <div class="it ok"><span class="ic">✓</span><div class="tx"><b>Signed in to ChatGPT</b><span>Plan: Pro · weekly allowance 12% used</span></div></div>
+              <div class="it do"><span class="ic"></span><div class="tx"><b>Model training is off in both accounts</b><span>Claude: Privacy settings. ChatGPT: Data controls. <span class="link">Show me where</span></span></div><span class="btn sm">I've checked</span></div>
+              <div class="it do"><span class="ic"></span><div class="tx"><b>No paid extras switched on</b><span>Claude: extra usage off. ChatGPT: automatic credit top-up off. <span class="link">Show me where</span></span></div><span class="btn sm">I've checked</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="fb">
+    <h2>What do you think?</h2>
+    <p class="lead" style="font-size:13.5px">Click any that apply, then tell me the details in the terminal.</p>
+    <div class="options opts" data-multiselect>
+      <div class="option" data-choice="layout-ok" onclick="toggleSelect(this)"><h3>The layout is right</h3><p>Chat during setup, job view during the run, drawer for chat.</p></div>
+      <div class="option" data-choice="look-change" onclick="toggleSelect(this)"><h3>Change the look</h3><p>Colours, density, type, or a dark mode.</p></div>
+      <div class="option" data-choice="content-change" onclick="toggleSelect(this)"><h3>Change what's shown</h3><p>Something missing, too much, or worded badly.</p></div>
+    </div>
+    <p class="caveat">Not shown yet: Settings (sign-in status, BigQuery connector, data notes, models, workers, retention) and the "Rebuild with new rules" dialog. I'll mock those once the main flow is agreed.</p>
+  </div>
+
+</div>
+</body>
+</html>

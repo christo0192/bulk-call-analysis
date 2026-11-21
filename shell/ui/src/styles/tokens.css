@@ -1,0 +1,20 @@
+:root {
+  --bg: #e7e5e0;
+  --win: #fbfaf8;
+  --side: #f2f0ec;
+  --line: #e4e1da;
+  --line2: #d5d1c8;
+  --ink: #1c1b19;
+  --mut: #67635b;
+  --faint: #8d887e;
+  --acc: #0d6b5b;
+  --acc-soft: #e1efea;
+  --acc-ink: #0a5145;
+  --amb: #9a5208;
+  --amb-soft: #fbefdb;
+  --red: #ae2a20;
+  --red-soft: #fbe8e5;
+  --blue: #235d9f;
+  --blue-soft: #e5edf7;
+  --mono: 'Cascadia Mono', Consolas, ui-monospace, monospace;
+}
