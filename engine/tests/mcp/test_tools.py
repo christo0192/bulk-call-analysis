@@ -10,9 +10,10 @@ from typing import cast
 import pytest
 
 from bca.bq.guard import sql_tokens
+from bca.bq.pull import build_bundle
 from bca.bq.runner import DryRun
 from bca.mcp.host import MAX_RESULT_CHARS, ToolHost, ToolHostError, _cap
-from bca.store import JobSpec, LeadSourceSql, LeadStatus, save_spec
+from bca.store import CapRule, JobSpec, LeadSourceSql, LeadStatus, save_spec
 from tests.fakes.fake_bq import FakeBqRunner
 from tests.mcp.test_host import make_host, recipe_config
 
@@ -343,6 +344,10 @@ def test_lead_transcript_is_masked_and_capped(tmp_path: Path) -> None:
     )
     masked_path = job_dir / "masked"
     masked_path.mkdir(parents=True)
+    raw_path = job_dir / "raw"
+    raw_path.mkdir(parents=True)
+    with gzip.open(raw_path / "lead.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps({"transcript_text": "raw-only-secret"}) + "\n")
     with gzip.open(masked_path / "lead.jsonl.gz", "wt", encoding="utf-8") as handle:
         handle.write(json.dumps({"transcript_text": "Call [PHONE]\n" + ("x" * 50_000)}) + "\n")
     result = host.call("lead_transcript", {"job_id": "job", "ref": "S1"})
@@ -354,6 +359,91 @@ def test_lead_transcript_is_masked_and_capped(tmp_path: Path) -> None:
     host.store.add_lead("job", "missing", LeadStatus.masked, in_sample=1)
     with pytest.raises(ToolHostError, match="masked transcript not found"):
         host.call("lead_transcript", {"job_id": "job", "ref": "S2"})
+
+
+def test_lead_transcript_matches_the_runner_bundle(tmp_path: Path) -> None:
+    recipe = recipe_config()
+    host = make_host(tmp_path, recipe=recipe)
+    host.store.create_job("job", "project", 1)
+    spec = JobSpec(
+        1,
+        "job",
+        "project",
+        "title",
+        "question",
+        LeadSourceSql("SELECT 1"),
+        cap=CapRule(1000, "drop_short_then_oldest", 180),
+        output_schema={"type": "object", "properties": {}},
+        luna_model="gpt-5.6-luna",
+        luna_effort="high",
+    )
+    job_dir = tmp_path / "projects" / "project" / "jobs" / "job"
+    save_spec(spec, job_dir)
+    host.store.add_lead("job", "lead", LeadStatus.masked, in_sample=1)
+    calls = [
+        {
+            "call_id": "a",
+            "call_start": "2026-01-01T09:00:00+00:00",
+            "duration": 2500,
+            "transcript_text": "first",
+        },
+        {
+            "call_id": "b",
+            "call_start": "2026-01-01T10:00:00+00:00",
+            "duration": 500,
+            "transcript_text": "second",
+        },
+    ]
+    masked_path = job_dir / "masked"
+    masked_path.mkdir(parents=True)
+    with gzip.open(masked_path / "lead.jsonl.gz", "wt", encoding="utf-8") as handle:
+        for call in calls:
+            handle.write(json.dumps(call) + "\n")
+    expected = build_bundle("lead", calls, spec.cap, recipe.duration_unit).text
+    assert host.call("lead_transcript", {"job_id": "job", "ref": "S1"}) == expected
+
+
+def test_lead_transcript_over_cap_selects_the_same_calls(tmp_path: Path) -> None:
+    recipe = recipe_config()
+    host = make_host(tmp_path, recipe=recipe)
+    host.store.create_job("job", "project", 1)
+    spec = JobSpec(
+        1,
+        "job",
+        "project",
+        "title",
+        "question",
+        LeadSourceSql("SELECT 1"),
+        cap=CapRule(11, "drop_short_then_oldest", 180),
+        output_schema={"type": "object", "properties": {}},
+        luna_model="gpt-5.6-luna",
+        luna_effort="high",
+    )
+    job_dir = tmp_path / "projects" / "project" / "jobs" / "job"
+    save_spec(spec, job_dir)
+    host.store.add_lead("job", "lead", LeadStatus.masked, in_sample=1)
+    calls = [
+        {
+            "call_id": "short",
+            "call_start": "2026-01-01T09:00:00+00:00",
+            "duration": 1000,
+            "transcript_text": "1234567890",
+        },
+        {
+            "call_id": "long",
+            "call_start": "2026-01-01T10:00:00+00:00",
+            "duration": 1000,
+            "transcript_text": "abcdefghijk",
+        },
+    ]
+    masked_path = job_dir / "masked"
+    masked_path.mkdir(parents=True)
+    with gzip.open(masked_path / "lead.jsonl.gz", "wt", encoding="utf-8") as handle:
+        for call in calls:
+            handle.write(json.dumps(call) + "\n")
+    expected = build_bundle("lead", calls, spec.cap, recipe.duration_unit)
+    assert expected.calls_dropped == ["short"]
+    assert host.call("lead_transcript", {"job_id": "job", "ref": "S1"}) == expected.text
 
 
 def test_write_file_allows_plan_and_summary_only(tmp_path: Path) -> None:

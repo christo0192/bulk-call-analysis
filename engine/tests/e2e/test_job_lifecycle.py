@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 from pathlib import Path
 from typing import cast
 
 import pytest
+from openpyxl import load_workbook
 
 from bca.api.production import ProductionBackend
 from bca.api.server import RpcError
@@ -45,7 +47,10 @@ def _rows() -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict
                     "transcript_text": (
                         "my email is someone at example dot com. "
                         if lead_id == "1029"
-                        else f"Synthetic transcript for lead {lead_id}; call 9876543210."
+                        else (
+                            f"Synthetic transcript for lead {lead_id}; call 9876543210. "
+                            + ("over-cap " * 80 if lead_id == "1003" else "")
+                        )
                     ),
                 }
             )
@@ -132,16 +137,28 @@ def test_production_job_lifecycle_from_mcp_to_outputs(
         await backend.call("job/startFull", {"job": "job-one"})
         await _wait_state(backend, "job-one", {"done", "done_with_issues"})
         held_back = backend.store.rows(
-            "SELECT lead_id, reason FROM leads WHERE job_id=? AND status='held_back'", ("job-one",)
+            "SELECT lead_id, reason, calls_dropped_cap FROM leads WHERE job_id=? AND status='held_back'",
+            ("job-one",),
         )
-        assert held_back == []
+        assert [tuple(row) for row in held_back] == [("1003", "every call exceeds the per-lead cap", 1)]
         seeded = backend.store.rows(
             "SELECT status FROM leads WHERE job_id=? AND lead_id=?", ("job-one", "1029")
         )
         assert [tuple(row) for row in seeded] == [("done",)]
+        masked_seeded = job_dir / "masked" / "1029.jsonl.gz"
+        with gzip.open(masked_seeded, "rt", encoding="utf-8") as handle:
+            masked_text = handle.read()
+        assert "example dot com" not in masked_text
+        assert "[EMAIL]" in masked_text
         output = job_dir / "output"
         assert (output / "results.v1.xlsx").is_file()
         assert (output / "verify-report.v1.md").is_file()
+        workbook = load_workbook(output / "results.v1.xlsx", read_only=True, data_only=True)
+        try:
+            not_read = list(workbook["Not read"].iter_rows(values_only=True))
+        finally:
+            workbook.close()
+        assert any(row and row[0] == "1003" for row in not_read[1:])
         reconciliation = json.loads((output / "reconciliation.v1.json").read_text(encoding="utf-8"))
         assert reconciliation["adds_up"] is True
         assert sum(reconciliation["terms"].values()) == reconciliation["selected_distinct_ids"]

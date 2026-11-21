@@ -282,10 +282,19 @@ def rebuild_with_rules(
     spec = JobSpec.from_dict(spec.to_dict() | {"rules": [cast(Any, rule).to_dict() for rule in new_rules]})
     columns, rows, not_read = _spec_rows(store, job_id, spec, new_rules)
     rebuild_number = 1
-    while (out_dir / f"results.v{spec_version}.rebuild{rebuild_number}.xlsx").exists():
-        rebuild_number += 1
-    target = out_dir / f"results.v{spec_version}.rebuild{rebuild_number}.xlsx"
-    write_results(target, columns, rows, "Results")
-    _write_side_sheets(target, spec, not_read, "rebuilt with new rules")
+    while True:
+        target = out_dir / f"results.v{spec_version}.rebuild{rebuild_number}.xlsx"
+        try:
+            with target.open("xb"):
+                pass
+            break
+        except FileExistsError:
+            rebuild_number += 1
+    try:
+        write_results(target, columns, rows, "Results")
+        _write_side_sheets(target, spec, not_read, "rebuilt with new rules")
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
     store.append_event(job_id, "rules_rebuilt", {"rules": [cast(Any, rule).to_dict() for rule in new_rules]})
     return target, rebuild_number

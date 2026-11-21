@@ -220,6 +220,44 @@ def test_setup_run_checks_and_manual_mark_are_distinct(tmp_path: Path) -> None:
     assert marked == {"item": "training_off", "status": "manual_done"}
 
 
+def _spacy_check(result: dict[str, object]) -> dict[str, str]:
+    items = cast(list[dict[str, str]], result["items"])
+    return next(item for item in items if item["name"] == "spacy")
+
+
+def test_spacy_probe_ok_when_model_installed_without_running_a_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("bca.setup.spacy_model.importlib.util.find_spec", lambda name: object())
+    result = run(make_backend(tmp_path).call("setup/runChecks", {}))
+    assert _spacy_check(cast(dict[str, object], result)) == {
+        "name": "spacy",
+        "status": "ok",
+        "detail": "installed",
+        "action_id": "setup.spacy",
+    }
+
+
+def test_spacy_probe_fails_when_model_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bca.setup.spacy_model.importlib.util.find_spec", lambda name: None)
+    result = run(make_backend(tmp_path).call("setup/runChecks", {}))
+    assert _spacy_check(cast(dict[str, object], result))["status"] == "failed"
+    assert _spacy_check(cast(dict[str, object], result))["detail"] == "not installed"
+
+
+def test_spacy_probe_result_survives_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bca.setup.spacy_model.importlib.util.find_spec", lambda name: object())
+    backend = make_backend(tmp_path)
+    first = run(backend.call("setup/runChecks", {}))
+    run(backend.call("shutdown", {}))
+
+    restarted = make_backend(tmp_path)
+    checklist = run(restarted.call("setup/checklist", {}))
+    assert _spacy_check({"items": checklist})["status"] == "ok"
+    assert _spacy_check({"items": checklist})["detail"] == "installed"
+    assert _spacy_check(cast(dict[str, object], first))["status"] == "ok"
+
+
 def test_settings_get_only_reports_key_location(tmp_path: Path) -> None:
     key = tmp_path / "connector.json"
     key.write_text("synthetic-secret", encoding="utf-8")

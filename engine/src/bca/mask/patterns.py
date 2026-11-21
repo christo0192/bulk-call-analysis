@@ -35,6 +35,14 @@ _spoken_domain = re.compile(
     r"(?i)\b(?:g\s?mail|yahoo|ymail|hotmail|outlook|rediff(?:mail)?|icloud|protonmail)\b"
     r"(?:\s*(?:\.|dot)\s*(?:com|in|co|net|org)\b)?"
 )
+_spoken_email = re.compile(
+    r"(?ix)(?<![\w@])"
+    r"[a-z0-9]+(?:(?:[._]|\s+(?:dot|underscore)\s+)[a-z0-9]+)*"
+    r"\s*(?:at|@)\s*"
+    r"[a-z0-9]+(?:(?:\s*(?:\.|dot)\s*)[a-z0-9]+)*"
+    r"\s*(?:\.|dot)\s*(?:com|in|org|net|co|io|ai|edu|gov|us|uk)"
+    r"(?=\s|$|[,.!?])"
+)
 _number_word = re.compile(
     r"\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
     r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|"
@@ -71,7 +79,7 @@ def _money_spans(text: str) -> list[tuple[int, int]]:
 
 
 def _spoken_email_replacements(text: str) -> list[tuple[int, int]]:
-    replacements: list[tuple[int, int]] = []
+    replacements = {match.span() for match in _spoken_email.finditer(text)}
     stop = {
         "is",
         "id",
@@ -129,8 +137,8 @@ def _spoken_email_replacements(text: str) -> list[tuple[int, int]]:
             meaningful += len(token) > 1
             k -= 1
         if k != j:
-            replacements.append((tokens[k].start(), domain.end()))
-    return replacements
+            replacements.add((tokens[k].start(), domain.end()))
+    return sorted(replacements)
 
 
 def _number_word_spans(text: str) -> list[tuple[int, int]]:

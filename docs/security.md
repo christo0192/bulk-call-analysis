@@ -38,3 +38,6 @@ leak-scanned masked transcripts, masked aggregates, and the two approved plan
 files. Raw pulls and raw lead identifiers are never exposed to the model.
 Raw transcript bundles are removed after masking, including masking and leak-scan
 hold-backs; no raw bundle is retained once that lead reaches a terminal outcome.
+The metadata fields `lead_id`, `call_id`, `call_start`, `duration`, and
+`transcript_status` are not masked because they are structural BigQuery metadata,
+not free-text content.

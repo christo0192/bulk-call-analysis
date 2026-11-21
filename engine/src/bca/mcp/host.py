@@ -944,7 +944,8 @@ class ToolHost:
             raise ToolHostError("masked transcript not found")
         with gzip.open(path, "rt", encoding="utf-8") as handle:
             calls = [cast(dict[str, object], json.loads(line)) for line in handle if line.strip()]
-        bundle = build_bundle(lead_id, calls, spec.cap)
+        duration_unit = self.recipe.duration_unit if self.recipe is not None else "ms"
+        bundle = build_bundle(lead_id, calls, spec.cap, duration_unit)
         blocks = re.findall(r"(?ms)^=== CALL .*?(?=\n\n=== CALL |\Z)", bundle.text)
         selected = blocks[call_from - 1 : call_to]
         return "\n\n".join(selected) or "no calls in requested range"

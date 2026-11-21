@@ -129,6 +129,7 @@ def mask_names(
 ) -> tuple[str, dict[str, int]]:
     counts: dict[str, int] = {}
     original = text
+    roster_spans = [(match.start(), match.end()) for match in roster.finditer(original)] if roster else []
     ner_spans = ner.persons(original) if ner else []
     regex_spans: list[tuple[int, int]] = []
     regex_count = 0
@@ -151,25 +152,30 @@ def mask_names(
     collect(_intro, (2,))
     collect(_cap_slot, (2, 3))
     collect(_calling, (1,))
-    spans = regex_spans + [(span.start, span.end) for span in ner_spans]
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(spans):
+    candidate_spans = regex_spans + [(span.start, span.end) for span in ner_spans]
+    spans: list[tuple[int, int, bool]] = [
+        (start, end, False)
+        for start, end in candidate_spans
+        if not any(start < roster_end and end > roster_start for roster_start, roster_end in roster_spans)
+    ] + [(start, end, True) for start, end in roster_spans]
+    merged: list[tuple[int, int, bool]] = []
+    for start, end, is_roster in sorted(spans):
         if start < 0 or end <= start or end > len(original):
             continue
-        if merged and (start <= merged[-1][1] or original[merged[-1][1] : start].isspace()):
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        if merged and (
+            start <= merged[-1][1] or all(char in " \t" for char in original[merged[-1][1] : start])
+        ):
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end), merged[-1][2] or is_roster)
         else:
-            merged.append((start, end))
-    for start, end in reversed(merged):
-        text = text[:start] + "[NAME]" + text[end:]
+            merged.append((start, end, is_roster))
+    for start, end, is_roster in reversed(merged):
+        text = text[:start] + ("[ADVISOR]" if is_roster else "[NAME]") + text[end:]
     if regex_count:
         counts["INTRODUCTION"] = regex_count
     if ner_spans:
         counts["NER"] = sum(0 <= span.start < span.end <= len(original) for span in ner_spans)
-    if roster:
-        text, n = roster.subn("[ADVISOR]", text)
-        if n:
-            counts["ROSTER"] = n
+    if roster_spans:
+        counts["ROSTER"] = len(roster_spans)
     pattern = harvested_pattern(tuple(name for name in harvested if name.strip()))
     if pattern:
         text, n = pattern.subn("[NAME]", text)

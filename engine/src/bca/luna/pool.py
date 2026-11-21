@@ -282,7 +282,6 @@ class LunaPool:
     async def _heartbeat(self) -> None:
         while True:
             await asyncio.sleep(5)
-            await self.callbacks.on_activity(self.clock.now() if self.clock is not None else time.time())
 
     async def stop(self) -> None:
         self._stopping = True
@@ -545,7 +544,6 @@ class LunaPool:
             self._needs_recycle = True
 
     async def _notification(self, message: dict[str, Any]) -> None:
-        await self.callbacks.on_activity(self.clock.now() if self.clock is not None else time.time())
         method = message.get("method", "")
         params = message.get("params")
         if not isinstance(params, dict):
@@ -555,6 +553,8 @@ class LunaPool:
         lead = self._by_turn.get(turn_id) if turn_id else None
         if lead is None and thread_id:
             lead = next((item for item in self._leads.values() if item.thread_id == thread_id), None)
+        if lead is not None:
+            await self.callbacks.on_activity(self.clock.now() if self.clock is not None else time.time())
         if method == "account/rateLimits/updated":
             if self._snapshot is not None:
                 self._snapshot = merge_update(self._snapshot, params)

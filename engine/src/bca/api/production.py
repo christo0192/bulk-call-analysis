@@ -38,6 +38,7 @@ from bca.monitor.sleep import SleepDetector
 from bca.paths import job_dir
 from bca.setup.appdirs import directories
 from bca.setup.checklist import MANUAL, Checklist
+from bca.setup.spacy_model import is_model_installed
 from bca.stop import StopRequested
 from bca.store import (
     JobState,
@@ -82,10 +83,17 @@ class AppServerUnavailableError(ConnectionError):
 class ClaudeTurnError(RuntimeError):
     """A Claude turn failed after the API accepted the request."""
 
-    def __init__(self, message: str, reason: str = "claude_turn_failed", resets_at: object = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        reason: str = "claude_turn_failed",
+        resets_at: object = None,
+        detail: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.reason = reason
         self.resets_at = resets_at
+        self.detail = detail
 
 
 def _safe_error(exc: Exception) -> RpcError:
@@ -101,6 +109,8 @@ def _safe_error(exc: Exception) -> RpcError:
         return RpcError(-32001, "Codex app-server did not start", {"reason": "app_server_unavailable"})
     if isinstance(exc, ClaudeTurnError):
         data: dict[str, object] = {"reason": exc.reason, "message": str(exc)}
+        if exc.detail is not None:
+            data["detail"] = exc.detail
         if exc.resets_at is not None:
             data["resetsAt"] = exc.resets_at
         return RpcError(-32001, "Claude turn failed", data)
@@ -473,17 +483,6 @@ class ProductionBackend(ApiBackend):
     def runner_deps(self, job_id: str, project_id: str) -> RunnerDeps:
         job_path = job_dir(self.app_data, project_id, job_id)
         job_path.mkdir(parents=True, exist_ok=True)
-        approved_bytes: int | None = None
-        try:
-            spec, version = load_latest_spec(job_path)
-            del spec
-            preflight = job_path / f"preflight.v{version}.json"
-            if preflight.is_file():
-                raw = json.loads(preflight.read_text(encoding="utf-8"))
-                if isinstance(raw, dict) and isinstance(raw.get("dry_run_bytes"), int):
-                    approved_bytes = int(raw["dry_run_bytes"])
-        except (OSError, ValueError, json.JSONDecodeError):
-            approved_bytes = None
         return RunnerDeps(
             self.store,
             self._make_bq(),
@@ -495,7 +494,7 @@ class ProductionBackend(ApiBackend):
             job_path,
             self._ner,
             self.concurrency,
-            approved_bytes=approved_bytes,
+            approved_bytes=None,
             can_dispatch=self._can_dispatch,
         )
 
@@ -669,7 +668,7 @@ class ProductionBackend(ApiBackend):
                 raise ClaudeTurnError(
                     "Claude allowance is exhausted", "claude_limit_reached", getattr(exc, "resets_at", None)
                 ) from exc
-            raise ClaudeTurnError(message) from exc
+            raise ClaudeTurnError(message, detail=reason) from exc
         except RpcError:
             raise
         except Exception as exc:
@@ -699,6 +698,8 @@ class ProductionBackend(ApiBackend):
                 "reason": exc.reason,
                 "message": str(exc),
             }
+            if exc.detail is not None:
+                data["detail"] = exc.detail
             if exc.resets_at is not None:
                 data["resetsAt"] = exc.resets_at
             raise RpcError(-32001, "Claude turn failed", data) from exc
@@ -996,7 +997,9 @@ class ProductionBackend(ApiBackend):
                     ),
                     "claude_copy": lambda: (True, "available"),
                     "codex_copy": lambda: (shutil.which("codex") is not None, "codex"),
-                    "spacy": lambda: (self._ner is not None or self._test_fakes_allowed(), "configured"),
+                    "spacy": lambda: (
+                        (True, "installed") if is_model_installed() else (False, "not installed")
+                    ),
                 }
                 return {"items": [item.__dict__ for item in checklist.run_checks(probes)]}
             if method == "setup/markManual":

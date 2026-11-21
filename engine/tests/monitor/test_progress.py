@@ -29,7 +29,7 @@ def test_counts_reconcile_synthetic_store() -> None:
     result = counts(store, "job")
     assert result.done == 1
     assert result.held_back == 1 and result.no_transcript == 1 and result.capped == 1
-    assert result.in_flight == 1 and result.remaining == 2
+    assert result.in_flight == 1 and result.remaining == 1
     assert len(result.checklist) == 12
     reconciliation = reconcile(store, "job")
     assert reconciliation.ok
@@ -37,6 +37,28 @@ def test_counts_reconcile_synthetic_store() -> None:
     assert reconciliation.counts[LeadStatus.held_back.value] == result.held_back
     assert reconciliation.counts[LeadStatus.no_transcript.value] == result.no_transcript
     assert sum(reconciliation.counts.values()) == 5
+    store.close()
+
+
+def test_progress_excludes_unusable_leads_from_total_and_remaining() -> None:
+    store = open_store(Path(":memory:"))
+    store.create_project("project", "Project")
+    store.create_job("job", "project", 1)
+    store.add_lead("job", "done", LeadStatus.queued)
+    attempt = store.start_attempt("job", "done", "model")
+    assert store.record_result("job", "done", attempt, {}, True, [])
+    for lead_id, status in (
+        ("missing", LeadStatus.no_transcript),
+        ("short", LeadStatus.too_short),
+        ("failed", LeadStatus.transcription_failed),
+    ):
+        store.add_lead("job", lead_id, status)
+    result = counts(store, "job")
+    assert result.total == 1
+    assert result.remaining == 0
+    assert result.no_transcript == 1
+    assert result.too_short == 1
+    assert result.transcription_failed == 1
     store.close()
 
 
@@ -78,7 +100,7 @@ def test_counts_expose_each_terminal_status_and_retry_only_failed_attempts() -> 
     result = counts(store, "job")
     assert result.done == 1
     assert result.transcription_failed == 1 and result.too_short == 1 and result.not_started == 1
-    assert result.remaining == 0
+    assert result.remaining == 1
     assert (
         sum(
             (

@@ -108,20 +108,28 @@ def counts(store: Store, job_id: str, sample: bool | None = None) -> Counts:
                 args,
             )[0][0]
         )
-        total = len(rows)
-        failed_count = sum(failed.values())
-        remaining = max(
-            0,
-            total
-            - statuses[LeadStatus.done]
-            - statuses[LeadStatus.in_flight]
-            - retrying
-            - failed_count
-            - statuses[LeadStatus.held_back],
+        unusable = sum(
+            statuses[status]
+            for status in (
+                LeadStatus.no_transcript,
+                LeadStatus.transcription_failed,
+                LeadStatus.too_short,
+                LeadStatus.not_found,
+            )
         )
-        job_row = store.rows("SELECT state FROM jobs WHERE id=?", (job_id,))
-        if job_row and str(job_row[0][0]) in {"done", "done_with_issues", "failed", "cancelled"}:
-            remaining = 0
+        total = len(rows) - unusable
+        remaining = (
+            int(
+                store.rows(
+                    "SELECT count(*) FROM leads l WHERE l.job_id=? "
+                    "AND l.status IN ('pending', 'pulled', 'masked', 'queued', 'not_started') "
+                    f"{clause}",
+                    args,
+                )[0][0]
+            )
+            - retrying
+        )
+        remaining = max(0, remaining)
         return Counts(
             statuses[LeadStatus.done],
             statuses[LeadStatus.in_flight],
