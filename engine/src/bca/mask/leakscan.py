@@ -20,6 +20,7 @@ from .patterns import (
     _pan,
     _phone,
     _spelled_pan,
+    _spoken_email_stop_words,
     _upi,
     _url,
 )
@@ -55,12 +56,20 @@ _detectors: dict[str, tuple[re.Pattern[str], str]] = {
 }
 _placeholder = re.compile(r"\[[A-Z_]+\]")
 _spoken_email_net = re.compile(
-    r"(?ix)(?:@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*"
-    r"(?:[a-z0-9_-]+\s+){0,6}(?:dot|\.)\s+[a-z]{2,}\b"
+    r"(?ix)(?:[a-z0-9][\w.-]*@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*[,]*\s*"
+    r"(?:[a-z0-9_-]+\s+){0,6}[,]*\s*(?:(?:dot\.?|period|point)\s*|\.\s*)"
+    r"(?:[a-z]{2,10}|[a-z](?:\s+[a-z]){1,9})\b"
 )
 _spoken_webmail_net = re.compile(
-    r"(?ix)(?<!\w)(?:[a-z0-9][\w.-]*\s+(?:at\s+(?:the\s+rate(?:\s+of)?\s+)?|at\s+the\s+rate\s+)?|[a-z0-9][\w.-]*@)"
-    r"(?:g\s?mail|yahoo|ymail|hotmail|outlook|rediff(?:mail)?|icloud|protonmail)\b"
+    r"(?ix)(?<!\w)(?P<local>(?:[a-z0-9][\w.-]*\s+){1,8})"
+    r"(?:@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*[,]*\s*"
+    r"(?:g[\s-]?mail|y\s?mail|yahoo|hot\s?mail|out\s?look|rediff\s?mail|"
+    r"i\s?cloud|proton\s?mail|zoho\s?mail)\b"
+    r"|(?<!\w)(?P<tld_local>(?:[a-z0-9][\w.-]*\s+){1,8})"
+    r"(?:g[\s-]?mail|y\s?mail|yahoo|hot\s?mail|out\s?look|rediff\s?mail|"
+    r"i\s?cloud|proton\s?mail|zoho\s?mail)\b\s*[,]*\s*"
+    r"(?:(?:dot\.?|period|point)\s*|\.\s*)"
+    r"(?:[a-z]{2,10}|[a-z](?:\s+[a-z]){1,9})\b"
 )
 
 
@@ -68,11 +77,15 @@ def _scan_spoken_email_net(text: str) -> list[Hit]:
     scrubbed = _placeholder.sub(lambda match: " " * len(match.group()), text)
     matches = list(_spoken_email_net.finditer(scrubbed))
     matches.extend(
-        match
-        for match in _spoken_webmail_net.finditer(scrubbed)
-        if match.group().split(maxsplit=1)[0].casefold() not in {"check", "please", "email", "mail"}
+        match for match in _spoken_webmail_net.finditer(scrubbed) if _webmail_local_looks_like_address(match)
     )
     return [Hit("EMAIL_LIKE", match.start(), match.end()) for match in matches]
+
+
+def _webmail_local_looks_like_address(match: re.Match[str]) -> bool:
+    local = match.group("local") or match.group("tld_local") or ""
+    tokens = local.split()
+    return bool(tokens) and tokens[-1].strip(",.?!").casefold() not in _spoken_email_stop_words
 
 
 def scan_text(

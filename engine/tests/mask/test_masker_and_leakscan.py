@@ -4,7 +4,7 @@ import gzip
 import json
 from pathlib import Path
 
-from bca.mask.leakscan import calibrate, scan_lead
+from bca.mask.leakscan import calibrate, scan_lead, scan_text
 from bca.mask.masker import MaskingContext, mask_lead_stream, run_masking
 from bca.mask.names import Span
 
@@ -60,6 +60,23 @@ def test_leak_scan_holds_back_unmasked_phone_and_ignores_placeholders(tmp_path: 
     assert scan_lead(planted).held_back
     assert not scan_lead(clean).hits
     assert calibrate([planted])["PHONE_LIKE"] == 1
+
+
+def test_leak_net_ignores_provider_words_without_an_address() -> None:
+    for text in (
+        "Advisor: what is your gmail id?",
+        "I have sent the details to your gmail.",
+        "send it on gmail",
+        "my yahoo is very old",
+        "your outlook calendar",
+        "please check your gmail",
+    ):
+        assert not scan_text(text)
+
+
+def test_leak_net_still_holds_back_unmasked_addresses() -> None:
+    for text in ("ravi at gmail dot com", "ravi at acme dot info"):
+        assert scan_text(text)
 
 
 def test_leak_scan_detects_handle_and_configures_precision(tmp_path: Path) -> None:
