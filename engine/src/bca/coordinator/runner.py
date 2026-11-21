@@ -437,11 +437,11 @@ class _Callbacks(PoolCallbacks):
         self.runner._liveness.lead_ended(task.lead_id, self.runner._ts())
 
     async def _check_monitors(self, ts: float, *, activity: bool) -> None:
+        for event in self.runner._liveness.check(ts):
+            self.runner._publish(event.kind, event.data)
         if activity:
             self.runner._last_activity_ts = ts
             self.runner._liveness.on_activity(ts)
-        for event in self.runner._liveness.check(ts):
-            self.runner._publish(event.kind, event.data)
         for event in self.runner._sleep.heartbeat(ts, self.runner.job_id):
             if event.kind == "sleep_detected" and self.runner._state() in {
                 JobState.pulling,
