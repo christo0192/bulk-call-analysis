@@ -26,7 +26,11 @@ pub enum RpcError {
     #[error("RPC connection closed")]
     Closed,
     #[error("RPC error {code}: {message}")]
-    Remote { code: i64, message: String },
+    Remote {
+        code: i64,
+        message: String,
+        data: Option<Value>,
+    },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -251,6 +255,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> Client<W> {
                             .and_then(Value::as_str)
                             .unwrap_or("unknown error")
                             .to_owned(),
+                        data: error.get("data").cloned(),
                     })
                 } else {
                     Ok(object.get("result").cloned().unwrap_or(Value::Null))
@@ -380,14 +385,55 @@ mod tests {
             let (notifications, _) = mpsc::channel(1);
             client
                 .dispatch(
-                    json!({"id":sent["id"],"error":{"code":7,"message":"bad"}}),
+                    json!({"id":sent["id"],"error":{"code":7,"message":"bad","data":{"reason":"x"}}}),
                     &notifications,
                 )
                 .await;
             assert!(matches!(
                 request.await.unwrap(),
-                Err(RpcError::Remote { code: 7, .. })
+                Err(RpcError::Remote { code: 7, data: Some(data), .. }) if data == json!({"reason":"x"})
             ));
+        });
+    }
+
+    #[test]
+    fn overlapping_requests_can_complete_out_of_order() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, server_io) = tokio::io::duplex(4096);
+            let client = Client::new(client_io);
+            let first = {
+                let c = client.clone();
+                tokio::spawn(
+                    async move { c.request("slow", json!({}), Duration::from_secs(1)).await },
+                )
+            };
+            let second = {
+                let c = client.clone();
+                tokio::spawn(
+                    async move { c.request("fast", json!({}), Duration::from_secs(1)).await },
+                )
+            };
+            let mut server = BufReader::new(server_io);
+            let mut ids = HashMap::new();
+            for _ in 0..2 {
+                let mut line = String::new();
+                server.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                ids.insert(
+                    request["method"].as_str().unwrap().to_owned(),
+                    request["id"].clone(),
+                );
+            }
+            let (notifications, _) = mpsc::channel(1);
+            client
+                .dispatch(json!({"id": ids["fast"], "result": "fast"}), &notifications)
+                .await;
+            client
+                .dispatch(json!({"id": ids["slow"], "result": "slow"}), &notifications)
+                .await;
+            assert_eq!(second.await.unwrap().unwrap(), json!("fast"));
+            assert_eq!(first.await.unwrap().unwrap(), json!("slow"));
         });
     }
 

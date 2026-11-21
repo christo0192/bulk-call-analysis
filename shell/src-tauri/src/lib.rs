@@ -1,10 +1,13 @@
 mod engine;
+mod notifications;
+mod paths;
 mod power;
 mod procguard;
 pub mod rpc;
 mod sleepwatch;
 mod tray;
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use std::{
     path::PathBuf,
@@ -76,20 +79,185 @@ impl log::Log for AppLogger {
     fn flush(&self) {}
 }
 
+#[derive(Debug, Serialize)]
+struct CommandError {
+    code: Option<i64>,
+    message: String,
+    data: Option<Value>,
+}
+
+impl From<rpc::RpcError> for CommandError {
+    fn from(error: rpc::RpcError) -> Self {
+        let code = match &error {
+            rpc::RpcError::Remote { code, .. } => Some(*code),
+            _ => None,
+        };
+        let (message, data) = match error {
+            rpc::RpcError::Timeout => ("RPC timed out".into(), Some(json!({"reason":"timeout"}))),
+            rpc::RpcError::Closed
+            | rpc::RpcError::Io(_)
+            | rpc::RpcError::Malformed(_)
+            | rpc::RpcError::WriteTimeout => (
+                "The engine is unavailable".into(),
+                Some(json!({"reason":"engine_unavailable"})),
+            ),
+            rpc::RpcError::Remote { message, data, .. } => (message, data),
+        };
+        Self {
+            code,
+            message,
+            data,
+        }
+    }
+}
+
+const UI_METHODS: &[&str] = &[
+    "app/status",
+    "setup/checklist",
+    "setup/runChecks",
+    "setup/markManual",
+    "settings/get",
+    "settings/set",
+    "projects/list",
+    "projects/create",
+    "projects/jobs",
+    "files/list",
+    "ids/attach",
+    "chat/send",
+    "chat/stop",
+    "chat/history",
+    "job/status",
+    "job/snapshot",
+    "job/plan",
+    "job/sample",
+    "job/outputs",
+    "job/approvePlan",
+    "job/approveSample",
+    "job/startFull",
+    "job/pause",
+    "job/resume",
+    "job/rebuildRules",
+    "auth/claudeLogin",
+    "auth/codexLogin",
+    "auth/status",
+    "allowance/status",
+];
+
+fn ui_method_allowed(method: &str) -> bool {
+    UI_METHODS.contains(&method)
+}
+
+fn method_not_allowed_error() -> CommandError {
+    CommandError {
+        code: Some(-32601),
+        message: "Method not found".into(),
+        data: Some(json!({"reason":"method_not_allowed"})),
+    }
+}
+
 #[tauri::command]
 async fn engine_call(
     engine: State<'_, Engine>,
     method: String,
     params: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
+    if !ui_method_allowed(&method) {
+        return Err(method_not_allowed_error());
+    }
     engine
         .call(&method, params)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 #[tauri::command]
 async fn engine_status(engine: State<'_, Engine>) -> Result<String, String> {
     Ok(engine.status().await)
+}
+
+const PROJECT_EXTENSIONS: &[&str] = &["xlsx", "md", "csv", "txt", "json"];
+
+#[tauri::command]
+async fn open_project_file(
+    app: tauri::AppHandle,
+    engine: State<'_, Engine>,
+    project: String,
+    name: String,
+) -> Result<(), CommandError> {
+    let result = engine
+        .call("files/path", json!({"project": project, "name": name}))
+        .await
+        .map_err(CommandError::from)?;
+    let project_dir = result
+        .get("projectDir")
+        .and_then(Value::as_str)
+        .ok_or(CommandError {
+            code: None,
+            message: "The engine is unavailable".into(),
+            data: Some(json!({"reason":"engine_unavailable"})),
+        })?;
+    let candidate = result
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or(CommandError {
+            code: None,
+            message: "File not found".into(),
+            data: Some(json!({"reason":"file_not_found"})),
+        })?;
+    let path = paths::validate_project_path(
+        std::path::Path::new(project_dir),
+        std::path::Path::new(candidate),
+        PROJECT_EXTENSIONS,
+    )
+    .map_err(path_error)?;
+    tauri_plugin_opener::OpenerExt::opener(&app)
+        .open_path(&path, None::<&str>)
+        .map_err(|error| CommandError {
+            code: None,
+            message: error.to_string(),
+            data: Some(json!({"reason":"engine_unavailable"})),
+        })
+}
+
+#[tauri::command]
+async fn open_project_folder(
+    app: tauri::AppHandle,
+    engine: State<'_, Engine>,
+    project: String,
+) -> Result<(), CommandError> {
+    let result = engine
+        .call("files/path", json!({"project": project, "name": ""}))
+        .await
+        .map_err(CommandError::from)?;
+    let project_dir = result
+        .get("projectDir")
+        .and_then(Value::as_str)
+        .ok_or(CommandError {
+            code: None,
+            message: "File not found".into(),
+            data: Some(json!({"reason":"file_not_found"})),
+        })?;
+    let path =
+        paths::validate_project_folder(std::path::Path::new(project_dir)).map_err(path_error)?;
+    tauri_plugin_opener::OpenerExt::opener(&app)
+        .open_path(&path, None::<&str>)
+        .map_err(|error| CommandError {
+            code: None,
+            message: error.to_string(),
+            data: Some(json!({"reason":"engine_unavailable"})),
+        })
+}
+
+fn path_error(error: paths::OpenError) -> CommandError {
+    let reason = match error {
+        paths::OpenError::FileNotFound => "file_not_found",
+        paths::OpenError::OutsideProject => "outside_project",
+        paths::OpenError::TypeNotAllowed => "type_not_allowed",
+    };
+    CommandError {
+        code: None,
+        message: error.to_string(),
+        data: Some(json!({"reason": reason})),
+    }
 }
 
 pub fn run() {
@@ -97,6 +265,8 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             let _ = crate::tray::show_main_window(app);
         }))
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .args(["--autostart"])
@@ -121,7 +291,12 @@ pub fn run() {
             sleepwatch::start(engine.clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![engine_call, engine_status])
+        .invoke_handler(tauri::generate_handler![
+            engine_call,
+            engine_status,
+            open_project_file,
+            open_project_folder
+        ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let _ = window.destroy();
@@ -229,6 +404,54 @@ mod tests {
     };
     use std::time::{Duration, Instant};
     use tokio::sync::Notify;
+
+    #[test]
+    fn allowlist_accepts_ui_methods() {
+        assert!(ui_method_allowed("chat/send"));
+        assert!(ui_method_allowed("allowance/status"));
+        assert!(ui_method_allowed("ids/attach"));
+    }
+
+    #[test]
+    fn allowlist_rejects_internal_methods() {
+        assert!(!ui_method_allowed("shutdown"));
+        assert!(!ui_method_allowed("files/path"));
+        assert!(!ui_method_allowed("health/ping"));
+    }
+
+    #[test]
+    fn allowlist_is_case_sensitive() {
+        assert!(!ui_method_allowed("Chat/send"));
+        assert!(!ui_method_allowed("APP/status"));
+    }
+
+    #[test]
+    fn rejected_method_has_structured_error() {
+        let error = method_not_allowed_error();
+        assert_eq!(error.code, Some(-32601));
+        assert_eq!(error.data, Some(json!({"reason":"method_not_allowed"})));
+    }
+
+    #[test]
+    fn local_errors_have_structured_reasons() {
+        let timeout = CommandError::from(rpc::RpcError::Timeout);
+        assert_eq!(timeout.code, None);
+        assert_eq!(timeout.data, Some(json!({"reason":"timeout"})));
+        let closed = CommandError::from(rpc::RpcError::Closed);
+        assert_eq!(closed.data, Some(json!({"reason":"engine_unavailable"})));
+    }
+
+    #[test]
+    fn remote_error_preserves_code_message_and_data() {
+        let error = CommandError::from(rpc::RpcError::Remote {
+            code: -32001,
+            message: "failed".into(),
+            data: Some(json!({"reason":"safe"})),
+        });
+        assert_eq!(error.code, Some(-32001));
+        assert_eq!(error.message, "failed");
+        assert_eq!(error.data, Some(json!({"reason":"safe"})));
+    }
 
     #[test]
     fn closing_last_window_keeps_engine_running() {

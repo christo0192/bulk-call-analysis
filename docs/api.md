@@ -38,6 +38,8 @@ successful results.
 | `os/resumeHint` | `{}` | `{status: "accepted", actions: [...]}` |
 | `os/powerStatus` | `{onAc: bool|null, percent: int|null}` | `{status: "accepted"}` |
 
+The shell only forwards an allowlisted subset of methods to the UI; see `shell/src-tauri/src/lib.rs`.
+
 `chat/send` starts one masked, subscription-backed Claude turn for a project.
 It is exempt from the generic 30-second request timeout, but it can be
 cancelled with `chat/stop` or by shutdown. Only one turn per project runs at a

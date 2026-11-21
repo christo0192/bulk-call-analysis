@@ -7,15 +7,24 @@ use std::{
     collections::VecDeque,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri_plugin_notification::NotificationExt;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
     sync::{mpsc, Mutex},
     time::sleep,
 };
+
+pub fn method_timeout(method: &str) -> Duration {
+    if method == "chat/send" {
+        Duration::from_secs(2 * 60 * 60)
+    } else {
+        Duration::from_secs(30)
+    }
+}
 
 pub struct Engine<R: Runtime = tauri::Wry> {
     inner: Arc<Inner<R>>,
@@ -230,25 +239,57 @@ impl<R: Runtime> Engine<R> {
                     }
                 }
             }));
+        let mut latest_eta: Option<String> = None;
+        let mut latest_progress = (0_u64, 0_u64);
         while let Some(notification) = rx.recv().await {
             self.update_power_for_notification(&notification).await;
-            if notification.get("method").and_then(Value::as_str) == Some("job/progress")
-                && !self.inner.shutting_down.load(Ordering::Acquire)
-            {
+            let method = notification.get("method").and_then(Value::as_str);
+            if method == Some("engine/event") {
+                let params = notification.get("params").cloned().unwrap_or_default();
+                if params.get("kind").and_then(Value::as_str) == Some("eta") {
+                    latest_eta = format_eta(
+                        params.get("low").and_then(Value::as_u64),
+                        params.get("high").and_then(Value::as_u64),
+                    );
+                }
+            }
+            if method == Some("job/progress") && !self.inner.shutting_down.load(Ordering::Acquire) {
                 if let Some(app) = &self.inner.app {
                     if let Some(tray) = app.tray_by_id("main") {
                         let params = notification.get("params").cloned().unwrap_or_default();
                         let done = params.get("done").and_then(Value::as_u64).unwrap_or(0);
                         let total = params.get("total").and_then(Value::as_u64).unwrap_or(0);
-                        let remaining = params
-                            .get("remaining")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        let _ = tray.set_tooltip(Some(format_tooltip(
+                        latest_progress = (done, total);
+                        let _ = tray.set_tooltip(Some(format_tray_tooltip(
                             done,
                             total,
-                            remaining.to_owned(),
+                            latest_eta
+                                .as_deref()
+                                .or_else(|| params.get("remaining").and_then(Value::as_str)),
                         )));
+                    }
+                }
+            }
+            if method == Some("job/state") {
+                let params = notification.get("params").cloned().unwrap_or_default();
+                let state = params
+                    .get("state")
+                    .or_else(|| params.get("status"))
+                    .and_then(Value::as_str);
+                if let Some(app) = &self.inner.app {
+                    if let Some(tray) = app.tray_by_id("main") {
+                        let tooltip = match state {
+                            Some("paused") => {
+                                format_tray_status(false, true, 0, 0, None, Some("usage limit"))
+                            }
+                            Some("done") | Some("done_with_issues") => "Bulk Call Analysis".into(),
+                            _ => format_tray_tooltip(
+                                latest_progress.0,
+                                latest_progress.1,
+                                latest_eta.as_deref(),
+                            ),
+                        };
+                        let _ = tray.set_tooltip(Some(tooltip));
                     }
                 }
             }
@@ -276,7 +317,7 @@ impl<R: Runtime> Engine<R> {
             .await
             .clone()
             .ok_or(RpcError::Closed)?;
-        let result = rpc.request(method, params, Duration::from_secs(30)).await;
+        let result = rpc.request(method, params, method_timeout(method)).await;
         if matches!(result, Err(RpcError::WriteTimeout | RpcError::Io(_))) {
             if let Some(guard) = self.inner.guard.lock().await.clone() {
                 let _ = tokio::task::spawn_blocking(move || guard.terminate()).await;
@@ -403,6 +444,19 @@ impl<R: Runtime> Engine<R> {
     }
     fn emit(&self, event: &str, payload: Value) {
         if let Some(app) = &self.inner.app {
+            if event == "engine-event" {
+                let ctx = crate::notifications::NotifyCtx {
+                    now: SystemTime::now(),
+                    ..Default::default()
+                };
+                if let Some((title, body)) = crate::notifications::notification_for(&payload, &ctx)
+                {
+                    if let Err(error) = app.notification().builder().title(title).body(body).show()
+                    {
+                        log::debug!("could not show notification: {error}");
+                    }
+                }
+            }
             let _ = app.emit(event, payload);
         }
     }
@@ -799,6 +853,53 @@ pub fn format_tooltip(done: u64, total: u64, remaining: String) -> String {
     )
 }
 
+pub fn format_tray_tooltip(done: u64, total: u64, eta: Option<&str>) -> String {
+    let eta = eta
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(" · {value}"))
+        .unwrap_or_default();
+    format!(
+        "Bulk Call Analysis — Reading {} of {}{}",
+        format_number(done),
+        format_number(total),
+        eta
+    )
+}
+
+pub fn format_tray_status(
+    running: bool,
+    paused: bool,
+    done: u64,
+    total: u64,
+    eta: Option<&str>,
+    pause_reason: Option<&str>,
+) -> String {
+    if paused {
+        return format!(
+            "Bulk Call Analysis — Paused{}",
+            pause_reason
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default()
+        );
+    }
+    if running {
+        return format_tray_tooltip(done, total, eta);
+    }
+    "Bulk Call Analysis".into()
+}
+
+pub fn format_eta(low_seconds: Option<u64>, high_seconds: Option<u64>) -> Option<String> {
+    let seconds = high_seconds.or(low_seconds)?;
+    if seconds == 0 {
+        return None;
+    }
+    if seconds >= 3600 {
+        Some(format!("about {} h left", (seconds + 3599) / 3600))
+    } else {
+        Some(format!("about {} m left", (seconds + 59) / 60))
+    }
+}
+
 #[allow(dead_code)]
 fn format_number(value: u64) -> String {
     let digits = value.to_string();
@@ -818,6 +919,55 @@ fn format_number(value: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_send_has_two_hour_backstop() {
+        assert_eq!(method_timeout("chat/send"), Duration::from_secs(7200));
+    }
+
+    #[test]
+    fn other_methods_keep_thirty_second_timeout() {
+        assert_eq!(method_timeout("chat/stop"), Duration::from_secs(30));
+        assert_eq!(method_timeout("files/path"), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn tooltip_omits_missing_eta() {
+        assert_eq!(
+            format_tray_tooltip(4312, 10727, None),
+            "Bulk Call Analysis — Reading 4,312 of 10,727"
+        );
+    }
+
+    #[test]
+    fn paused_tooltip_includes_reason() {
+        assert_eq!(
+            format_tray_status(false, true, 0, 0, None, Some("usage limit")),
+            "Bulk Call Analysis — Paused (usage limit)"
+        );
+    }
+
+    #[test]
+    fn idle_tooltip_is_short() {
+        assert_eq!(
+            format_tray_status(false, false, 0, 0, None, None),
+            "Bulk Call Analysis"
+        );
+    }
+
+    #[test]
+    fn eta_formats_hours_and_minutes() {
+        assert_eq!(
+            format_eta(Some(60), Some(300)),
+            Some("about 5 m left".into())
+        );
+        assert_eq!(
+            format_eta(Some(14_000), Some(18_000)),
+            Some("about 5 h left".into())
+        );
+        assert_eq!(format_eta(None, None), None);
+    }
+
     #[test]
     fn strips_api_keys() {
         std::env::set_var("OPENAI_API_KEY", "secret");

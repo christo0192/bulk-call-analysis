@@ -14,7 +14,9 @@ pub fn show_main_window(app: &AppHandle) -> tauri::Result<()> {
             tauri::WebviewUrl::App("index.html".into()),
         )
         .title("Bulk Call Analysis")
-        .inner_size(900.0, 600.0)
+        .inner_size(1280.0, 820.0)
+        .min_inner_size(1024.0, 680.0)
+        .center()
         .build()?,
     };
     window.show()?;
