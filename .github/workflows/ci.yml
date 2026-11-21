@@ -55,6 +55,13 @@ jobs:
         working-directory: shell/src-tauri
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: shell/ui
+      - run: npm run build
+        working-directory: shell/ui
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -64,3 +71,23 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: shell/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: shell/ui/package-lock.json
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e

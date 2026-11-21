@@ -4,16 +4,21 @@
   "version": "0.1.0",
   "identifier": "app.bulkcallanalysis.desktop",
   "build": {
-    "frontendDist": "../ui",
-    "devUrl": "http://localhost:1420"
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": {"script": "npm run build", "cwd": "ui"},
+    "beforeDevCommand": {"script": "npm run dev", "cwd": "ui"}
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [{
       "label": "main",
       "title": "Bulk Call Analysis",
-      "width": 900,
-      "height": 600,
+      "width": 1280,
+      "height": 820,
+      "minWidth": 1024,
+      "minHeight": 680,
+      "center": true,
       "create": false,
       "visible": false,
       "resizable": true,

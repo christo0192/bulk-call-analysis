@@ -30,6 +30,11 @@ node_modules/
 target/
 shell/src-tauri/target/
 shell/src-tauri/gen/schemas/
+shell/ui/node_modules/
+shell/ui/dist/
+shell/ui/test-results/
+shell/ui/playwright-report/
+shell/ui/.npm-cache/
 dist/
 .venv/
 __pycache__/
