@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -31,17 +30,12 @@ _card = re.compile(r"(?<!\d)(?:\d[ -.]?){13,19}(?!\d)")
 _digits = re.compile(r"(?<![\d\w])\d(?:(?:[,./-]\s*|\s+)?\d){5,}(?![\d\w])")
 _url = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>]+|\b(?:linkedin|github|instagram)\.com/[^\s<>]+")
 _upi = re.compile(r"(?i)(?<!\w)[\w.-]+@(?:okaxis|oksbi|okhdfcbank|ybl|paytm|upi|ibl|icici)\b")
-_spoken_domain = re.compile(
-    r"(?i)\b(?:g\s?mail|yahoo|ymail|hotmail|outlook|rediff(?:mail)?|icloud|protonmail)\b"
-    r"(?:\s*(?:\.|dot)\s*(?:com|in|co|net|org)\b)?"
-)
 _spoken_email = re.compile(
     r"(?ix)(?<![\w@])"
-    r"[a-z0-9]+(?:(?:[._]|\s+(?:dot|underscore)\s+)[a-z0-9]+)*"
-    r"\s*(?:at|@)\s*"
-    r"[a-z0-9]+(?:(?:\s*(?:\.|dot)\s*)[a-z0-9]+)*"
-    r"\s*(?:\.|dot)\s*(?:com|in|org|net|co|io|ai|edu|gov|us|uk)"
-    r"(?=\s|$|[,.!?])"
+    r"(?:@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*"
+    r"[a-z0-9]+(?:-[a-z0-9]+)*(?:\s+[a-z0-9]+(?:-[a-z0-9]+)*)?"
+    r"(?:\s+dot\s+|\.)[a-z]{2,10}"
+    r"(?:\s+dot\s+[a-z0-9]+(?:-[a-z0-9]+)*|\.[a-z0-9]+)*(?=\b)"
 )
 _number_word = re.compile(
     r"\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
@@ -69,6 +63,15 @@ DETECTORS: tuple[Detector, ...] = (
     Detector("DIGITS", _digits, "[DIGITS]"),
 )
 
+# Higher-priority spans win when different detectors cover the same original text.
+_DETECTOR_PRIORITY = {
+    "EMAIL": 60,
+    "PHONE": 50,
+    "AADHAAR": 40,
+    "PAN": 30,
+    "CARD": 20,
+}
+
 
 def _money_spans(text: str) -> list[tuple[int, int]]:
     spans = [m.span() for m in _money.finditer(text)]
@@ -79,7 +82,7 @@ def _money_spans(text: str) -> list[tuple[int, int]]:
 
 
 def _spoken_email_replacements(text: str) -> list[tuple[int, int]]:
-    replacements = {match.span() for match in _spoken_email.finditer(text)}
+    replacements: set[tuple[int, int]] = set()
     stop = {
         "is",
         "id",
@@ -118,26 +121,25 @@ def _spoken_email_replacements(text: str) -> list[tuple[int, int]]:
         "same",
         "registered",
         "official",
+        "contact",
     }
-    connectors = {"at", "the", "rate", "of", "@"}
-    for domain in _spoken_domain.finditer(text):
-        tokens = list(re.finditer(r"\S+", text[: domain.start()]))
-        if not tokens:
-            continue
-        j = len(tokens)
-        while j and tokens[j - 1].group().strip(",.?!").casefold() in connectors:
-            j -= 1
-        k, meaningful = j, 0
-        while k:
-            token = tokens[k - 1].group().strip(",.?!")
-            if len(token) > 1 and token.casefold() in stop:
+    for match in _spoken_email.finditer(text):
+        separator_start = match.start()
+        tokens = list(re.finditer(r"\S+", text[:separator_start]))
+        start = separator_start
+        taken = 0
+        for taken, token in enumerate(reversed(tokens), start=1):
+            value = token.group()
+            if not re.fullmatch(r"(?i)[a-z0-9]+(?:[._-][a-z0-9]+)*|[._-]", value):
                 break
-            if meaningful >= 6:
+            if value.casefold() in stop:
                 break
-            meaningful += len(token) > 1
-            k -= 1
-        if k != j:
-            replacements.add((tokens[k].start(), domain.end()))
+            start = token.start()
+            if taken == 6:
+                break
+        replacements.add((start, match.end()))
+    # Spoken website-like addresses are intentionally caught too: privacy wins
+    # over precision, so a harmless word before "at example dot com" may mask.
     return sorted(replacements)
 
 
@@ -166,50 +168,54 @@ def _number_word_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _replacement(
-    detector: Detector,
-    protected: list[tuple[int, int]],
-    allow_ids: set[str] | frozenset[str],
-    counts: dict[str, int],
-) -> Callable[[re.Match[str]], str]:
-    def replace(match: re.Match[str]) -> str:
-        if match.group().strip() in allow_ids or any(
-            match.start() < end and match.end() > start for start, end in protected
-        ):
-            return match.group()
-        counts[detector.name] = counts.get(detector.name, 0) + 1
-        return detector.replacement
-
-    return replace
-
-
 def apply_patterns(
     text: str, allow_ids: set[str] | frozenset[str] = frozenset()
 ) -> tuple[str, dict[str, int]]:
     counts: dict[str, int] = {}
-    current = text
-    for start, end in reversed(_spoken_email_replacements(current)):
-        current = current[:start] + "[EMAIL]" + current[end:]
+    spans: list[tuple[int, int, str, str]] = []
+    for start, end in _spoken_email_replacements(text):
         counts["EMAIL"] = counts.get("EMAIL", 0) + 1
-    protected_structured = _money_spans(current) + [
+        spans.append((start, end, "[EMAIL]", "EMAIL"))
+    protected = _money_spans(text)
+    structured = _money_spans(text) + [
         match.span()
         for detector in (
             Detector("PHONE", _phone, ""),
             Detector("CARD", _card, ""),
             Detector("AADHAAR", _aadhaar, ""),
         )
-        for match in detector.regex.finditer(current)
+        for match in detector.regex.finditer(text)
     ]
-    for start, end in reversed(_number_word_spans(current)):
-        if current[start:end].strip() in allow_ids or any(
-            start < protected_end and end > protected_start
-            for protected_start, protected_end in protected_structured
+    for start, end in _number_word_spans(text):
+        if text[start:end].strip() in allow_ids or any(
+            start < protected_end and end > protected_start for protected_start, protected_end in structured
         ):
             continue
-        current = current[:start] + "[DIGITS]" + current[end:]
         counts["DIGITS"] = counts.get("DIGITS", 0) + 1
+        spans.append((start, end, "[DIGITS]", "DIGITS"))
     for detector in DETECTORS:
-        current = detector.regex.sub(
-            _replacement(detector, _money_spans(current), allow_ids, counts), current
-        )
+        for match in detector.regex.finditer(text):
+            if match.group().strip() in allow_ids or any(
+                match.start() < end and match.end() > start for start, end in protected
+            ):
+                continue
+            counts[detector.name] = counts.get(detector.name, 0) + 1
+            spans.append((match.start(), match.end(), detector.replacement, detector.name))
+    merged: list[tuple[int, int, str, str, int]] = []
+    for start, end, replacement, detector_name in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            old_start, old_end, old_replacement, old_detector, old_length = merged[-1]
+            length = end - start
+            if length > old_length or (
+                length == old_length
+                and _DETECTOR_PRIORITY.get(detector_name, 0) > _DETECTOR_PRIORITY.get(old_detector, 0)
+            ):
+                old_replacement, old_detector = replacement, detector_name
+                old_length = length
+            merged[-1] = (old_start, max(old_end, end), old_replacement, old_detector, old_length)
+        else:
+            merged.append((start, end, replacement, detector_name, end - start))
+    current = text
+    for start, end, replacement, _, _ in reversed(merged):
+        current = current[:start] + replacement + current[end:]
     return current, counts

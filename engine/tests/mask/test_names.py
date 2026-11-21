@@ -26,6 +26,15 @@ class RosterNer:
         return [Span(start, start + len(name))] if start >= 0 else []
 
 
+class FullNameNer:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def persons(self, text: str) -> list[Span]:
+        start = text.find(self.name)
+        return [Span(start, start + len(self.name))] if start >= 0 else []
+
+
 def test_roster_full_and_first_names_have_boundaries(tmp_path: Path) -> None:
     roster = tmp_path / "roster.txt"
     roster.write_text("Ravi Kumar\n", encoding="utf-8")
@@ -46,6 +55,53 @@ def test_roster_name_stays_advisor_with_ner_present(tmp_path: Path) -> None:
         MaskingContext(roster_file=roster, ner=RosterNer()),
     )
     assert result.text == "This is [ADVISOR] from support."
+
+
+def test_lead_sharing_advisor_first_name_is_fully_masked(tmp_path: Path) -> None:
+    roster = tmp_path / "roster.txt"
+    roster.write_text("Ravi\n", encoding="utf-8")
+    result = mask_text(
+        "Ravi Sharma will join.", MaskingContext(roster_file=roster, ner=FullNameNer("Ravi Sharma"))
+    )
+    assert result.text == "[NAME] will join."
+
+
+def test_lead_sharing_advisor_surname_is_fully_masked(tmp_path: Path) -> None:
+    roster = tmp_path / "roster.txt"
+    roster.write_text("Kumar\n", encoding="utf-8")
+    result = mask_text(
+        "Anil Kumar will join.", MaskingContext(roster_file=roster, ner=FullNameNer("Anil Kumar"))
+    )
+    assert result.text == "[NAME] will join."
+
+
+def test_full_advisor_name_stays_advisor_with_ner(tmp_path: Path) -> None:
+    roster = tmp_path / "roster.txt"
+    roster.write_text("Ravi Kumar\n", encoding="utf-8")
+    result = mask_text(
+        "Ravi Kumar will join.", MaskingContext(roster_file=roster, ner=FullNameNer("Ravi Kumar"))
+    )
+    assert result.text == "[ADVISOR] will join."
+
+
+def test_no_name_token_survives_overlap_resolution(tmp_path: Path) -> None:
+    pairs = (
+        ("Ravi", "Ravi Sharma"),
+        ("Kumar", "Anil Kumar"),
+        ("Neha", "Neha Rao"),
+        ("Shah", "Kabir Shah"),
+        ("Asha", "Asha Patel"),
+        ("Singh", "Mira Singh"),
+        ("Dev", "Dev Mehta"),
+        ("Iyer", "Rohan Iyer"),
+        ("Maya", "Maya Das"),
+        ("Roy", "Anita Roy"),
+    )
+    for advisor_part, lead_name in pairs:
+        roster = tmp_path / f"{advisor_part}.txt"
+        roster.write_text(advisor_part + "\n", encoding="utf-8")
+        result = mask_text(lead_name, MaskingContext(roster_file=roster, ner=FullNameNer(lead_name))).text
+        assert all(token.casefold() not in result.casefold() for token in lead_name.split())
 
 
 def test_roster_and_lead_names_in_one_sentence(tmp_path: Path) -> None:

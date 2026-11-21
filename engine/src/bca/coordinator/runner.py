@@ -436,11 +436,12 @@ class _Callbacks(PoolCallbacks):
         self.runner._publish_progress()
         self.runner._liveness.lead_ended(task.lead_id, self.runner._ts())
 
-    async def on_activity(self, ts: float) -> None:
-        self.runner._last_activity_ts = ts
+    async def _check_monitors(self, ts: float, *, activity: bool) -> None:
+        if activity:
+            self.runner._last_activity_ts = ts
+            self.runner._liveness.on_activity(ts)
         for event in self.runner._liveness.check(ts):
             self.runner._publish(event.kind, event.data)
-        self.runner._liveness.on_activity(ts)
         for event in self.runner._sleep.heartbeat(ts, self.runner.job_id):
             if event.kind == "sleep_detected" and self.runner._state() in {
                 JobState.pulling,
@@ -491,6 +492,16 @@ class _Callbacks(PoolCallbacks):
                         self.runner._pause_started = None
                     self.runner._liveness.wake(ts)
             self.runner._publish(event.kind, event.data)
+
+    async def on_check_tick(self, ts: float) -> None:
+        await self._check_monitors(ts, activity=False)
+
+    async def on_codex_activity(self, ts: float) -> None:
+        await self._check_monitors(ts, activity=True)
+
+    async def on_activity(self, ts: float) -> None:
+        """Compatibility entry point for direct coordinator tests."""
+        await self.on_codex_activity(ts)
 
     async def on_quota(self, snapshot: QuotaSnapshot, decision: Decision) -> None:
         guard = self.runner._quota_guard
@@ -1377,15 +1388,23 @@ class JobRunner:
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(phase_event.wait(), 1.0)
         finally:
-            await self._stop_heartbeat()
-            self._get_phase_event().set()
-            self._phase_running = False
-            if self._phase_done is not None:
-                self._phase_done.set()
-            if not canary and self._phase_pool is pool and self._state() is not JobState.paused:
-                self._phase_pool = None
-            self._phase_loop = None
-            self._phase_event = None
+            cancelled = False
+            try:
+                await self._stop_heartbeat()
+            except asyncio.CancelledError:
+                cancelled = True
+            finally:
+                self._get_phase_event().set()
+                self._phase_running = False
+                if self._phase_done is not None:
+                    self._phase_done.set()
+                if not canary and self._phase_pool is pool and self._state() is not JobState.paused:
+                    self._phase_pool = None
+                self._phase_loop = None
+                self._phase_event = None
+            current = asyncio.current_task()
+            if cancelled or (current is not None and current.cancelling()):
+                raise asyncio.CancelledError
 
     def approve_plan_gate(self, expected_spec_version: int) -> None:
         if self._phase_running:
