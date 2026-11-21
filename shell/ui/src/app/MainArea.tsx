@@ -34,9 +34,9 @@ export function MainArea() {
     });
   const view =
     phase.value === 'setup' ? (
-      <SetupView id={current?.job} />
+      <SetupView id={current?.job} state={state} />
     ) : phase.value === 'sample' ? (
-      <SampleView id={current!.job} />
+      <SampleView id={current!.job} state={state} />
     ) : phase.value === 'run' ? (
       <RunView id={current!.job} />
     ) : (

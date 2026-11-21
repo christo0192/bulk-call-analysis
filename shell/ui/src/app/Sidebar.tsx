@@ -128,11 +128,11 @@ export function Sidebar() {
       <footer>
         <div>
           <span>ChatGPT this week</span>
-          <b>{allowanceText(allowances.value?.chatgpt)}</b>
+          <b>{allowanceText(allowances.value?.codex?.windows[0]?.usedPercent)}</b>
         </div>
         <div>
           <span>Claude 5-hour</span>
-          <b>{allowanceText(allowances.value?.claude)}</b>
+          <b>{allowanceText(allowances.value?.claude?.windows[0]?.usedPercent)}</b>
         </div>
         <button class="settings" onClick={() => (settingsOpen.value = true)}>
           <GearIcon /> Settings

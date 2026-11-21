@@ -1,6 +1,6 @@
 import type { EngineBridge, Unsubscribe } from './client';
 import { EngineError } from './client';
-import type { Method, ParamsOf, ResultOf, Notification } from './types';
+import type { Method, ParamsOf, ResultOf, Notification, ChatEntry } from './types';
 import {
   projects,
   jobs,
@@ -11,6 +11,8 @@ import {
   settings,
   appStatus,
   newComputerChecklist,
+  plan,
+  sample,
 } from '../mock/fixtures/data';
 const firstRun = typeof window !== 'undefined' && window.location.search.includes('mock=firstrun');
 const noAuth = typeof window !== 'undefined' && window.location.search.includes('mock=noauth');
@@ -38,13 +40,31 @@ export class MockBridge implements EngineBridge {
   private statuses = new Set<(s: { status: string; reason?: string }) => void>();
   private checkCount = 0;
   private signInStarted = !firstRun;
+  private chatEntries: ChatEntry[] = [
+    {
+      id: 1,
+      ts: Date.now(),
+      turn: 'welcome',
+      role: 'assistant' as const,
+      text: 'Tell me what you would like to learn from these calls.',
+    },
+  ];
   async call<M extends Method>(method: M, params: ParamsOf<M>): Promise<ResultOf<M>> {
     this.calls.push({ method, params });
     const custom = this.responses.get(method);
     if (custom) return (await custom(params)) as ResultOf<M>;
     if (method === 'projects/list') {
       if (firstRunActive) throw 'RPC error -32002: Setup required';
-      return projects as ResultOf<M>;
+      return projects.map((project) => ({
+        ...project,
+        activeJob:
+          jobs.find(
+            (job) =>
+              job.project === project.project &&
+              !['done', 'done_with_issues', 'failed', 'cancelled'].includes(job.state),
+          ) ?? null,
+        lastJob: jobs.find((job) => job.project === project.project) ?? null,
+      })) as ResultOf<M>;
     }
     if (method === 'projects/jobs')
       return {
@@ -67,6 +87,100 @@ export class MockBridge implements EngineBridge {
       return project as ResultOf<M>;
     }
     if (method === 'allowance/status') return allowances as ResultOf<M>;
+    if (method === 'chat/history') return { entries: this.chatEntries, more: false } as ResultOf<M>;
+    if (method === 'ids/attach') {
+      const value = String((params as { text: string }).text);
+      const raw = value.split(/[\s,]+/).filter(Boolean).length;
+      if (!raw) throw new EngineError(-32602, 'No ids', 'no_ids');
+      if (raw > 50000) throw new EngineError(-32602, 'Too many ids', 'too_large');
+      const distinct = new Set(value.split(/[\s,]+/).filter(Boolean)).size;
+      return {
+        name: 'ids-3.txt',
+        raw,
+        distinct,
+        duplicates: raw - distinct,
+        malformed: 0,
+      } as ResultOf<M>;
+    }
+    if (method === 'chat/send') {
+      const text = (params as { text: string }).text;
+      const turn = `turn-${Date.now()}`;
+      this.chatEntries.push({
+        id: this.chatEntries.length + 1,
+        ts: Date.now(),
+        turn,
+        role: 'user',
+        text,
+      });
+      const answer =
+        'I checked the read-only data. The plan below keeps the transcripts masked and starts with a small sample so you can verify the answers.';
+      return new Promise((resolve) => {
+        const chunks = [answer.slice(0, 45), answer.slice(45, 100), answer.slice(100)];
+        chunks.forEach((delta, index) =>
+          setTimeout(
+            () =>
+              this.emit({
+                jsonrpc: '2.0',
+                method: 'chat/event',
+                params: {
+                  project: (params as { project: string }).project,
+                  event: { kind: 'assistant_delta', turn, data: { delta: { text: delta } } },
+                },
+              }),
+            index * 500,
+          ),
+        );
+        ['bq_query', 'bq_dry_run', 'propose_job'].forEach((name, index) =>
+          setTimeout(
+            () =>
+              this.emit({
+                jsonrpc: '2.0',
+                method: 'chat/event',
+                params: {
+                  project: (params as { project: string }).project,
+                  event: { kind: 'tool_result', turn, data: { name } },
+                },
+              }),
+            150 + index * 400,
+          ),
+        );
+        setTimeout(() => {
+          this.chatEntries.push({
+            id: this.chatEntries.length + 1,
+            ts: Date.now(),
+            turn,
+            role: 'assistant',
+            text: answer,
+          });
+          this.emit({
+            jsonrpc: '2.0',
+            method: 'chat/event',
+            params: {
+              project: (params as { project: string }).project,
+              event: {
+                kind: 'assistant',
+                turn,
+                data: { message: { content: [{ type: 'text', text: answer }] } },
+              },
+            },
+          });
+          this.emit({
+            jsonrpc: '2.0',
+            method: 'chat/event',
+            params: {
+              project: (params as { project: string }).project,
+              event: { turn, status: 'completed' },
+            },
+          });
+          resolve({
+            status: 'completed',
+            project: (params as { project: string }).project,
+          } as ResultOf<M>);
+        }, 1600);
+      }) as Promise<ResultOf<M>>;
+    }
+    if (method === 'chat/stop')
+      return { status: 'stopped', project: (params as { project: string }).project } as ResultOf<M>;
     if (method === 'setup/checklist') return checklistState as ResultOf<M>;
     if (method === 'setup/runChecks') {
       // Sign-in completes on the second check AFTER auth/claudeLogin was called.
@@ -108,6 +222,59 @@ export class MockBridge implements EngineBridge {
       return (
         jobs.find((j) => j.job === (params as { job: string }).job) ?? (jobs[0] as ResultOf<M>)
       );
+    if (method === 'job/plan')
+      return { ...plan, job: (params as { job: string }).job } as ResultOf<M>;
+    if (method === 'job/sample')
+      return { ...sample, job: (params as { job: string }).job } as ResultOf<M>;
+    if (method === 'job/approvePlan') {
+      if ((params as { expectedSpecVersion: number }).expectedSpecVersion !== plan.specVersion)
+        throw new EngineError(-32001, 'The plan changed', 'stale_spec_version');
+      plan.approved = true;
+      const job = jobs.find((item) => item.job === (params as { job: string }).job);
+      if (job) {
+        job.state = 'running';
+        this.emit({
+          jsonrpc: '2.0',
+          method: 'job/state',
+          params: { project: job.project, job: job.job, state: 'running' },
+        });
+        setTimeout(() => {
+          job.state = 'sample_ready';
+          this.emit({
+            jsonrpc: '2.0',
+            method: 'job/state',
+            params: { project: job.project, job: job.job, state: 'sample_ready' },
+          });
+        }, 2000);
+      }
+      return job as ResultOf<M>;
+    }
+    if (method === 'job/approveSample') {
+      if ((params as { expectedSpecVersion: number }).expectedSpecVersion !== sample.specVersion)
+        throw new EngineError(-32001, 'The plan changed', 'stale_spec_version');
+      const job = jobs.find((item) => item.job === (params as { job: string }).job);
+      if (job) {
+        job.state = 'sample_approved';
+        this.emit({
+          jsonrpc: '2.0',
+          method: 'job/state',
+          params: { project: job.project, job: job.job, state: 'sample_approved' },
+        });
+      }
+      return job as ResultOf<M>;
+    }
+    if (method === 'job/startFull') {
+      const job = jobs.find((item) => item.job === (params as { job: string }).job);
+      if (job) {
+        job.state = 'running';
+        this.emit({
+          jsonrpc: '2.0',
+          method: 'job/state',
+          params: { project: job.project, job: job.job, state: 'running' },
+        });
+      }
+      return job as ResultOf<M>;
+    }
     if (method === 'health/ping') return { status: 'ok' } as ResultOf<M>;
     return {} as ResultOf<M>;
   }

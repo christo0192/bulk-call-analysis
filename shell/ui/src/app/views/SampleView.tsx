@@ -1,8 +1,14 @@
-export function SampleView({ id }: { id: string }) {
+import { Chat } from '../chat/Chat';
+import { SampleCard, StartCard } from '../cards/Cards';
+import { allowances, selectedProject } from '../../state/store';
+export function SampleView({ id, state }: { id: string; state?: string }) {
   return (
-    <div class="placeholder" data-testid="sample-view">
-      <h2>Sample</h2>
-      <p>Job {id}</p>
+    <div class="phase-view" data-testid="sample-view">
+      <Chat project={selectedProject.value ?? ''} />
+      {state === 'sample_ready' && <SampleCard job={id} />}
+      {state === 'sample_approved' && (
+        <StartCard job={id} project={selectedProject.value ?? ''} allowance={allowances.value} />
+      )}
     </div>
   );
 }
