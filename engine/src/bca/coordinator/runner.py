@@ -1593,6 +1593,61 @@ class JobRunner:
         else:
             raise ValueError(f"cannot finish output from {state}")
         report = verify_job(self.deps.store, self.job_id, path)
+        output_dir = self.deps.job_dir / "output"
+        reconciliation = cast(Any, report.reconciliation)
+        counts_by_status = dict(getattr(reconciliation, "counts", {}))
+        terms = {str(key): int(value) for key, value in counts_by_status.items()}
+        selected_distinct_ids = int(getattr(reconciliation, "distinct_ids_in", 0))
+        reconciliation_data: dict[str, object] = {
+            "terms": terms,
+            "selected_distinct_ids": selected_distinct_ids,
+            "duplicates_removed": int(getattr(reconciliation, "duplicates_removed", 0)),
+            "adds_up": sum(terms.values()) == selected_distinct_ids,
+        }
+        (output_dir / f"reconciliation.v{self.spec.spec_version}.json").write_text(
+            json.dumps(reconciliation_data, indent=2) + "\n", encoding="utf-8", newline="\n"
+        )
+        failed_reasons: dict[str, int] = {}
+        for row in self.deps.store.rows(
+            "SELECT reason FROM leads WHERE job_id=? AND status='failed'", (self.job_id,)
+        ):
+            reason = str(row[0] or "unknown")
+            failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
+        issue_groups = {
+            "quote_flags": sum(
+                1
+                for row in self.deps.store.rows(
+                    "SELECT flags_json FROM results WHERE job_id=?", (self.job_id,)
+                )
+                if json.loads(str(row[0]))
+            ),
+            "held_back_by_masking": sum(
+                1
+                for row in self.deps.store.rows(
+                    "SELECT reason FROM leads WHERE job_id=? AND status='held_back'", (self.job_id,)
+                )
+                if "mask" in str(row[0]) or "leak" in str(row[0])
+            ),
+            "failed": failed_reasons,
+            "over_size_cap": len(
+                self.deps.store.rows(
+                    "SELECT 1 FROM leads WHERE job_id=? AND calls_dropped_cap>0", (self.job_id,)
+                )
+            ),
+        }
+        report_lines = [
+            report.to_markdown().rstrip(),
+            "",
+            "## Reconciliation",
+            f"{sum(terms.values())} = {selected_distinct_ids} distinct selected ids; "
+            f"adds up: {reconciliation_data['adds_up']}.",
+            "",
+            "## Issue groups",
+            *[f"- {name}: {value}" for name, value in issue_groups.items()],
+        ]
+        (output_dir / f"verify-report.v{self.spec.spec_version}.md").write_text(
+            "\n".join(report_lines) + "\n", encoding="utf-8", newline="\n"
+        )
         progress = counts(self.deps.store, self.job_id)
         has_issues = not report.ok or bool(progress.failed) or progress.held_back > 0
         if self._state() is JobState.verifying:
@@ -1694,4 +1749,21 @@ class JobRunner:
     def rebuild_with_rules(self, new_rules: tuple[object, ...]) -> Path:
         from bca.outputs.excel import rebuild_with_rules as rebuild
 
-        return rebuild(self.deps.store, self.job_id, new_rules, self.deps.job_dir / "output")
+        before = [
+            tuple(row)
+            for row in self.deps.store.rows(
+                "SELECT lead_id, answer_json FROM results WHERE job_id=? ORDER BY lead_id", (self.job_id,)
+            )
+        ]
+        path, _number = rebuild(
+            self.deps.store, self.job_id, new_rules, self.deps.job_dir / "output", self.spec.spec_version
+        )
+        after = [
+            tuple(row)
+            for row in self.deps.store.rows(
+                "SELECT lead_id, answer_json FROM results WHERE job_id=? ORDER BY lead_id", (self.job_id,)
+            )
+        ]
+        if before != after:
+            raise RuntimeError("rebuild changed stored answers")
+        return path

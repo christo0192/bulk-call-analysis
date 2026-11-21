@@ -30,7 +30,7 @@ successful results.
 | `job/startFull` | `{job}` | Current job status |
 | `job/pause` | `{job}` | Current job status |
 | `job/resume` | `{job}` | Current job status |
-| `job/rebuildRules` | `{job, rules}` | `{job, path}` |
+| `job/rebuildRules` | `{job, rules}` | `{job, path, rebuild}`; writes `results.v{spec}.rebuild{n}.xlsx` |
 | `auth/claudeLogin` | `{}` | `{started: true, vendor: "claude"}` |
 | `auth/codexLogin` | `{}` | `{started: true, vendor: "codex"}` |
 | `auth/status` | `{}` | Safe Claude and Codex login/plan status |
@@ -42,7 +42,24 @@ successful results.
 It is exempt from the generic 30-second request timeout, but it can be
 cancelled with `chat/stop` or by shutdown. Only one turn per project runs at a
 time. Chat events are streamed while the turn runs. Operator-facing file
-listing excludes chat, model, raw, masked, and other engine-internal files.
+listing excludes chat, model, `jobs/*/raw`, `jobs/*/masked`, and other engine-internal files.
+
+Job specifications and preflight records live in the canonical folder
+`<dataDir>/projects/<project>/jobs/<job>/`. Each proposal writes
+`spec.vN.json` and `preflight.vN.json`; the latter contains bucket counts,
+scan bytes, capped leads, and id-intake counts. An approved scan may vary by
+up to 10% before the runner refuses it.
+
+`job/rebuildRules` parses and validates rules against the stored output schema.
+Invalid rules return `-32602` with
+`{reason: "invalid_rules", detail: "..."}`. Rebuilds do not change stored
+answers and use a per-spec rebuild number.
+
+After output verification, the job folder contains
+`output/verify-report.vN.md` and `output/reconciliation.vN.json`. The report
+includes the reconciliation equation and issue-group counts; the JSON contains
+integer status terms, `selected_distinct_ids`, `duplicates_removed`, and
+`adds_up`.
 
 Job requests validate and schedule work; they do not perform long-running job
 work before returning. There is one driver per job. A pause is persisted

@@ -35,6 +35,7 @@ from bca.mcp.ipc import new_ipc_address
 from bca.monitor.events import Event, EventBus
 from bca.monitor.progress import counts
 from bca.monitor.sleep import SleepDetector
+from bca.paths import job_dir
 from bca.setup.appdirs import directories
 from bca.setup.checklist import MANUAL, Checklist
 from bca.stop import StopRequested
@@ -45,6 +46,7 @@ from bca.store import (
     TransitionError,
     approve_plan,
     approve_sample,
+    load_latest_spec,
     open_store,
     start_full_run,
     transition,
@@ -457,19 +459,31 @@ class ProductionBackend(ApiBackend):
         return lambda *_: MaskingContext(roster_file=self.config.masking.roster_file, ner=self._ner)
 
     def runner_deps(self, job_id: str, project_id: str) -> RunnerDeps:
-        job_dir = self.app_data / "projects" / project_id / job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
+        job_path = job_dir(self.app_data, project_id, job_id)
+        job_path.mkdir(parents=True, exist_ok=True)
+        approved_bytes: int | None = None
+        try:
+            spec, version = load_latest_spec(job_path)
+            del spec
+            preflight = job_path / f"preflight.v{version}.json"
+            if preflight.is_file():
+                raw = json.loads(preflight.read_text(encoding="utf-8"))
+                if isinstance(raw, dict) and isinstance(raw.get("dry_run_bytes"), int):
+                    approved_bytes = int(raw["dry_run_bytes"])
+        except (OSError, ValueError, json.JSONDecodeError):
+            approved_bytes = None
         return RunnerDeps(
             self.store,
             self._make_bq(),
-            lambda *_: self._make_masker()(job_dir),
-            lambda: self._launch(job_dir),
+            lambda *_: self._make_masker()(job_path),
+            lambda: self._launch(job_path),
             self.clock,
             self.event_bus,
             self.config,
-            job_dir,
+            job_path,
             self._ner,
             self.concurrency,
+            approved_bytes=approved_bytes,
             can_dispatch=self._can_dispatch,
         )
 
@@ -1181,13 +1195,28 @@ class ProductionBackend(ApiBackend):
                 return self._job_status(job)
             if method == "job/rebuildRules":
                 runner = self.jobs.runner(job)
-                rules = (
-                    tuple(cast(list[object], params["rules"]))
-                    if isinstance(params.get("rules"), list)
-                    else ()
-                )
+                raw_rules = params.get("rules")
+                if not isinstance(raw_rules, list):
+                    raise RpcError(
+                        -32602,
+                        "Invalid params",
+                        {"reason": "invalid_rules", "detail": "rules must be an array"},
+                    )
+                try:
+                    from bca.outputs.rules import validate_rules
+                    from bca.store.spec import _rule
+
+                    spec, _ = load_latest_spec(runner.deps.job_dir)
+                    rules = tuple(_rule(item) for item in raw_rules)
+                    validate_rules(rules, spec.output_schema)
+                except (TypeError, ValueError, KeyError) as exc:
+                    raise RpcError(
+                        -32602, "Invalid params", {"reason": "invalid_rules", "detail": str(exc)}
+                    ) from exc
                 path = await asyncio.to_thread(runner.rebuild_with_rules, rules)
-                return {"job": job, "path": str(path)}
+                match = re.search(r"\.rebuild(\d+)\.xlsx$", str(path))
+                rebuild_number = int(match.group(1)) if match else 0
+                return {"job": job, "path": str(path), "rebuild": rebuild_number}
             raise RpcError(-32601, "Method not found")
         except RpcError:
             raise

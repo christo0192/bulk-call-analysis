@@ -18,6 +18,13 @@ from bca.store.spec import LeadSourceIds, LeadSourceSql
 from .queries import lead_source_sql
 from .runner import BqRunner, DryRun
 
+
+def _scan_allowed(dry_bytes: int, reject_bytes: int, approved_bytes: int | None) -> bool:
+    return dry_bytes <= reject_bytes or (
+        approved_bytes is not None and dry_bytes <= int(approved_bytes * 1.10)
+    )
+
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
@@ -150,7 +157,7 @@ def resolve_lead_source(
         check_single_id_column(runner, spec.sql)
         sql, params, _ = lead_source_sql(spec.sql)
         dry = runner.dry_run(sql, params)
-        if dry.bytes > cfg.reject_bytes and (approved_bytes is None or approved_bytes < dry.bytes):
+        if not _scan_allowed(dry.bytes, cfg.reject_bytes, approved_bytes):
             raise PermissionError("scan exceeds reject_bytes without operator approval")
         values: list[object] = []
         for page in runner.iter_pages(sql, params, 1000):
