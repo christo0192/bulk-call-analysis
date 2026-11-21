@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
+import { formatCount } from '../format';
 import type { ChatEntry, Notification } from '../../engine/types';
 
 const toolLabels: Record<string, string> = {
@@ -174,10 +175,10 @@ export function Chat({ project, onFocus }: { project: string; onFocus?: () => vo
   const attach = async () => {
     try {
       const result = await bridge.call('ids/attach', { project, text: ids });
-      const number = result.distinct.toLocaleString();
+      const number = formatCount(result.distinct);
       const extras = [
-        result.duplicates ? `${result.duplicates.toLocaleString()} duplicates removed` : '',
-        result.malformed ? `${result.malformed.toLocaleString()} not valid` : '',
+        result.duplicates ? `${formatCount(result.duplicates)} duplicates removed` : '',
+        result.malformed ? `${formatCount(result.malformed)} not valid` : '',
       ]
         .filter(Boolean)
         .join(', ');

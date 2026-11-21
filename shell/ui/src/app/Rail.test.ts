@@ -8,7 +8,7 @@ it.each([
 ])('formats %s bytes as %s', (size, result) => expect(formatKb(size)).toBe(result));
 it.each([
   ['draft', 'current'],
-  ['planned', 'current'],
+  ['planned', 'waiting'],
   ['plan_proposed', 'current'],
   ['plan_approved', 'current'],
   ['running', 'current'],

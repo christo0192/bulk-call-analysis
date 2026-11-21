@@ -13,6 +13,7 @@ import {
 } from '../state/store';
 import { BrandIcon, GearIcon } from './ui/icons';
 import { Pill } from './ui/Pill';
+import { formatCount } from './format';
 
 export function slugFor(title: string, existing: Project[]): string {
   const base =
@@ -114,7 +115,7 @@ export function Sidebar() {
                   {job.state === 'done_with_issues' ? 'Done with issues' : 'Done'}
                   {done === undefined
                     ? ''
-                    : ` ${String.fromCharCode(183)} ${done.toLocaleString()} leads`}
+                    : ` ${String.fromCharCode(183)} ${formatCount(done)} leads`}
                 </small>
               ) : job ? (
                 <Pill state={job.state} />

@@ -2,8 +2,8 @@ import { useEffect, useState } from 'preact/hooks';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import type { AllowanceStatus, PlanCard as Plan, SampleCard as Sample } from '../../engine/types';
+import { formatCount } from '../format';
 
-const number = (value: number) => value.toLocaleString();
 const bytes = (value: number) =>
   value < 1024 ** 2
     ? `${(value / 1024).toFixed(1)} KB`
@@ -85,7 +85,7 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
               {sql && <pre>{plan.leadSource.sql}</pre>}
             </>
           ) : (
-            `${number(plan.leadSource.idCount ?? 0)} pasted ids`
+            `${formatCount(plan.leadSource.idCount ?? 0)} pasted ids`
           )}
         </dd>
         <dt>Calls read</dt>
@@ -96,16 +96,16 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
         </dd>
         <dt>Count</dt>
         <dd>
-          {number(count.selected)} leads → {number(count.usable)} with a usable transcript ·{' '}
-          {number(count.noTranscript)} with none
+          {formatCount(count.selected)} leads → {formatCount(count.usable)} with a usable transcript
+          · {formatCount(count.noTranscript)} with none
           {count.transcriptionFailed
-            ? ` · ${number(count.transcriptionFailed)} transcription failed`
+            ? ` · ${formatCount(count.transcriptionFailed)} transcription failed`
             : ''}
-          {count.tooShort ? ` · ${number(count.tooShort)} too short` : ''}
-          {count.notFound ? ` · ${number(count.notFound)} not found` : ''}
+          {count.tooShort ? ` · ${formatCount(count.tooShort)} too short` : ''}
+          {count.notFound ? ` · ${formatCount(count.notFound)} not found` : ''}
         </dd>
         <dt>Over the size limit</dt>
-        <dd>{number(count.capped)}</dd>
+        <dd>{formatCount(count.capped)}</dd>
         <dt>Data scanned</dt>
         <dd>{bytes(plan.scanBytes)}</dd>
         <dt>Output columns</dt>
@@ -123,8 +123,8 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
       </dl>
       {estimate.sampleSeconds && (
         <p class="estimate">
-          Sample of {number(plan.sampleSize)} leads: about {duration(estimate.sampleSeconds.low)} ·
-          Full run:{' '}
+          Sample of {formatCount(plan.sampleSize)} leads: about{' '}
+          {duration(estimate.sampleSeconds.low)} · Full run:{' '}
           {estimate.fullSeconds
             ? `${duration(estimate.fullSeconds.low)}–${duration(estimate.fullSeconds.high)}`
             : 'unknown'}{' '}
@@ -149,8 +149,9 @@ export function PlanCard({ job, onFocus }: { job: string; onFocus?: () => void }
           Change something
         </button>
         <small>
-          Approving pulls and masks the transcripts, then reads a {number(plan.sampleSize)}-lead
-          sample for you to check. The full run waits for you.
+          Approving pulls and masks the transcripts, then reads a{' '}
+          {`${formatCount(plan.sampleSize)}-lead`} sample for you to check. The full run waits for
+          you.
         </small>
       </footer>
     </article>
@@ -201,10 +202,10 @@ export function SampleCard({ job, onFocus }: { job: string; onFocus?: () => void
     <article class="approval-card sample-card">
       <header>
         <div>
-          <h2>Sample · {number(sample.total)} leads</h2>
+          <h2>Sample · {formatCount(sample.total)} leads</h2>
           <span>
-            quotes verified {number(sample.quotesVerified)} of {number(sample.total)} ·{' '}
-            {number(sample.quotesRepaired)} fixed on retry
+            quotes verified {formatCount(sample.quotesVerified)} of {formatCount(sample.total)} ·{' '}
+            {formatCount(sample.quotesRepaired)} fixed on retry
           </span>
         </div>
       </header>
@@ -243,7 +244,7 @@ export function SampleCard({ job, onFocus }: { job: string; onFocus?: () => void
         </button>
         <button disabled>Open {sample.file ?? 'sample file'} (available soon)</button>
         <button onClick={() => onFocus?.()}>Change the plan</button>
-        <small>{Math.max(0, sample.total - 5).toLocaleString()} more rows in the file</small>
+        <small>{formatCount(Math.max(0, sample.total - 5))} more rows in the file</small>
       </footer>
     </article>
   );
@@ -294,7 +295,7 @@ export function StartCard({
       </header>
       <dl>
         <dt>Leads to read</dt>
-        <dd>{number(plan?.counts.usable ?? 0)}</dd>
+        <dd>{formatCount(plan?.counts.usable ?? 0)}</dd>
         <dt>Time</dt>
         <dd>
           {estimate
@@ -329,4 +330,4 @@ export function StartCard({
   );
 }
 
-export { Masked, bytes, number };
+export { Masked, bytes };
