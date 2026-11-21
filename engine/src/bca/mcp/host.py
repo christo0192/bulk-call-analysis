@@ -27,6 +27,7 @@ from bca.monitor.eta import EtaEstimator
 from bca.monitor.progress import counts as progress_counts
 from bca.outputs.aggregates import aggregates
 from bca.outputs.rules import validate_rules
+from bca.paths import job_dir
 from bca.store import JobSpec, LeadStatus, Store, load_latest_spec, save_spec
 from bca.store.lifecycle import JobState, edit_spec, transition
 
@@ -558,15 +559,15 @@ class ToolHost:
             raise safe from None
 
     def _job_dir(self, job_id: str) -> Path:
-        if _PATH_ID.fullmatch(job_id) is None:
-            raise ToolHostError("invalid job id")
-        jobs = (self.project_dir / "jobs").resolve()
-        candidate = (jobs / job_id).resolve()
         try:
-            candidate.relative_to(jobs)
+            app_data = (
+                self.project_dir.parent.parent
+                if self.project_dir.parent.name == "projects"
+                else self.project_dir
+            )
+            return job_dir(app_data, self.project_id, job_id)
         except ValueError:
             raise ToolHostError("invalid job id") from None
-        return candidate
 
     def _listable(self) -> ListableRunner:
         if not all(hasattr(self.runner, name) for name in ("list_datasets", "list_tables", "describe_table")):
@@ -756,6 +757,22 @@ class ToolHost:
             )
             saved_path = save_spec(spec, job_dir)
             version = int(saved_path.stem.removeprefix("spec.v"))
+            preflight_path = job_dir / f"preflight.v{version}.json"
+            preflight_data = {
+                "buckets": preflight.buckets,
+                "capped_leads": preflight.capped_leads,
+                "dry_run_bytes": preflight.dry_run_bytes,
+                "lead_source_dry_run_bytes": lead_source_dry_run_bytes,
+                "id_intake": {
+                    "raw": intake.raw_count,
+                    "distinct": len(intake.ids),
+                    "duplicates": intake.duplicates,
+                    "malformed": len(intake.malformed),
+                },
+            }
+            temporary = preflight_path.with_name(f".{preflight_path.name}.tmp")
+            temporary.write_text(json.dumps(preflight_data, indent=2) + "\n", encoding="utf-8", newline="\n")
+            temporary.replace(preflight_path)
             if created:
                 self.store.create_job(spec.job_id, spec.project_id, version, "draft")
                 record_lead_intake(self.store, spec.job_id, intake)
@@ -772,6 +789,8 @@ class ToolHost:
         except BaseException:
             if saved_path is not None:
                 saved_path.unlink(missing_ok=True)
+            if "preflight_path" in locals():
+                preflight_path.unlink(missing_ok=True)
             if created:
                 with self.store.transaction() as cur:
                     cur.execute("DELETE FROM leads WHERE job_id=?", (spec.job_id,))
@@ -920,7 +939,7 @@ class ToolHost:
         if not status_row or str(status_row[0][0]) not in {"masked", "queued", "in_flight", "done", "failed"}:
             raise ToolHostError("sample reference is unavailable")
         spec, _ = load_latest_spec(self._job_dir(job_id))
-        path = self._job_dir(job_id) / "cache" / "transcripts" / f"{lead_id}.jsonl.gz"
+        path = self._job_dir(job_id) / "masked" / f"{lead_id}.jsonl.gz"
         if not path.is_file():
             raise ToolHostError("masked transcript not found")
         with gzip.open(path, "rt", encoding="utf-8") as handle:

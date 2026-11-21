@@ -366,7 +366,7 @@ def test_rebuild_uses_no_model_and_changes_only_rule_columns(coordinator: Coordi
     rule = ReviewFlagRule("review", "all", (Condition("ok", "eq", True),))
     rebuilt = coordinator.runner.rebuild_with_rules((rule,))
     assert coordinator.pool.calls == before
-    assert rebuilt.name == "results.v2.xlsx"
+    assert rebuilt.name == "results.v1.rebuild1.xlsx"
     assert (
         coordinator.store.rows("SELECT COUNT(*) FROM job_events WHERE job_id='job' AND kind='rules_rebuilt'")[
             0
@@ -374,7 +374,7 @@ def test_rebuild_uses_no_model_and_changes_only_rule_columns(coordinator: Coordi
         == 1
     )
     second = coordinator.runner.rebuild_with_rules(())
-    assert second.name == "results.v3.xlsx"
+    assert second.name == "results.v1.rebuild2.xlsx"
     assert (
         coordinator.store.rows("SELECT COUNT(*) FROM job_events WHERE job_id='job' AND kind='rules_rebuilt'")[
             0

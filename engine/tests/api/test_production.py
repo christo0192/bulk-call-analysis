@@ -284,7 +284,7 @@ def _write_job(
     if not backend.store.rows("SELECT 1 FROM projects WHERE id='project-one'"):
         backend.store.create_project("project-one", "Synthetic")
     backend.store.create_job(job_id, "project-one", 1, state)
-    job_dir = backend.app_data / "projects" / "project-one" / job_id
+    job_dir = backend.app_data / "projects" / "project-one" / "jobs" / job_id
     save_spec(
         JobSpec(
             1,
@@ -447,7 +447,7 @@ def _tiny_job(
     backend = ProductionBackend(tmp_path, store=open_store(tmp_path / "store.sqlite3"), bq=bq)
     backend.store.create_project("project-one", "Synthetic")
     backend.store.create_job("job-one", "project-one", 1, JobState.plan_proposed)
-    job_dir = backend.app_data / "projects" / "project-one" / "job-one"
+    job_dir = backend.app_data / "projects" / "project-one" / "jobs" / "job-one"
     save_spec(
         JobSpec(
             1,

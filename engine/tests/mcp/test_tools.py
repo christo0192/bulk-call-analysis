@@ -192,7 +192,10 @@ def test_propose_job_plan_card_formats_both_byte_fields(
 def test_sample_reference_round_trip_keeps_the_same_masked_lead(tmp_path: Path) -> None:
     host = make_host(tmp_path, FakeBqRunner(dry=DryRun(0, [], [("lead_id", "STRING")])))
     host.store.create_job("job", "project", 1)
-    save_spec(JobSpec.from_dict(json.loads(proposal_json())), tmp_path / "jobs" / "job")
+    save_spec(
+        JobSpec.from_dict(json.loads(proposal_json())),
+        tmp_path / "projects" / "project" / "jobs" / "job",
+    )
     for lead_id, status in (
         ("1001", LeadStatus.masked),
         ("1002", LeadStatus.masked),
@@ -205,7 +208,7 @@ def test_sample_reference_round_trip_keeps_the_same_masked_lead(tmp_path: Path) 
                 "INSERT INTO results VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 ("job", lead_id, "attempt", "{}", 1, "{}", "now", 1),
             )
-    transcript_dir = tmp_path / "jobs" / "job" / "cache" / "transcripts"
+    transcript_dir = tmp_path / "projects" / "project" / "jobs" / "job" / "masked"
     transcript_dir.mkdir(parents=True)
     for lead_id in ("1001", "1002"):
         with gzip.open(transcript_dir / f"{lead_id}.jsonl.gz", "wt", encoding="utf-8") as handle:
@@ -287,7 +290,7 @@ def test_result_aggregates_through_host(tmp_path: Path) -> None:
             luna_model="gpt-5.6-luna",
             luna_effort="high",
         ),
-        tmp_path / "jobs" / "job",
+        tmp_path / "projects" / "project" / "jobs" / "job",
     )
     assert host.call("result_aggregates", {"job_id": "job"}) == {
         "answer_fields": {"answer": {}},
@@ -323,7 +326,7 @@ def test_lead_transcript_is_masked_and_capped(tmp_path: Path) -> None:
     host = make_host(tmp_path)
     host.store.create_job("job", "project", 1)
     host.store.add_lead("job", "lead", LeadStatus.masked, in_sample=1)
-    job_dir = tmp_path / "jobs" / "job"
+    job_dir = tmp_path / "projects" / "project" / "jobs" / "job"
     save_spec(
         JobSpec(
             1,
@@ -351,10 +354,10 @@ def test_lead_transcript_is_masked_and_capped(tmp_path: Path) -> None:
             )
             + "\n"
         )
-    raw_path = job_dir / "raw"
-    raw_path.mkdir(parents=True)
-    with gzip.open(raw_path / "lead.jsonl.gz", "wt", encoding="utf-8") as handle:
-        handle.write(json.dumps({"transcript_text": "raw-only-secret"}) + "\n")
+    masked_path = job_dir / "masked"
+    masked_path.mkdir(parents=True)
+    with gzip.open(masked_path / "lead.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps({"transcript_text": "[REDACTED]"}) + "\n")
     result = host.call("lead_transcript", {"job_id": "job", "ref": "S1"})
     assert isinstance(result, str)
     assert "raw-only-secret" not in result
@@ -515,7 +518,7 @@ def proposal_host(
     *,
     runner: FakeBqRunner | None = None,
 ) -> ToolHost:
-    job_dir = tmp_path / "jobs" / "job"
+    job_dir = tmp_path / "projects" / "project" / "jobs" / "job"
     job_dir.mkdir(parents=True)
     (job_dir / "ids.txt").write_text("1001\n", encoding="utf-8")
     return make_host(
@@ -586,7 +589,9 @@ def test_propose_job_plan_card_stays_structured_for_thousands_of_leads(tmp_path:
     ]
     runner = FakeBqRunner(pages=[rows], dry=DryRun(0, [], [("lead_id", "STRING")]))
     host = proposal_host(tmp_path, [], runner=runner)
-    (tmp_path / "jobs" / "job" / "ids.txt").write_text("\n".join(lead_ids), encoding="utf-8")
+    (tmp_path / "projects" / "project" / "jobs" / "job" / "ids.txt").write_text(
+        "\n".join(lead_ids), encoding="utf-8"
+    )
     card = cast(dict[str, object], host.call("propose_job", {"spec_json": proposal_json()}))
     assert isinstance(card["lead_counts"], dict)
     assert isinstance(card["preflight"], dict)
@@ -616,7 +621,7 @@ def test_propose_job_reproposal_versions_and_running_job_is_refused(tmp_path: Pa
         pages,
     )
     host.call("propose_job", {"spec_json": proposal_json()})
-    (tmp_path / "jobs" / "job" / "ids.txt").write_text("2001\n", encoding="utf-8")
+    (tmp_path / "projects" / "project" / "jobs" / "job" / "ids.txt").write_text("2001\n", encoding="utf-8")
     result = host.call("propose_job", {"spec_json": proposal_json("revised")})
     assert result["spec"] == "spec.v2.json"  # type: ignore[index]
     rows = host.store.rows("SELECT state, spec_version FROM jobs WHERE id='job'")
@@ -635,7 +640,7 @@ def test_propose_job_preflight_failure_rolls_back_new_job_and_spec(tmp_path: Pat
     with pytest.raises(ToolHostError, match="preflight"):
         host.call("propose_job", {"spec_json": proposal_json()})
     assert host.store.rows("SELECT id FROM jobs WHERE id='job'") == []
-    assert not (tmp_path / "jobs" / "job" / "spec.v1.json").exists()
+    assert not (tmp_path / "projects" / "project" / "jobs" / "job" / "spec.v1.json").exists()
 
 
 def test_propose_job_rejects_model_selected_by_caller(tmp_path: Path) -> None:

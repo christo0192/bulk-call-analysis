@@ -8,8 +8,8 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
+from .fields import free_text_values
 from .patterns import (
     _aadhaar,
     _card,
@@ -57,17 +57,6 @@ _detectors: dict[str, tuple[re.Pattern[str], str]] = {
 _placeholder = re.compile(r"\[[A-Z_]+\]")
 
 
-def _all_strings(value: Any) -> Iterable[str]:
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from _all_strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _all_strings(item)
-
-
 def scan_text(
     text: str, allow_ids: frozenset[str] = frozenset(), precision: frozenset[str] | None = None
 ) -> list[Hit]:
@@ -103,7 +92,7 @@ def scan_lead(
     with gzip.open(masked_file, "rt", encoding="utf-8") as source:
         for line in source:
             record = json.loads(line)
-            for text in _all_strings(record):
+            for text in free_text_values(record):
                 hits.extend(scan_text(text, allow_ids, precision))
     return LeakReport(hits)
 
