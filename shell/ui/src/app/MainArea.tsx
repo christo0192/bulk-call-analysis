@@ -8,6 +8,7 @@ import { SetupView } from './views/SetupView';
 import { SampleView } from './views/SampleView';
 import { RunView } from './views/RunView';
 import { DoneView } from './views/DoneView';
+import { ErrorBoundary } from './ErrorBoundary';
 export function MainArea() {
   const current = selectedJob.value;
   const currentProject = selectedProject.value;
@@ -34,9 +35,9 @@ export function MainArea() {
     });
   const view =
     phase.value === 'setup' ? (
-      <SetupView id={current?.job} />
+      <SetupView id={current?.job} state={state} />
     ) : phase.value === 'sample' ? (
-      <SampleView id={current!.job} />
+      <SampleView id={current!.job} state={state} />
     ) : phase.value === 'run' ? (
       <RunView id={current!.job} />
     ) : (
@@ -52,13 +53,15 @@ export function MainArea() {
         <div class="actions" />
       </header>
       <div class="body">
-        {view}
-        {(phase.value === 'setup' || phase.value === 'sample') && (
-          <Rail project={currentProject} state={state} />
-        )}
-        {(phase.value === 'run' || phase.value === 'done') && (
-          <ChatDrawer visible={chat} toggle={toggle} />
-        )}
+        <ErrorBoundary key={`${currentProject}:${current?.job ?? ''}`}>
+          {view}
+          {(phase.value === 'setup' || phase.value === 'sample') && (
+            <Rail project={currentProject} state={state} />
+          )}
+          {(phase.value === 'run' || phase.value === 'done') && (
+            <ChatDrawer visible={chat} toggle={toggle} />
+          )}
+        </ErrorBoundary>
       </div>
     </main>
   );

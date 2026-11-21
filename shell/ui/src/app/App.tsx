@@ -14,11 +14,13 @@ export function App() {
   }, []);
   return (
     <>
-      <EngineStatusBanner />
-      <div class="window">
-        {settingsOpen.value ? <SettingsView /> : <Sidebar />}
-        {settingsOpen.value ? null : setupRequired.value ? <SetupChecklist /> : <MainArea />}
-      </div>
+      <>
+        <EngineStatusBanner />
+        <div class="window">
+          {settingsOpen.value ? <SettingsView /> : <Sidebar />}
+          {settingsOpen.value ? null : setupRequired.value ? <SetupChecklist /> : <MainArea />}
+        </div>
+      </>
     </>
   );
 }

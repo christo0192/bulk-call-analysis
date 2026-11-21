@@ -101,7 +101,9 @@ export function reduceNotification(n: Notification): void {
     for (const [project, items] of Object.entries(next)) {
       if (items.some((job) => job.job === p.job)) {
         found = true;
-        next[project] = items.map((job) => (job.job === p.job ? { ...job, state: p.state! } : job));
+        next[project] = items.map((job) =>
+          job.job === p.job ? { ...job, state: p.state as JobSummary['state'] } : job,
+        );
       }
     }
     jobsByProject.value = next;

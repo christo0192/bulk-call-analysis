@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'preact/hooks';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
-import type { AuthStatus, EngineStatus, Settings } from '../../engine/types';
+import type { AllowanceStatus, AuthStatus, EngineStatus, Settings } from '../../engine/types';
 import { settingsOpen, setupRequired } from '../../state/store';
 import { useSignIn } from '../hooks/useSignIn';
 import { formatPlanUsage } from '../formatUsage';
+import { weeklyPercent } from '../allowance';
 
 const initialSettings: Settings = {
   keyPath: '',
@@ -17,6 +18,7 @@ const initialSettings: Settings = {
 export function SettingsView() {
   const [values, setValues] = useState<Settings>(initialSettings);
   const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [allowance, setAllowance] = useState<AllowanceStatus | null>(null);
   const [app, setApp] = useState<EngineStatus | null>(null);
   const [model, setModel] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
@@ -38,8 +40,9 @@ export function SettingsView() {
       bridge.call('settings/get', {}),
       bridge.call('auth/status', {}),
       bridge.call('app/status', {}),
+      bridge.call('allowance/status', {}),
     ])
-      .then(([s, a, p]) => {
+      .then(([s, a, p, allowanceResult]) => {
         if (s.status === 'fulfilled') {
           setValues({ ...s.value, keyPath: s.value.keyPath ?? s.value.connectorPath ?? '' });
           setSettingsLoaded(true);
@@ -51,6 +54,7 @@ export function SettingsView() {
         else setAuthError(EngineError.from(a.reason).message);
         if (p.status === 'fulfilled') setApp(p.value);
         else setAppError(EngineError.from(p.reason).message);
+        if (allowanceResult.status === 'fulfilled') setAllowance(allowanceResult.value);
       })
       .finally(() => setLoading(false));
   };
@@ -123,7 +127,7 @@ export function SettingsView() {
           <p>
             ChatGPT:{' '}
             {auth?.codex.loggedIn
-              ? `Signed in · ${formatPlanUsage(auth.codex.planType, auth.codex.usagePercent)}`
+              ? `Signed in · ${formatPlanUsage(auth.codex.planType, weeklyPercent(allowance) ?? auth.codex.usagePercent)}`
               : 'Not signed in'}{' '}
             <button
               disabled={auth?.codex.loggedIn || waitingFor === 'codex'}

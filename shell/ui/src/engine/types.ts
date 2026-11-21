@@ -1,7 +1,5 @@
 export type JobState =
-  | 'draft'
   | 'planned'
-  | 'plan_proposed'
   | 'plan_approved'
   | 'running'
   | 'sample_ready'
@@ -12,14 +10,26 @@ export type JobState =
   | 'done_with_issues'
   | 'failed'
   | 'cancelled';
-export type Project = { project: string; title: string; status?: JobState };
+export type Project = {
+  project: string;
+  title: string;
+  status?: JobState;
+  activeJob?: JobSummary | null;
+  lastJob?: JobSummary | null;
+};
 export type JobSummary = {
   job: string;
   project: string;
-  state: string;
+  title?: string;
+  state: JobState;
+  step?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  specVersion?: number;
   done?: number;
   total?: number;
   remaining?: number | string;
+  approvedAt?: number;
 };
 export type FileInfo = { name: string; size: number };
 export type SetupStatus = 'pending' | 'ok' | 'failed' | 'manual_pending' | 'manual_done';
@@ -31,19 +41,96 @@ export type SetupItem = {
 };
 export type Counts = { done: number; total: number; remaining: number; failed?: number };
 export type JobStatus = JobSummary & { counts?: Counts; reason?: string };
-export type ChatEntry = { id: string; role: 'user' | 'assistant' | 'tool'; text: string };
-export type JobSnapshot = JobStatus & { selected?: number; eta?: string };
-export type PlanCard = {
-  version: number;
-  count: number;
-  usable: number;
-  noTranscript: number;
-  scanned: string;
-  columns: string[];
+export type ChatEntry = {
+  id: number;
+  ts: number;
+  turn: string;
+  role: 'user' | 'assistant' | 'tool' | 'status';
+  text?: string;
+  name?: string;
+  toolId?: string;
+  status?: 'started' | 'done' | 'failed';
+  summary?: string;
 };
-export type SampleCard = { count: number; passed: number; flagged: number };
+export type JobSnapshot = JobStatus & {
+  selected?: number;
+  eta?: string;
+  steps?: { id?: string; ts?: number }[];
+};
+export type PlanCard = {
+  job: string;
+  project: string;
+  specVersion: number;
+  title: string;
+  question: string;
+  leadSource: { kind: 'sql' | 'ids'; sql?: string; idCount?: number };
+  callsScope: { mode: 'all' | 'window'; windowStart?: string; windowEnd?: string };
+  counts: {
+    selected: number;
+    usable: number;
+    noTranscript: number;
+    transcriptionFailed: number;
+    tooShort: number;
+    notFound: number;
+    capped: number;
+    duplicates?: number;
+    malformed?: number;
+  };
+  scanBytes: number;
+  outputColumns: { name: string; type: string; description?: string }[];
+  rules: { kind: string; name?: string; summary: string }[];
+  sampleSize: number;
+  estimate: {
+    sampleSeconds: { low: number; high: number } | null;
+    fullSeconds: { low: number; high: number } | null;
+    codexPercent: { low: number; high: number } | null;
+  } | null;
+  approved: boolean;
+  approvedAt?: number;
+  // Compatibility aliases for older consumers.
+  version?: number;
+  count?: number;
+  usable?: number;
+  noTranscript?: number;
+  scanned?: string;
+  columns?: string[];
+};
+export type SampleRow = {
+  lead: string;
+  answer: Record<string, unknown>;
+  quotes: { field: string; text: string; ok: boolean; flag?: string }[];
+  flags: string[];
+  status: string;
+};
+export type SampleCard = {
+  job: string;
+  specVersion: number;
+  total: number;
+  read: number;
+  quotesVerified: number;
+  quotesRepaired: number;
+  quotesFlagged: number;
+  heldBack: number;
+  failed: number;
+  rows: SampleRow[];
+  columns: string[];
+  file: string | null;
+  count?: number;
+  passed?: number;
+  flagged?: number;
+};
 export type DoneView = { total: number; completed: number; issues: string[] };
-export type Allowances = { chatgpt?: string | number; claude?: string | number };
+export type AllowanceWindow = { name: string; usedPercent: number; resetsAt: number };
+export type AllowanceStatus = {
+  codex: { windows: AllowanceWindow[]; stopAtPercent: number } | null;
+  claude: {
+    windows?: AllowanceWindow[];
+    stopAtPercent?: number;
+    checkedAt?: number;
+    rateLimitInfo?: unknown;
+  } | null;
+};
+export type Allowances = AllowanceStatus;
 export type EngineStatus = {
   state: string;
   protocol: string;
@@ -84,7 +171,7 @@ export type MethodMap = {
   'files/list': { params: { project: string }; result: FileInfo[] };
   'chat/send': {
     params: { project: string; text: string };
-    result: { status: string; project: string };
+    result: { status: 'completed' | 'stopped'; project: string };
   };
   'chat/stop': { params: { project: string }; result: { status: 'stopped'; project: string } };
   'job/status': { params: { job: string }; result: JobStatus };
@@ -109,14 +196,18 @@ export type MethodMap = {
   // planned (M002-S01)
   'projects/jobs': { params: { project: string }; result: { jobs: JobSummary[] } };
   'chat/history': {
-    params: { project: string; before?: string; limit?: number };
+    params: { project: string; before?: number; limit?: number };
     result: { entries: ChatEntry[]; more: boolean };
   };
   'job/snapshot': { params: { job: string }; result: JobSnapshot };
   'job/plan': { params: { job: string }; result: PlanCard };
   'job/sample': { params: { job: string }; result: SampleCard };
+  'ids/attach': {
+    params: { project: string; text: string };
+    result: { name: string; raw: number; distinct: number; duplicates: number; malformed: number };
+  };
   'job/outputs': { params: { job: string }; result: DoneView };
-  'allowance/status': { params: {}; result: Allowances };
+  'allowance/status': { params: {}; result: AllowanceStatus };
   'files/path': { params: { project: string; name: string }; result: { path: string } };
 };
 export type ParamsOf<M extends Method> = MethodMap[M]['params'];

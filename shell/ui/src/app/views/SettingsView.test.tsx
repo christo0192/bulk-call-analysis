@@ -147,6 +147,8 @@ it('unknown plan and usage show unknown', async () => {
     claude: { loggedIn: true },
     codex: { loggedIn: true },
   }));
+  // Usage now also comes from allowance/status, so it must be unknown there too.
+  mockBridge.setResponse('allowance/status', async () => ({ codex: null, claude: null }));
   view();
   expect(await screen.findByText(/Plan: unknown/)).toBeInTheDocument();
   expect(screen.getByText(/weekly allowance unknown/)).toBeInTheDocument();
