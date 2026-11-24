@@ -897,6 +897,9 @@
 .accounted.bad {
   color: var(--red);
 }
+.accounting-error {
+  color: var(--red);
+}
 .run-lower {
   display: grid;
   grid-template-columns: 1fr 1fr;

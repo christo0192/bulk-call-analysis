@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from 'preact/hooks';
-import { allowances, settingsOpen } from '../../state/store';
+import { settingsOpen } from '../../state/store';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import type { JobSnapshot, Notification } from '../../engine/types';
@@ -19,8 +19,13 @@ const time = (ts: number) =>
     hour: 'numeric',
     minute: '2-digit',
   }).format(ts * 1000);
-const ago = (ts: number | null, now: number) =>
-  ts === null ? '—' : `${Math.max(0, Math.floor(now / 1000 - ts))} s ago`;
+const clockTime = (ts: number) =>
+  new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(ts * 1000);
+const activityAgo = (ts: number | null, now: number) => {
+  if (ts === null) return '—';
+  const seconds = Math.max(0, Math.floor(now / 1000 - ts));
+  return seconds >= 60 ? `${Math.floor(seconds / 60)} min ago` : `${seconds} s ago`;
+};
 type BannerKind =
   | 'quota'
   | 'credit'
@@ -152,14 +157,10 @@ function StateBanner({
 
 function AllowanceTile({ snapshot }: { snapshot: JobSnapshot }) {
   const primary = snapshot.quota.codex?.primary;
-  const windows = allowances.value?.codex?.windows ?? [];
-  const window =
-    windows.find((item) => item.windowDurationMins === 300) ??
-    (primary?.windowDurationMins === 300 ? primary : null);
+  const window = primary?.windowDurationMins === 300 ? primary : null;
   const used = window?.usedPercent;
-  const stop = snapshot.quota.codex?.stopAtPercent ?? allowances.value?.codex?.stopAtPercent;
-  const projected =
-    snapshot.quota.projectedEndPercent ?? snapshot.quota.codex?.projectedEndPercent ?? null;
+  const stop = snapshot.quota.codex?.stopAtPercent;
+  const projected = snapshot.quota.projectedEndPercent;
   const windowName =
     window?.windowDurationMins === 300
       ? '5-hour'
@@ -190,10 +191,9 @@ function AllowanceTile({ snapshot }: { snapshot: JobSnapshot }) {
             <span>{stop === undefined ? '' : `Pauses at ${Math.round(stop)}%`}</span>
             <span>Resets {window ? time(window.resetsAt) : 'unknown'}</span>
           </div>
-          {projected !== null && stop !== undefined && projected < stop && (
-            <div class="tile-sub">Enough for this job</div>
+          {projected !== null && (
+            <div class="tile-sub">This job ends near {Math.round(projected)}%</div>
           )}
-          {projected !== null && <div class="tile-sub">Job ends near {Math.round(projected)}%</div>}
         </>
       )}
     </section>
@@ -212,6 +212,8 @@ export function RunView({ id }: { id: string }) {
   const loading = useRef(false);
   const reloadPending = useRef(false);
   const mounted = useRef(true);
+  const activeJob = useRef(id);
+  activeJob.current = id;
   const load = () => {
     if (!mounted.current) return;
     if (loading.current) {
@@ -224,16 +226,17 @@ export function RunView({ id }: { id: string }) {
     void bridge
       .call('job/snapshot', { job: id })
       .then((snapshot) => {
-        if (mounted.current) dispatch({ type: 'snapshot/loaded', sequence: request, snapshot });
+        if (mounted.current && activeJob.current === id && snapshot.job === id)
+          dispatch({ type: 'snapshot/loaded', sequence: request, snapshot });
       })
       .catch((error: unknown) => {
         const e = EngineError.from(error);
-        if (mounted.current)
+        if (mounted.current && activeJob.current === id)
           dispatch({ type: 'snapshot/failed', sequence: request, error: e.message, code: e.code });
       })
       .finally(() => {
         loading.current = false;
-        if (mounted.current && reloadPending.current) {
+        if (mounted.current && activeJob.current === id && reloadPending.current) {
           reloadPending.current = false;
           load();
         }
@@ -288,8 +291,8 @@ export function RunView({ id }: { id: string }) {
     etaSignature.current = nextEtaSignature;
     etaAt.current = etaKnown ? Date.now() / 1000 : null;
   }
-  const finish =
-    etaKnown && etaAt.current !== null ? time(etaAt.current + snapshot.eta!.high!) : null;
+  const finishClock =
+    etaKnown && etaAt.current !== null ? clockTime(etaAt.current + snapshot.eta!.high!) : null;
   const banner = bannerFor(snapshot, live.stalled);
   const resume = () => {
     void bridge.call('job/resume', { job: id });
@@ -303,12 +306,22 @@ export function RunView({ id }: { id: string }) {
     ['Held back', progress.heldBack, 'not started'],
   ];
   const accounting = [
-    [progress.done, 'done read'],
+    [progress.done, 'read'],
     [progress.inFlight, 'in progress'],
     [progress.retrying, 'retrying'],
     [progress.failed, 'failed'],
     [progress.heldBack, 'held back'],
-    [progress.remaining, 'remaining left'],
+    [progress.remaining, 'left'],
+  ]
+    .filter(([, value]) => value !== 0)
+    .map(([value, label]) => `${number(value as number)} ${label}`)
+    .join(' + ');
+  const usability = [
+    [counts.usable, 'usable'],
+    [counts.noTranscript, 'no transcript'],
+    [counts.transcriptionFailed, 'transcription failed'],
+    [counts.tooShort, 'too short'],
+    [counts.notFound, 'not found'],
   ]
     .filter(([, value]) => value !== 0)
     .map(([value, label]) => `${number(value as number)} ${label}`)
@@ -348,16 +361,19 @@ export function RunView({ id }: { id: string }) {
         <div class="run-hero-row">
           <div>
             <strong>
-              About {etaKnown ? duration(snapshot.eta!.high!) : 'an unknown time'} left
-            </strong>
-            <span>
               {etaKnown
-                ? `Somewhere between ${duration(snapshot.eta!.low!)} and ${duration(snapshot.eta!.high!)} · likely done around ${finish}`
+                ? `About ${duration(snapshot.eta!.high!)} left`
                 : 'Working out the time left…'}
-            </span>
+            </strong>
+            {etaKnown && (
+              <span>
+                Somewhere between {duration(snapshot.eta!.low!)} and {duration(snapshot.eta!.high!)}{' '}
+                · finishes around {finishClock}
+              </span>
+            )}
           </div>
           <div>
-            <strong>Last activity {ago(snapshot.activity.lastActivityTs, now)}</strong>
+            <strong>Last activity {activityAgo(snapshot.activity.lastActivityTs, now)}</strong>
             <span>
               {snapshot.activity.workers} readers working ·{' '}
               {snapshot.activity.throughputPerMin === null
@@ -377,8 +393,10 @@ export function RunView({ id }: { id: string }) {
         <section class="run-tile">
           <div class="tile-title">Claude allowance (chat)</div>
           <div class="tile-value">
-            {allowances.value?.claude?.windows?.[0]
-              ? `${Math.round(allowances.value.claude.windows[0].usedPercent)}% used`
+            {snapshot.quota.claude &&
+            Array.isArray(snapshot.quota.claude.windows) &&
+            typeof snapshot.quota.claude.windows[0]?.usedPercent === 'number'
+              ? `${Math.round(snapshot.quota.claude.windows[0].usedPercent as number)}% used`
               : 'Unknown'}
           </div>
         </section>
@@ -400,25 +418,23 @@ export function RunView({ id }: { id: string }) {
                       class="text-button"
                       onClick={() => setReasonsOpen(!reasonsOpen)}
                     >
-                      {' '}
-                      · see why
+                      See why
                     </button>
                   )}
                 </span>
               </div>
             ))}
         </div>
-        <div class={`accounted ${addsUp ? '' : 'bad'}`}>
+        <div class="accounted">
           <b>{number(progress.total)} = </b>
           {accounting}
-          {!addsUp && <strong> · doesn’t add up</strong>}
+          {!addsUp && (
+            <strong class="accounting-error">Doesn&apos;t add up — see the verify report</strong>
+          )}
         </div>
         {unusable > 0 && (
           <div class="accounted">
-            {number(counts.selected)} = {number(counts.usable)} usable +{' '}
-            {number(counts.noTranscript)} noTranscript + {number(counts.transcriptionFailed)}{' '}
-            transcriptionFailed + {number(counts.tooShort)} tooShort + {number(counts.notFound)}{' '}
-            notFound
+            {number(counts.selected)} selected = {usability}
           </div>
         )}
         {reasonsOpen && (
