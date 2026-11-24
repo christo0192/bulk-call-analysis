@@ -60,6 +60,8 @@ export const plan: PlanCard = {
   outputColumns: [
     { name: 'asked_discount', type: 'boolean' },
     { name: 'discount_amount', type: 'string' },
+    // A number column, so the bands rule can be tried in the dev mock and the browser tests.
+    { name: 'discount_percent', type: 'number' },
     { name: 'reason', type: 'string' },
   ],
   rules: [

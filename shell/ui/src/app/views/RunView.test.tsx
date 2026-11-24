@@ -133,7 +133,7 @@ it('failed opens the reasons', async () => {
     }),
   );
   render(<RunView id="job-one" />);
-  await waitFor(() => fireEvent.click(screen.getByRole('button', { name: /see why/ })));
+  await waitFor(() => fireEvent.click(screen.getByRole('button', { name: /see why/i })));
   expect(screen.getByText('timeout: 1')).toBeInTheDocument();
 });
 it('run view leaves job actions to the main header', async () => {
@@ -228,7 +228,7 @@ it('unusable leads add up in the second line', async () => {
   render(<RunView id="job-one" />);
   expect(
     await screen.findByText(
-      /8 = 4 usable \+ 1 noTranscript \+ 1 transcriptionFailed \+ 1 tooShort \+ 1 notFound/,
+      /8 selected = 4 usable \+ 1 no transcript \+ 1 transcription failed \+ 1 too short \+ 1 not found/,
     ),
   ).toBeInTheDocument();
 });

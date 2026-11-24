@@ -7,7 +7,8 @@ import { openProjectFile } from '../../engine/shellCommands';
 import { RebuildDialog } from './RebuildDialog';
 import type { PlanCard } from '../../engine/types';
 
-vi.mock('../../engine/shellCommands', () => ({ openProjectFile: vi.fn() }));
+// The shell command resolves to null on success, like the real Tauri command.
+vi.mock('../../engine/shellCommands', () => ({ openProjectFile: vi.fn(async () => null) }));
 
 beforeEach(() => mockBridge.resetForTest());
 
@@ -118,11 +119,16 @@ it('adds an in scope rule with typed values', async () => {
 it('rebuild success shows the new file with open', async () => {
   const dialog = renderDialog(vi.fn(), planWithRules);
   fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  // The dialog shows the file name only and opens by the project-relative path.
   expect(
-    await within(dialog).findByText(/output\/results\.v2\.rebuild1\.xlsx/),
+    await within(dialog).findByText(/Rebuilt: results\.v2\.rebuild1\.xlsx/),
   ).toBeInTheDocument();
+  expect(within(dialog).queryByText(/jobs\//)).toBeNull();
   fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }));
-  expect(openProjectFile).toHaveBeenCalledWith('project-one', 'output/results.v2.rebuild1.xlsx');
+  expect(openProjectFile).toHaveBeenCalledWith(
+    'project-one',
+    'jobs/job-one/output/results.v2.rebuild1.xlsx',
+  );
 });
 
 it('invalid rules shows the engine detail', async () => {

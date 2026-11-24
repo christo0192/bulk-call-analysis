@@ -269,7 +269,8 @@ export class MockBridge implements EngineBridge {
       const result: RebuildResult = {
         job: (params as { job: string }).job,
         name: 'results.v2.rebuild1.xlsx',
-        path: 'output/results.v2.rebuild1.xlsx',
+        // Project-relative, as the engine returns it.
+        path: `jobs/${(params as { job: string }).job}/output/results.v2.rebuild1.xlsx`,
         rebuild: 1,
       };
       return result as ResultOf<M>;
@@ -346,9 +347,9 @@ export class MockBridge implements EngineBridge {
       }
       return {
         ...(quotaPause ? pausedQuotaSnapshot : isPaused ? pausedSnapshot : runningSnapshot),
-        ...(quotaPause
-          ? { state: 'paused', pauseReason: 'usage_limit', resumeAt: 1700000000 }
-          : {}),
+        // The recorded quota pause (reason "quota"); its reset time is moved three hours ahead,
+        // because the recording's normalised time is in the past.
+        ...(quotaPause ? { resumeAt: Math.floor(Date.now() / 1000) + 3 * 3600 } : {}),
         job: requested,
         project: job?.project ?? runningSnapshot.project,
         title:

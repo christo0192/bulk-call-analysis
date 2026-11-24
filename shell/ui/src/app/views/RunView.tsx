@@ -221,22 +221,24 @@ export function RunView({ id }: { id: string }) {
       return;
     }
     loading.current = true;
+    const jobId = id;
     const request = ++sequence.current;
     dispatch({ type: 'snapshot/requested', sequence: request });
     void bridge
-      .call('job/snapshot', { job: id })
+      .call('job/snapshot', { job: jobId })
       .then((snapshot) => {
-        if (mounted.current && activeJob.current === id && snapshot.job === id)
+        if (mounted.current && activeJob.current === jobId && snapshot.job === jobId)
           dispatch({ type: 'snapshot/loaded', sequence: request, snapshot });
       })
       .catch((error: unknown) => {
         const e = EngineError.from(error);
-        if (mounted.current && activeJob.current === id)
+        if (mounted.current && activeJob.current === jobId)
           dispatch({ type: 'snapshot/failed', sequence: request, error: e.message, code: e.code });
       })
       .finally(() => {
+        if (activeJob.current !== jobId) return;
         loading.current = false;
-        if (mounted.current && activeJob.current === id && reloadPending.current) {
+        if (mounted.current && reloadPending.current) {
           reloadPending.current = false;
           load();
         }
@@ -258,6 +260,7 @@ export function RunView({ id }: { id: string }) {
     const refresh = window.setInterval(load, 30000);
     return () => {
       mounted.current = false;
+      loading.current = false;
       reloadPending.current = false;
       off();
       window.clearInterval(tick);
@@ -313,7 +316,7 @@ export function RunView({ id }: { id: string }) {
     [progress.heldBack, 'held back'],
     [progress.remaining, 'left'],
   ]
-    .filter(([, value]) => value !== 0)
+    .filter(([value]) => value !== 0)
     .map(([value, label]) => `${number(value as number)} ${label}`)
     .join(' + ');
   const usability = [
@@ -323,7 +326,7 @@ export function RunView({ id }: { id: string }) {
     [counts.tooShort, 'too short'],
     [counts.notFound, 'not found'],
   ]
-    .filter(([, value]) => value !== 0)
+    .filter(([value]) => value !== 0)
     .map(([value, label]) => `${number(value as number)} ${label}`)
     .join(' + ');
   const sample = progress.phase === 'sample';
@@ -435,7 +438,7 @@ export function RunView({ id }: { id: string }) {
         </div>
         {unusable > 0 && (
           <div class="accounted">
-            {number(counts.selected)} = {usability}
+            {number(counts.selected)} selected = {usability}
           </div>
         )}
         {reasonsOpen && (
