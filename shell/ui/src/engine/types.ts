@@ -183,7 +183,42 @@ export type SampleCard = {
   passed?: number;
   flagged?: number;
 };
-export type DoneView = { total: number; completed: number; issues: string[] };
+export type OutputFile = { name: string; kind: string };
+export type Reconciliation = {
+  selected: number;
+  read: number;
+  noTranscript: number;
+  transcriptionFailed: number;
+  tooShort: number;
+  notFound: number;
+  heldBack: number;
+  failed: number;
+  notStarted: number;
+  addsUp: boolean;
+};
+export type OutputIssue = { kind: string; count: number; text: string; leads: string[] };
+export type JobOutputs = {
+  job: string;
+  specVersion: number;
+  state: string;
+  finishedAt: number;
+  durationSeconds: number | null;
+  asleepSeconds: number | null;
+  files: OutputFile[];
+  reconciliation: Reconciliation;
+  issues: OutputIssue[];
+  headline: string | null;
+};
+export type RuleCondition = {
+  field: string;
+  op: string;
+  value?: string | number | boolean | null | (string | number | boolean)[];
+};
+export type Rule =
+  | { kind: 'in_scope'; match: 'all' | 'any'; conditions: RuleCondition[] }
+  | { kind: 'threshold_group'; name: string; field: string; edges: number[]; labels: string[] }
+  | { kind: 'review_flag'; name: string; match: 'all' | 'any'; conditions: RuleCondition[] };
+export type RebuildResult = { job: string; path: string; rebuild: number };
 export type AllowanceWindow = { name: string; usedPercent: number; resetsAt: number };
 export type AllowanceStatus = {
   codex: { windows: AllowanceWindow[]; stopAtPercent: number } | null;
@@ -245,8 +280,8 @@ export type MethodMap = {
   'job/pause': { params: { job: string }; result: JobStatus };
   'job/resume': { params: { job: string }; result: JobStatus };
   'job/rebuildRules': {
-    params: { job: string; rules: unknown[] };
-    result: { job: string; path: string };
+    params: { job: string; rules: Rule[] };
+    result: RebuildResult;
   };
   'auth/claudeLogin': { params: {}; result: { started: true; vendor: 'claude' } };
   'auth/codexLogin': { params: {}; result: { started: true; vendor: 'codex' } };
@@ -270,9 +305,9 @@ export type MethodMap = {
     params: { project: string; text: string };
     result: { name: string; raw: number; distinct: number; duplicates: number; malformed: number };
   };
-  'job/outputs': { params: { job: string }; result: DoneView };
+  'job/outputs': { params: { job: string }; result: JobOutputs };
   'allowance/status': { params: {}; result: AllowanceStatus };
-  open_project_folder: { params: { project: string }; result: { opened: boolean } };
+  open_project_folder: { params: { project: string }; result: null };
   'files/path': { params: { project: string; name: string }; result: { path: string } };
 };
 export type ParamsOf<M extends Method> = MethodMap[M]['params'];

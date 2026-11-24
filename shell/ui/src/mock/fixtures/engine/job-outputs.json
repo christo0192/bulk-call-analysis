@@ -3,25 +3,33 @@
   "specVersion": 1,
   "state": "done",
   "finishedAt": 1700000000,
-  "durationSeconds": null,
-  "asleepSeconds": null,
+  "durationSeconds": 29760,
+  "asleepSeconds": 1680,
   "files": [
     { "name": "output/reconciliation.v1.json", "kind": "other" },
     { "name": "output/results.v1.xlsx", "kind": "results" },
+    { "name": "output/summary.md", "kind": "summary" },
     { "name": "output/verify-report.v1.md", "kind": "report" }
   ],
   "reconciliation": {
-    "selected": 8,
+    "selected": 10,
     "read": 8,
-    "noTranscript": 0,
+    "noTranscript": 1,
     "transcriptionFailed": 0,
     "tooShort": 0,
     "notFound": 0,
-    "heldBack": 0,
+    "heldBack": 1,
     "failed": 0,
     "notStarted": 0,
     "addsUp": true
   },
-  "issues": [],
-  "headline": null
+  "issues": [
+    {
+      "kind": "held_back",
+      "count": 1,
+      "text": "lead was held back for review.",
+      "leads": ["lead-9"]
+    }
+  ],
+  "headline": "Most leads asked about pricing."
 }

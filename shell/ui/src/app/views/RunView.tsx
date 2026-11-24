@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { JobSnapshot } from '../../engine/types';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
+import { openProjectFolder } from '../../engine/shellCommands';
 
 const number = (value: number) => new Intl.NumberFormat().format(value);
 const duration = (seconds: number) => {
@@ -114,15 +115,15 @@ function AllowanceTile({ snapshot }: { snapshot: JobSnapshot }) {
   );
 }
 
-export function RunView({ id }: { id: string }) {
+export function RunView({ id, showActions = true }: { id: string; showActions?: boolean }) {
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null);
   const snapshotRef = useRef<JobSnapshot | null>(null);
   const pendingProgress = useRef<Partial<JobSnapshot['progress']>>({});
   const pendingEngineEvents = useRef(new Map<string, Record<string, unknown>>());
   const [now, setNow] = useState(Date.now());
   const [reasonsOpen, setReasonsOpen] = useState(false);
-  const [folderAvailable, setFolderAvailable] = useState(true);
   const [onBattery, setOnBattery] = useState(false);
+  const [folderAvailable, setFolderAvailable] = useState(true);
   const [event, setEvent] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const applyEngineEvent = (current: JobSnapshot, next: Record<string, unknown>) => {
@@ -145,6 +146,20 @@ export function RunView({ id }: { id: string }) {
       result.resumeAt = typeof next.resume_at === 'number' ? next.resume_at : current.resumeAt;
     }
     return result;
+  };
+  const pauseOrResume = async () => {
+    if (!snapshot) return;
+    await bridge.call(snapshot.state === 'paused' ? 'job/resume' : 'job/pause', { job: id });
+    await loadSnapshot();
+  };
+  const openFolder = async () => {
+    if (!snapshot) return;
+    try {
+      await openProjectFolder(snapshot.project);
+    } catch (error) {
+      if (EngineError.from(error).reason === 'file_not_found') setFolderAvailable(false);
+      else setError(EngineError.from(error).message);
+    }
   };
   const loadSnapshot = async () => {
     try {
@@ -230,18 +245,6 @@ export function RunView({ id }: { id: string }) {
   const eta = etaKnown
     ? `Somewhere between ${duration(snapshot.eta!.low!)} and ${duration(snapshot.eta!.high!)} · likely done around ${time(Date.now() / 1000 + snapshot.eta!.high!)}`
     : 'Working out the time left…';
-  const pauseOrResume = async () => {
-    await bridge.call(snapshot.state === 'paused' ? 'job/resume' : 'job/pause', { job: id });
-    await loadSnapshot();
-  };
-  const openFolder = async () => {
-    try {
-      await bridge.call('open_project_folder', { project: snapshot.project });
-    } catch (e) {
-      if (EngineError.from(e).code === -32601) setFolderAvailable(false);
-      else setError(EngineError.from(e).message);
-    }
-  };
   const cells = [
     ['Read', progress.done, 'finished'],
     [
@@ -258,14 +261,16 @@ export function RunView({ id }: { id: string }) {
   ] as const;
   return (
     <div class="phase-view run-view" data-testid="run-view">
-      <div class="run-actions">
-        <button type="button" onClick={() => void pauseOrResume()}>
-          {snapshot.state === 'paused' ? 'Resume' : 'Pause'}
-        </button>
-        <button type="button" disabled={!folderAvailable} onClick={() => void openFolder()}>
-          Open folder{!folderAvailable && ' (available soon)'}
-        </button>
-      </div>
+      {showActions && (
+        <div class="run-actions">
+          <button type="button" onClick={() => void pauseOrResume()}>
+            {snapshot.state === 'paused' ? 'Resume' : 'Pause'}
+          </button>
+          <button type="button" disabled={!folderAvailable} onClick={() => void openFolder()}>
+            Open folder{!folderAvailable && ' (available soon)'}
+          </button>
+        </div>
+      )}
       <StateBanner kind={banner} snapshot={snapshot} />
       <section class="run-hero">
         <div class="run-big-number">

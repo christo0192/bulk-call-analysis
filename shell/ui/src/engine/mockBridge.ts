@@ -1,6 +1,8 @@
 import type { EngineBridge, Unsubscribe } from './client';
 import { EngineError } from './client';
 import type { Method, ParamsOf, ResultOf, Notification, ChatEntry } from './types';
+import type { JobOutputs, RebuildResult } from './types';
+import outputsFixture from '../mock/fixtures/engine/job-outputs.json';
 import runningSnapshot from '../mock/fixtures/engine/job-snapshot-running.json';
 import pausedSnapshot from '../mock/fixtures/engine/job-snapshot-paused.json';
 import allowanceFixture from '../mock/fixtures/engine/allowance-status.json';
@@ -41,6 +43,7 @@ const settingsState = { ...settings };
 type ResponseFn = (params: unknown) => unknown | Promise<unknown>;
 export class MockBridge implements EngineBridge {
   calls: Array<{ method: Method; params: unknown }> = [];
+  shellCalls: Array<{ command: string; params: unknown }> = [];
   private responses = new Map<Method, ResponseFn>();
   private notifications = new Set<(n: Notification) => void>();
   private statuses = new Set<(s: { status: string; reason?: string }) => void>();
@@ -255,6 +258,19 @@ export class MockBridge implements EngineBridge {
         job: requestedJob,
       } as ResultOf<M>;
     }
+    if (method === 'job/outputs')
+      return {
+        ...outputsFixture,
+        job: (params as { job: string }).job,
+      } as JobOutputs as ResultOf<M>;
+    if (method === 'job/rebuildRules') {
+      const result: RebuildResult = {
+        job: (params as { job: string }).job,
+        path: 'output/results.v2.rebuild1.xlsx',
+        rebuild: 1,
+      };
+      return result as ResultOf<M>;
+    }
     if (method === 'job/sample')
       return { ...sample, job: (params as { job: string }).job } as ResultOf<M>;
     if (method === 'job/approvePlan') {
@@ -366,7 +382,6 @@ export class MockBridge implements EngineBridge {
       return job as ResultOf<M>;
     }
     if (method === 'health/ping') return { status: 'ok' } as ResultOf<M>;
-    if (method === 'open_project_folder') return { opened: true } as ResultOf<M>;
     return {} as ResultOf<M>;
   }
   setResponse<M extends Method>(
@@ -387,6 +402,7 @@ export class MockBridge implements EngineBridge {
     this.runProgressTimer = undefined;
     this.runDone = 2;
     this.calls = [];
+    this.shellCalls = [];
     this.responses.clear();
   }
   emit(notification: Notification): void {
