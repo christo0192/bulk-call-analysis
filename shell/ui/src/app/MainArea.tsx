@@ -75,7 +75,7 @@ export function MainArea() {
     ) : phase.value === 'sample' ? (
       <SampleView id={current!.job} state={state} />
     ) : phase.value === 'run' ? (
-      <RunView id={current!.job} />
+      <RunView key={current!.job} id={current!.job} />
     ) : (
       <DoneView
         id={current!.job}
@@ -97,9 +97,11 @@ export function MainArea() {
         <div class="actions">
           {phase.value === 'run' && current && (
             <>
-              <button type="button" onClick={pause}>
-                {current.state === 'paused' ? 'Resume' : 'Pause'}
-              </button>
+              {(current.state === 'running' || current.state === 'paused') && (
+                <button type="button" onClick={pause}>
+                  {current.state === 'paused' ? 'Resume' : 'Pause'}
+                </button>
+              )}
               <button type="button" onClick={openFolder}>
                 Open folder
               </button>

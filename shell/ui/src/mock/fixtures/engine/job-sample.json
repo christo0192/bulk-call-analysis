@@ -1,0 +1,29 @@
+{
+  "job": "job-one",
+  "specVersion": 1,
+  "total": 2,
+  "read": 2,
+  "quotesVerified": 2,
+  "quotesRepaired": 0,
+  "quotesFlagged": 0,
+  "heldBack": 0,
+  "failed": 0,
+  "rows": [
+    {
+      "lead": "1000",
+      "answer": { "answer": "synthetic" },
+      "quotes": [],
+      "flags": [],
+      "status": "done"
+    },
+    {
+      "lead": "1001",
+      "answer": { "answer": "synthetic" },
+      "quotes": [],
+      "flags": [],
+      "status": "done"
+    }
+  ],
+  "columns": ["answer"],
+  "file": "jobs/job-one/output/sample.v1.xlsx"
+}

@@ -119,6 +119,7 @@ export type JobSnapshot = {
   }[];
   recent: { ts: number; kind: string; text: string }[];
   reconciliation: { addsUp: boolean; [key: string]: unknown } | null;
+  failure: { text: string; [key: string]: unknown } | null;
   approvedAt?: number;
 };
 export type PlanCard = {
@@ -219,7 +220,12 @@ export type Rule =
   | { kind: 'threshold_group'; name: string; field: string; edges: number[]; labels: string[] }
   | { kind: 'review_flag'; name: string; match: 'all' | 'any'; conditions: RuleCondition[] };
 export type RebuildResult = { job: string; path: string; rebuild: number };
-export type AllowanceWindow = { name: string; usedPercent: number; resetsAt: number };
+export type AllowanceWindow = {
+  name: string;
+  usedPercent: number;
+  resetsAt: number;
+  windowDurationMins?: number;
+};
 export type AllowanceStatus = {
   codex: { windows: AllowanceWindow[]; stopAtPercent: number } | null;
   claude: {

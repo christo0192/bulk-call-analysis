@@ -43,58 +43,52 @@
     {
       "id": "plan_approved",
       "label": "plan approved",
-      "status": "todo",
+      "status": "done",
       "ts": 1700000000,
       "detail": null
     },
     {
       "id": "leads_selected",
       "label": "leads selected",
-      "status": "todo",
+      "status": "done",
       "ts": null,
       "detail": null
     },
     {
       "id": "transcripts_pulled",
       "label": "transcripts pulled",
-      "status": "todo",
+      "status": "done",
       "ts": 1700000000,
       "detail": null
     },
     {
       "id": "sample_masked",
       "label": "sample masked",
-      "status": "todo",
+      "status": "done",
       "ts": 1700000000,
       "detail": null
     },
     {
-      "id": "sample_read_(n/N)",
-      "label": "sample read (n/N)",
-      "status": "todo",
+      "id": "sample_read",
+      "label": "sample read",
+      "status": "done",
       "ts": 1700000000,
-      "detail": null
+      "detail": "2/2"
     },
     {
       "id": "sample_approved",
       "label": "sample approved",
-      "status": "todo",
+      "status": "done",
       "ts": 1700000000,
       "detail": null
     },
+    { "id": "masking", "label": "masking", "status": "done", "ts": 1700000000, "detail": null },
     {
-      "id": "masking_(n/N)",
-      "label": "masking (n/N)",
-      "status": "todo",
+      "id": "full_run",
+      "label": "full run",
+      "status": "active",
       "ts": 1700000000,
-      "detail": null
-    },
-    {
-      "id": "full_run_(n/N)",
-      "label": "full run (n/N)",
-      "status": "todo",
-      "ts": 1700000000,
-      "detail": null
+      "detail": "2/8"
     },
     {
       "id": "quote_check_and_repair",
@@ -144,5 +138,6 @@
     },
     { "ts": 1700000000, "kind": "state", "text": "State changed from full_running to paused." }
   ],
-  "reconciliation": null
+  "reconciliation": null,
+  "failure": null
 }

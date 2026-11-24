@@ -2,7 +2,9 @@
   "codex": {
     "loggedIn": true,
     "planType": null,
-    "windows": [{ "name": "5h", "usedPercent": 0, "resetsAt": 1700000000 }],
+    "windows": [
+      { "name": "5h", "usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1700000000 }
+    ],
     "creditsBalance": "5",
     "spendControlReached": null,
     "stopAtPercent": 95,

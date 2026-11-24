@@ -1,0 +1,155 @@
+{
+  "job": "job-one",
+  "project": "project-one",
+  "title": "Synthetic job",
+  "state": "paused",
+  "step": "paused",
+  "specVersion": 1,
+  "pauseReason": "quota",
+  "resumeAt": 1700000000,
+  "planApprovedAt": 1700000000,
+  "sampleApprovedAt": 1700000000,
+  "progress": {
+    "job": "job-one",
+    "project": "project-one",
+    "phase": "full",
+    "done": 2,
+    "inFlight": 0,
+    "retrying": 0,
+    "failed": 0,
+    "heldBack": 0,
+    "remaining": 6,
+    "total": 8
+  },
+  "counts": {
+    "selected": 8,
+    "usable": 8,
+    "noTranscript": 0,
+    "transcriptionFailed": 0,
+    "tooShort": 0,
+    "notFound": 0,
+    "capped": 0,
+    "failedByReason": {}
+  },
+  "eta": { "low": null, "high": null, "seeded": true, "known": false },
+  "activity": { "lastActivityTs": null, "inFlight": 0, "workers": 1, "throughputPerMin": 1.0 },
+  "quota": {
+    "codex": {
+      "limitId": "codex",
+      "primary": { "usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1700000000 },
+      "secondary": null,
+      "creditsBalance": "5",
+      "hasCredits": false,
+      "spendControlReached": null,
+      "rateLimitReachedType": null,
+      "ordinaryUsageAllowed": true,
+      "planType": null,
+      "stopAtPercent": 95
+    },
+    "claude": null,
+    "projectedEndPercent": null
+  },
+  "steps": [
+    {
+      "id": "plan_approved",
+      "label": "plan approved",
+      "status": "done",
+      "ts": 1700000000,
+      "detail": null
+    },
+    {
+      "id": "leads_selected",
+      "label": "leads selected",
+      "status": "done",
+      "ts": null,
+      "detail": null
+    },
+    {
+      "id": "transcripts_pulled",
+      "label": "transcripts pulled",
+      "status": "done",
+      "ts": 1700000000,
+      "detail": null
+    },
+    {
+      "id": "sample_masked",
+      "label": "sample masked",
+      "status": "done",
+      "ts": 1700000000,
+      "detail": null
+    },
+    {
+      "id": "sample_read",
+      "label": "sample read",
+      "status": "done",
+      "ts": 1700000000,
+      "detail": "2/2"
+    },
+    {
+      "id": "sample_approved",
+      "label": "sample approved",
+      "status": "done",
+      "ts": 1700000000,
+      "detail": null
+    },
+    { "id": "masking", "label": "masking", "status": "done", "ts": 1700000000, "detail": null },
+    {
+      "id": "full_run",
+      "label": "full run",
+      "status": "active",
+      "ts": 1700000000,
+      "detail": "2/8"
+    },
+    {
+      "id": "quote_check_and_repair",
+      "label": "quote check and repair",
+      "status": "todo",
+      "ts": null,
+      "detail": null
+    },
+    { "id": "Excel_built", "label": "Excel built", "status": "todo", "ts": null, "detail": null },
+    { "id": "verified", "label": "verified", "status": "todo", "ts": null, "detail": null },
+    {
+      "id": "summary_written",
+      "label": "summary written",
+      "status": "todo",
+      "ts": null,
+      "detail": null
+    }
+  ],
+  "recent": [
+    { "ts": 1700000000, "kind": "state", "text": "State changed from draft to plan_proposed." },
+    {
+      "ts": 1700000000,
+      "kind": "state",
+      "text": "State changed from plan_proposed to plan_approved."
+    },
+    { "ts": 1700000000, "kind": "state", "text": "State changed from plan_approved to pulling." },
+    { "ts": 1700000000, "kind": "state", "text": "State changed from pulling to masking_sample." },
+    {
+      "ts": 1700000000,
+      "kind": "state",
+      "text": "State changed from masking_sample to sample_running."
+    },
+    {
+      "ts": 1700000000,
+      "kind": "state",
+      "text": "State changed from sample_running to sample_ready."
+    },
+    {
+      "ts": 1700000000,
+      "kind": "state",
+      "text": "State changed from sample_ready to sample_approved."
+    },
+    {
+      "ts": 1700000000,
+      "kind": "state",
+      "text": "State changed from sample_approved to full_running."
+    },
+    { "ts": 1700000000, "kind": "state", "text": "State changed from full_running to paused." },
+    { "ts": 1700000000, "kind": "state", "text": "State changed from paused to full_running." },
+    { "ts": 1700000000, "kind": "state", "text": "State changed from full_running to paused." }
+  ],
+  "reconciliation": null,
+  "failure": null
+}

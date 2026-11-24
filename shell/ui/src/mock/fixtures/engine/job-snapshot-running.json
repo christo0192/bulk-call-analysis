@@ -43,7 +43,8 @@
       "spendControlReached": null,
       "rateLimitReachedType": null,
       "ordinaryUsageAllowed": true,
-      "planType": null
+      "planType": null,
+      "stopAtPercent": 95
     },
     "claude": null,
     "projectedEndPercent": null
@@ -78,11 +79,11 @@
       "detail": null
     },
     {
-      "id": "sample_read_(n/N)",
-      "label": "sample read (n/N)",
+      "id": "sample_read",
+      "label": "sample read",
       "status": "done",
       "ts": 1700000000,
-      "detail": null
+      "detail": "2/2"
     },
     {
       "id": "sample_approved",
@@ -91,19 +92,13 @@
       "ts": 1700000000,
       "detail": null
     },
+    { "id": "masking", "label": "masking", "status": "done", "ts": 1700000000, "detail": null },
     {
-      "id": "masking_(n/N)",
-      "label": "masking (n/N)",
-      "status": "done",
-      "ts": 1700000000,
-      "detail": null
-    },
-    {
-      "id": "full_run_(n/N)",
-      "label": "full run (n/N)",
+      "id": "full_run",
+      "label": "full run",
       "status": "active",
       "ts": 1700000000,
-      "detail": null
+      "detail": "2/8"
     },
     {
       "id": "quote_check_and_repair",
@@ -152,5 +147,6 @@
       "text": "State changed from sample_approved to full_running."
     }
   ],
-  "reconciliation": null
+  "reconciliation": null,
+  "failure": null
 }

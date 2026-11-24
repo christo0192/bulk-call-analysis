@@ -5,6 +5,8 @@ import type { JobOutputs, RebuildResult } from './types';
 import outputsFixture from '../mock/fixtures/engine/job-outputs.json';
 import runningSnapshot from '../mock/fixtures/engine/job-snapshot-running.json';
 import pausedSnapshot from '../mock/fixtures/engine/job-snapshot-paused.json';
+import pausedQuotaSnapshot from '../mock/fixtures/engine/job-snapshot-paused-quota.json';
+import recordedNotifications from '../mock/fixtures/engine/notifications.json';
 import allowanceFixture from '../mock/fixtures/engine/allowance-status.json';
 import {
   projects,
@@ -342,7 +344,7 @@ export class MockBridge implements EngineBridge {
         this.runProgressTimer = setTimeout(advance, 2000);
       }
       return {
-        ...(isPaused || quotaPause ? pausedSnapshot : runningSnapshot),
+        ...(quotaPause ? pausedQuotaSnapshot : isPaused ? pausedSnapshot : runningSnapshot),
         ...(quotaPause
           ? { state: 'paused', pauseReason: 'usage_limit', resumeAt: 1700000000 }
           : {}),

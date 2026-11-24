@@ -63,6 +63,7 @@ export function phaseFor(state?: string): 'setup' | 'sample' | 'run' | 'done' {
   )
     return 'run';
   if (state === 'done' || state === 'done_with_issues') return 'done';
+  if (state === 'failed' || state === 'cancelled') return 'run';
   return 'setup';
 }
 export const phase = computed(() => phaseFor(selectedJob.value?.state));

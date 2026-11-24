@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/pre
 import running from '../../mock/fixtures/engine/job-snapshot-running.json';
 import { RunView } from './RunView';
 import { mockBridge } from '../../engine/bridge';
+import { EngineError } from '../../engine/client';
 import type { JobSnapshot } from '../../engine/types';
 
 beforeEach(() => {
@@ -178,4 +179,112 @@ it('quota tile shows the projection, stop marker and reset time', async () => {
 it('unknown allowances and power show unknown', async () => {
   render(<RunView id="job-one" />);
   await waitFor(() => expect(screen.getAllByText('Unknown')).toHaveLength(2));
+});
+
+it('progress with retrying leads adds up', async () => {
+  mockBridge.setResponse('job/snapshot', async () =>
+    snapshot({
+      progress: {
+        ...(running as unknown as JobSnapshot).progress,
+        done: 2,
+        inFlight: 1,
+        retrying: 1,
+        remaining: 4,
+      },
+    }),
+  );
+  render(<RunView id="job-one" />);
+  expect(
+    await screen.findByText(/8 = 2 done read \+ 1 in progress \+ 1 retrying \+ 4 remaining left/),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/doesn.t add up/)).toBeNull();
+});
+
+it('unusable leads add up in the second line', async () => {
+  mockBridge.setResponse('job/snapshot', async () =>
+    snapshot({
+      progress: {
+        ...(running as unknown as JobSnapshot).progress,
+        done: 2,
+        inFlight: 2,
+        remaining: 0,
+        total: 4,
+      },
+      counts: {
+        ...(running as unknown as JobSnapshot).counts,
+        selected: 8,
+        usable: 4,
+        noTranscript: 1,
+        transcriptionFailed: 1,
+        tooShort: 1,
+        notFound: 1,
+      },
+    }),
+  );
+  render(<RunView id="job-one" />);
+  expect(
+    await screen.findByText(
+      /8 = 4 usable \+ 1 noTranscript \+ 1 transcriptionFailed \+ 1 tooShort \+ 1 notFound/,
+    ),
+  ).toBeInTheDocument();
+});
+
+it('sample phase counts sample leads', async () => {
+  mockBridge.setResponse('job/snapshot', async () =>
+    snapshot({
+      progress: {
+        ...(running as unknown as JobSnapshot).progress,
+        phase: 'sample',
+        done: 1,
+        inFlight: 1,
+        remaining: 0,
+        total: 2,
+      },
+      counts: { ...(running as unknown as JobSnapshot).counts, selected: 2, usable: 2 },
+    }),
+  );
+  render(<RunView id="job-one" />);
+  expect(await screen.findByText('of 2 sample leads read')).toBeInTheDocument();
+});
+
+it('switching jobs never shows the other job', async () => {
+  let resolveFirst!: (value: JobSnapshot) => void;
+  mockBridge.setResponse('job/snapshot', (params) =>
+    params.job === 'job-one'
+      ? new Promise<JobSnapshot>((resolve) => (resolveFirst = resolve))
+      : Promise.resolve(
+          snapshot({
+            job: 'job-two',
+            progress: { ...(running as unknown as JobSnapshot).progress, total: 100, done: 100 },
+          }),
+        ),
+  );
+  const view = render(<RunView id="job-one" />);
+  view.rerender(<RunView id="job-two" />);
+  expect(await screen.findByText(/of 100 leads read/)).toBeInTheDocument();
+  resolveFirst?.(
+    snapshot({ progress: { ...(running as unknown as JobSnapshot).progress, done: 5 } }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(screen.queryByText(/of 8 leads read/)).toBeNull();
+});
+
+it('method not found shows not available yet', async () => {
+  mockBridge.setResponse('job/snapshot', async () => {
+    throw new EngineError(-32601, 'Method not found');
+  });
+  render(<RunView id="job-one" />);
+  expect(await screen.findByText('Live progress isn’t available yet')).toBeInTheDocument();
+});
+
+it('numbers are rounded', async () => {
+  mockBridge.setResponse('job/snapshot', async () =>
+    snapshot({
+      eta: { low: 7500, high: 7500, seeded: true, known: true },
+      activity: { ...(running as unknown as JobSnapshot).activity, throughputPerMin: 1.26 },
+    }),
+  );
+  render(<RunView id="job-one" />);
+  expect(await screen.findByText(/2 h 5 min/)).toBeInTheDocument();
+  expect(screen.getByText(/1\.3 leads a minute/)).toBeInTheDocument();
 });
