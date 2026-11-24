@@ -21,7 +21,8 @@ body {
   font-variant-numeric: tabular-nums;
 }
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 button {
@@ -29,7 +30,8 @@ button {
   color: inherit;
 }
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+textarea:focus-visible {
   outline: 2px solid var(--acc);
   outline-offset: 2px;
 }
@@ -225,7 +227,7 @@ footer b {
   font-weight: 650;
 }
 .main header button,
-.drawer button {
+.drawer button:not(.primary) {
   border: 1px solid var(--line2);
   background: #fff;
   border-radius: 7px;

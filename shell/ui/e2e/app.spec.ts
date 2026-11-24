@@ -27,7 +27,7 @@ test('rail and drawer hide and show', async ({ page }) => {
   await page.getByRole('button', { name: /Hide/ }).click();
   await expect(page.getByRole('button', { name: /Chat/ })).toBeVisible();
   await page.getByRole('button', { name: /Chat/ }).click();
-  await expect(page.getByText('Describe what you want to analyze.')).toBeVisible();
+  await expect(page.locator('.drawer').getByRole('textbox')).toBeVisible();
 });
 
 test('new project flow works', async ({ page }) => {

@@ -36,8 +36,14 @@ export function stepStatuses(state: string | undefined): StepStatus[] {
   const statuses = stepNames.map(
     (_, i) => (i < index ? 'done' : i === index ? 'current' : 'todo') as StepStatus,
   );
+  if (state === 'planned') statuses[0] = 'waiting';
   if (state === 'sample_ready') statuses[index] = 'waiting';
-  if (state === 'running' || state === 'pulling' || state === 'masking_sample') {
+  if (
+    state === 'plan_approved' ||
+    state === 'running' ||
+    state === 'pulling' ||
+    state === 'masking_sample'
+  ) {
     statuses[1] = 'current';
     statuses[2] = 'current';
   }
@@ -47,14 +53,34 @@ export function formatKb(size: number): string {
   return `${Math.max(1, Math.ceil(size / 1024))} KB`;
 }
 export function Rail({ project, state }: { project: string; state?: string }) {
-  const [files, setFiles] = useState<FileInfo[]>([]);
+  const [filesByProject, setFilesByProject] = useState<Record<string, FileInfo[]>>({});
+  const [fileErrors, setFileErrors] = useState<Record<string, string>>({});
+  const loadFiles = (active: () => boolean) =>
+    void bridge
+      .call('files/list', { project })
+      .then((value) => {
+        if (active()) {
+          setFilesByProject((current) => ({ ...current, [project]: value }));
+          setFileErrors((current) => ({ ...current, [project]: '' }));
+        }
+      })
+      .catch((reason) => {
+        const message = reason instanceof Error ? reason.message : String(reason);
+        console.warn(`Couldn't load files for ${project}: ${message}`);
+        if (active())
+          setFileErrors((current) => ({ ...current, [project]: "Couldn't load files" }));
+      });
   useEffect(() => {
     let active = true;
-    void bridge.call('files/list', { project }).then((value) => {
-      if (active) setFiles(value);
+    loadFiles(() => active);
+    const unsubscribe = bridge.onNotification((notification) => {
+      if (notification.method !== 'job/state') return;
+      const params = notification.params as { project?: string };
+      if (params.project === project) loadFiles(() => active);
     });
     return () => {
       active = false;
+      unsubscribe();
     };
   }, [project]);
   const statuses = stepStatuses(state);
@@ -73,8 +99,9 @@ export function Rail({ project, state }: { project: string; state?: string }) {
         ))}
       </ol>
       <h3>Files</h3>
+      {fileErrors[project] && <small class="muted">{fileErrors[project]}</small>}
       <ul class="files">
-        {files.map((file) => (
+        {(filesByProject[project] ?? []).map((file) => (
           <li key={file.name}>
             <FileIcon />
             <span>{file.name}</span>

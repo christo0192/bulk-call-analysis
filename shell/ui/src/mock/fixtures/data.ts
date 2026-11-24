@@ -7,6 +7,8 @@ import type {
   AuthStatus,
   Settings,
   EngineStatus,
+  PlanCard,
+  SampleCard,
 } from '../../engine/types';
 
 export const projects: Project[] = [
@@ -24,7 +26,82 @@ export const jobs: JobSummary[] = projects.map((p, i) => ({
   total: p.status === 'done_with_issues' ? 2104 : 11058,
   remaining: p.status === 'running' ? 6746 : 0,
 }));
-export const allowances: Allowances = { chatgpt: '12% used', claude: '9% used' };
+export const allowances: Allowances = {
+  codex: {
+    windows: [
+      { name: '5h', usedPercent: 4, resetsAt: Math.floor((Date.now() + 3600000) / 1000) },
+      { name: 'weekly', usedPercent: 12, resetsAt: Math.floor((Date.now() + 86400000 * 3) / 1000) },
+    ],
+    stopAtPercent: 95,
+  },
+  claude: { checkedAt: Date.now(), rateLimitInfo: { status: 'ok' } },
+};
+export const plan: PlanCard = {
+  job: 'synthetic-job-1',
+  project: 'demo-setup',
+  specVersion: 1,
+  title: 'Discount questions',
+  question: 'How often do callers ask for a discount, and what do they ask for?',
+  leadSource: {
+    kind: 'sql',
+    sql: 'SELECT lead_id, transcript FROM calls WHERE created_at >= @start',
+  },
+  callsScope: { mode: 'window', windowStart: '2025-09-01', windowEnd: '2025-10-31' },
+  counts: {
+    selected: 11058,
+    usable: 10727,
+    noTranscript: 331,
+    transcriptionFailed: 0,
+    tooShort: 0,
+    notFound: 0,
+    capped: 57,
+  },
+  scanBytes: 184549376,
+  outputColumns: [
+    { name: 'asked_discount', type: 'boolean' },
+    { name: 'discount_amount', type: 'string' },
+    { name: 'reason', type: 'string' },
+  ],
+  rules: [
+    { kind: 'answer', summary: 'Answer from the call, not metadata' },
+    { kind: 'quote', summary: 'Include a short masked quote for every answer' },
+  ],
+  sampleSize: 20,
+  estimate: null,
+  approved: false,
+};
+export const planWithEstimate: PlanCard = {
+  ...plan,
+  estimate: {
+    sampleSeconds: { low: 180, high: 300 },
+    fullSeconds: { low: 25200, high: 32400 },
+    codexPercent: { low: 35, high: 42 },
+  },
+};
+export const sample: SampleCard = {
+  job: 'synthetic-job-1',
+  specVersion: 1,
+  total: 20,
+  read: 20,
+  quotesVerified: 19,
+  quotesRepaired: 1,
+  quotesFlagged: 0,
+  heldBack: 0,
+  failed: 0,
+  columns: ['asked_discount', 'discount_amount', 'reason'],
+  file: 'sample.csv',
+  rows: Array.from({ length: 5 }, (_, i) => ({
+    lead: `lead-${i + 1}`,
+    answer: {
+      asked_discount: i % 2 === 0 ? 'Yes' : 'No',
+      discount_amount: i % 2 === 0 ? '[PHONE] off' : '—',
+      reason: i % 2 === 0 ? '[NAME] asked about price' : 'No request',
+    },
+    quotes: [{ field: 'reason', text: '[NAME] asked about the price', ok: true }],
+    flags: [],
+    status: 'ok',
+  })),
+};
 export const files: FileInfo[] = [
   { name: 'brief.md', size: 1820 },
   { name: 'rules.json', size: 924 },

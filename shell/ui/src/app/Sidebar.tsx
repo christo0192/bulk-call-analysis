@@ -13,6 +13,8 @@ import {
 } from '../state/store';
 import { BrandIcon, GearIcon } from './ui/icons';
 import { Pill } from './ui/Pill';
+import { formatCount } from './format';
+import { fiveHourPercent, weeklyPercent } from './allowance';
 
 export function slugFor(title: string, existing: Project[]): string {
   const base =
@@ -114,7 +116,7 @@ export function Sidebar() {
                   {job.state === 'done_with_issues' ? 'Done with issues' : 'Done'}
                   {done === undefined
                     ? ''
-                    : ` ${String.fromCharCode(183)} ${done.toLocaleString()} leads`}
+                    : ` ${String.fromCharCode(183)} ${formatCount(done)} leads`}
                 </small>
               ) : job ? (
                 <Pill state={job.state} />
@@ -128,11 +130,11 @@ export function Sidebar() {
       <footer>
         <div>
           <span>ChatGPT this week</span>
-          <b>{allowanceText(allowances.value?.chatgpt)}</b>
+          <b>{allowanceText(weeklyPercent(allowances.value))}</b>
         </div>
         <div>
           <span>Claude 5-hour</span>
-          <b>{allowanceText(allowances.value?.claude)}</b>
+          <b>{allowanceText(fiveHourPercent(allowances.value))}</b>
         </div>
         <button class="settings" onClick={() => (settingsOpen.value = true)}>
           <GearIcon /> Settings
