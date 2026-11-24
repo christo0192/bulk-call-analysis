@@ -25,6 +25,7 @@ export function MainArea() {
   const [rebuildOpen, setRebuildOpen] = useState(false);
   const [shellError, setShellError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
+  const [planError, setPlanError] = useState<unknown>(null);
   const [chat, setChat] = useState(
     () => phase.value !== 'done' && localStorage.getItem(`chat:${currentProject}`) !== 'hidden',
   );
@@ -43,6 +44,10 @@ export function MainArea() {
       </main>
     );
   const state = current?.state ?? project?.status;
+  const rebuildDisabledReason =
+    planError || state === 'failed' || state === 'cancelled'
+      ? 'Rebuild is unavailable because this job or plan failed'
+      : undefined;
   const toggle = () =>
     setChat((visible) => {
       const next = !visible;
@@ -76,7 +81,11 @@ export function MainArea() {
         open_failed: 'The folder could not be opened',
         engine_unavailable: 'The engine is unavailable',
       };
-      setShellError(messages[parsed.reason ?? ''] ?? 'Available in the desktop app');
+      setShellError(
+        parsed.code === -32601 || parsed.reason === 'method_not_allowed'
+          ? 'Available in the desktop app'
+          : (messages[parsed.reason ?? ''] ?? "Couldn't open the folder"),
+      );
     });
   };
   const runAgain = () => {
@@ -90,12 +99,23 @@ export function MainArea() {
     ) : phase.value === 'sample' ? (
       <SampleView id={current!.job} state={state} />
     ) : phase.value === 'run' ? (
-      <RunView key={current!.job} id={current!.job} />
+      <RunView
+        key={current!.job}
+        id={current!.job}
+        onStalled={(text) => {
+          setChat(true);
+          setComposerRequest({
+            prefix: `My job stalled: ${text} What should I do?`,
+            id: Date.now(),
+          });
+        }}
+      />
     ) : (
       <DoneView
         id={current!.job}
         project={currentProject}
         rebuildOpen={rebuildOpen}
+        onPlanError={setPlanError}
         onCloseRebuild={() => {
           setRebuildOpen(false);
           rebuildButton.current?.focus();
@@ -124,7 +144,13 @@ export function MainArea() {
           )}
           {phase.value === 'done' && (
             <>
-              <button ref={rebuildButton} type="button" onClick={() => setRebuildOpen(true)}>
+              <button
+                ref={rebuildButton}
+                type="button"
+                disabled={!!rebuildDisabledReason}
+                title={rebuildDisabledReason}
+                onClick={() => setRebuildOpen(true)}
+              >
                 Rebuild with new rules
               </button>
               <button type="button" onClick={runAgain}>

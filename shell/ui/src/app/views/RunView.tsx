@@ -65,12 +65,31 @@ function StateBanner({
   kind,
   snapshot,
   onResume,
+  onAsk,
 }: {
   kind: BannerKind;
   snapshot: JobSnapshot;
-  onResume: () => void;
+  onResume: () => Promise<void>;
+  onAsk?: () => void;
 }) {
   const [help, setHelp] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const resume = () => {
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    void onResume()
+      .catch((reason) => {
+        const parsed = EngineError.from(reason);
+        setError(
+          parsed.reason === 'job_running'
+            ? 'Still finishing the leads in progress. Try again in a moment.'
+            : parsed.message,
+        );
+      })
+      .finally(() => setPending(false));
+  };
   if (!kind) return null;
   const reset =
     snapshot.resumeAt === null
@@ -114,7 +133,10 @@ function StateBanner({
       'Paused: computer is on battery',
       'The app paused to protect the run. It starts again when you plug in.',
     ],
-    stalled: ['Reading has stalled', 'No reply from the reader for a few minutes.'],
+    stalled: [
+      'Stopped: needs attention',
+      snapshot.stall?.text ?? 'The job stopped and needs attention.',
+    ],
     failed: [
       snapshot.state === 'cancelled' ? 'Run cancelled' : 'Run failed',
       snapshot.failure?.text ?? 'The run failed.',
@@ -127,7 +149,7 @@ function StateBanner({
       <p>{text}</p>
       {kind === 'credit' && (
         <div class="banner-actions">
-          <button type="button" onClick={onResume}>
+          <button type="button" disabled={pending} onClick={resume}>
             Resume
           </button>
           <button type="button" onClick={() => setHelp(!help)}>
@@ -140,7 +162,7 @@ function StateBanner({
         <div class="banner-actions">
           <button
             type="button"
-            onClick={kind === 'auth' ? () => (settingsOpen.value = true) : onResume}
+            onClick={kind === 'auth' ? () => (settingsOpen.value = true) : resume}
           >
             {kind === 'auth' ? 'Open settings' : 'Resume'}
           </button>
@@ -148,8 +170,15 @@ function StateBanner({
       )}
       {kind === 'stalled' && (
         <div class="banner-actions">
-          <button type="button">Cancel job</button>
+          <button type="button" onClick={onAsk}>
+            Ask Claude what to do
+          </button>
         </div>
+      )}
+      {error && (
+        <p class="dialog-error" role="alert">
+          {error}
+        </p>
       )}
     </section>
   );
@@ -200,7 +229,7 @@ function AllowanceTile({ snapshot }: { snapshot: JobSnapshot }) {
   );
 }
 
-export function RunView({ id }: { id: string }) {
+export function RunView({ id, onStalled }: { id: string; onStalled?: (text: string) => void }) {
   const [live, dispatch] = useReducer(reduce, id, initialJobLive);
   const liveStateRef = useRef<string | undefined>(undefined);
   liveStateRef.current = live.snapshot?.state;
@@ -297,9 +326,7 @@ export function RunView({ id }: { id: string }) {
   const finishClock =
     etaKnown && etaAt.current !== null ? clockTime(etaAt.current + snapshot.eta!.high!) : null;
   const banner = bannerFor(snapshot, live.stalled);
-  const resume = () => {
-    void bridge.call('job/resume', { job: id });
-  };
+  const resume = () => bridge.call('job/resume', { job: id }).then(() => undefined);
   const cells: [string, number, string][] = [
     ['Read', progress.done, 'finished'],
     ['Reading now', progress.inFlight, 'in progress'],
@@ -332,7 +359,12 @@ export function RunView({ id }: { id: string }) {
   const sample = progress.phase === 'sample';
   return (
     <div class="phase-view run-view" data-testid="run-view">
-      <StateBanner kind={banner} snapshot={snapshot} onResume={resume} />
+      <StateBanner
+        kind={banner}
+        snapshot={snapshot}
+        onResume={resume}
+        onAsk={() => onStalled?.(snapshot.stall?.text ?? 'The job stopped and needs attention.')}
+      />
       {live.error && (
         <div class="view-error" role="alert">
           {live.errorCode === -32601

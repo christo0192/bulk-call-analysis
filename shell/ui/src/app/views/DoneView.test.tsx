@@ -84,8 +84,7 @@ it('rebuild success stays visible while outputs reload', async () => {
   renderDone(true);
   await screen.findByRole('button', { name: 'Rebuild' });
   fireEvent.click(screen.getByRole('button', { name: 'Rebuild' }));
-  // The recorded plan has no rules, so the dialog asks before rebuilding with none.
-  fireEvent.click(await screen.findByRole('button', { name: 'Rebuild without rules' }));
+  // The dev plan carries rules, so the rebuild goes straight through (no empty-rules prompt).
   expect(await screen.findByText(/Rebuilt: results\.v2\.rebuild1\.xlsx/)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Open' })).toBeInTheDocument();
   releaseOutputs();

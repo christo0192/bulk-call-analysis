@@ -120,6 +120,7 @@ export type JobSnapshot = {
   recent: { ts: number; kind: string; text: string }[];
   reconciliation: { addsUp: boolean; [key: string]: unknown } | null;
   failure: { text: string; [key: string]: unknown } | null;
+  stall?: { reason: string; text: string } | null;
   approvedAt?: number;
 };
 export type RuleDefinition = Rule;

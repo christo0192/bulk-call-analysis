@@ -41,13 +41,15 @@ export function RebuildDialog({
   const dialog = useRef<HTMLDivElement>(null);
   const opener = useRef<Element | null>(null);
   const [rules, setRules] = useState<Rule[]>(
-    plan.rules.flatMap((rule) => (rule.definition ? [rule.definition] : [])),
+    plan.rules.flatMap((rule) => (rule.definition ? [withoutNullValue(rule.definition)] : [])),
   );
   const [kind, setKind] = useState<Kind>('threshold_group');
   const [name, setName] = useState('');
-  const [field, setField] = useState(
-    plan.outputColumns[0] ? `answer.${plan.outputColumns[0].name}` : '',
-  );
+  const firstNumberField = () => {
+    const column = plan.outputColumns.find((item) => numeric(item.type));
+    return column ? `answer.${column.name}` : '';
+  };
+  const [field, setField] = useState(firstNumberField);
   const [edges, setEdges] = useState('');
   const [labels, setLabels] = useState('');
   const [match, setMatch] = useState<'all' | 'any'>('all');
@@ -58,6 +60,8 @@ export function RebuildDialog({
   const [confirmEmpty, setConfirmEmpty] = useState(false);
   const firstJob = useRef(job);
   const hasNumberColumn = plan.outputColumns.some((column) => numeric(column.type));
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     opener.current = document.activeElement;
     const focusFirst = requestAnimationFrame(() =>
@@ -66,7 +70,7 @@ export function RebuildDialog({
     const handler = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (event.key !== 'Tab' || !dialog.current) return;
@@ -93,15 +97,34 @@ export function RebuildDialog({
       document.removeEventListener('keydown', handler);
       opener.current instanceof HTMLElement && opener.current.focus();
     };
-  }, [onClose]);
+  }, []);
   useEffect(() => {
-    if (firstJob.current !== job) onClose();
-  }, [job, onClose]);
+    if (firstJob.current !== job) onCloseRef.current();
+  }, [job]);
+  useEffect(() => {
+    if (
+      kind === 'threshold_group' &&
+      !plan.outputColumns.some((item) => `answer.${item.name}` === field && numeric(item.type))
+    )
+      setField(firstNumberField());
+  }, [kind, plan.outputColumns, field]);
   const close = () => onClose();
-  const update = (index: number, key: keyof RuleCondition, value: string) =>
+  const update = (index: number, key: keyof RuleCondition, value: string) => {
+    setError(null);
     setConditions((items) =>
-      items.map((item, current) => (current === index ? { ...item, [key]: value } : item)),
+      items.map((item, current) => {
+        if (current !== index) return item;
+        if (key === 'field') {
+          const column = plan.outputColumns.find(
+            (candidate) => `answer.${candidate.name}` === value,
+          );
+          const next = availableOperators(column)[0] ?? 'eq';
+          return { field: value, op: next, value: '' };
+        }
+        return { ...item, [key]: value, ...(key === 'op' ? { value: '' } : {}) };
+      }),
     );
+  };
   const addRule = () => {
     setError(null);
     if (kind === 'threshold_group') {
@@ -119,14 +142,16 @@ export function RebuildDialog({
       if (new Set(names).size !== names.length) return setError('Labels must be unique.');
       setRules((items) => [
         ...items,
-        { kind, name: name || 'Bands', field, edges: numbers, labels: names },
+        { kind, name: name || nextName('band', items), field, edges: numbers, labels: names },
       ]);
     } else {
       if (conditions.some((item) => !item.field || !item.op))
         return setError('Complete every condition.');
+      const validation = conditions.flatMap((condition) => validateCondition(condition, plan));
+      if (validation.length) return setError(validation[0]!);
       const definition = {
         kind,
-        ...(kind === 'review_flag' ? { name: name || 'Review flag' } : {}),
+        ...(kind === 'review_flag' ? { name: name || nextName('review flag', rules) } : {}),
         match,
         conditions: conditions.map((condition) => typedCondition(condition, plan)),
       } as Rule;
@@ -136,6 +161,7 @@ export function RebuildDialog({
     setEdges('');
     setLabels('');
     setConditions([blank()]);
+    setConfirmEmpty(false);
   };
   const rebuild = async () => {
     if (!rules.length && !confirmEmpty) {
@@ -147,6 +173,7 @@ export function RebuildDialog({
     try {
       const result = await bridge.call('job/rebuildRules', { job, rules });
       setRebuilt(result);
+      setConfirmEmpty(false);
       onRebuilt?.();
     } catch (reason) {
       const parsed = EngineError.from(reason);
@@ -181,7 +208,12 @@ export function RebuildDialog({
         {rules.map((rule, index) => (
           <div class="rule-row" key={`${rule.kind}-${index}`} title={ruleTitle(rule)}>
             <span>{ruleTitle(rule)}</span>
-            <button onClick={() => setRules((items) => items.filter((_, item) => item !== index))}>
+            <button
+              onClick={() => {
+                setConfirmEmpty(false);
+                setRules((items) => items.filter((_, item) => item !== index));
+              }}
+            >
               Remove
             </button>
           </div>
@@ -192,19 +224,28 @@ export function RebuildDialog({
             disabled={currentInScope}
             title={currentInScope ? 'Only one in-scope rule is allowed' : undefined}
             class={kind === 'in_scope' ? 'selected' : ''}
-            onClick={() => setKind('in_scope')}
+            onClick={() => {
+              setError(null);
+              setKind('in_scope');
+            }}
           >
             In scope
           </button>
           <button
             class={kind === 'threshold_group' ? 'selected' : ''}
-            onClick={() => setKind('threshold_group')}
+            onClick={() => {
+              setError(null);
+              setKind('threshold_group');
+            }}
           >
             Bands
           </button>
           <button
             class={kind === 'review_flag' ? 'selected' : ''}
-            onClick={() => setKind('review_flag')}
+            onClick={() => {
+              setError(null);
+              setKind('review_flag');
+            }}
           >
             Review flag
           </button>
@@ -212,7 +253,13 @@ export function RebuildDialog({
         {kind !== 'in_scope' && (
           <label>
             Name
-            <input value={name} onInput={(event) => setName(event.currentTarget.value)} />
+            <input
+              value={name}
+              onInput={(event) => {
+                setError(null);
+                setName(event.currentTarget.value);
+              }}
+            />
           </label>
         )}
         {kind === 'threshold_group' ? (
@@ -231,11 +278,23 @@ export function RebuildDialog({
                 </label>
                 <label>
                   Edges
-                  <input value={edges} onInput={(event) => setEdges(event.currentTarget.value)} />
+                  <input
+                    value={edges}
+                    onInput={(event) => {
+                      setError(null);
+                      setEdges(event.currentTarget.value);
+                    }}
+                  />
                 </label>
                 <label>
                   Labels
-                  <input value={labels} onInput={(event) => setLabels(event.currentTarget.value)} />
+                  <input
+                    value={labels}
+                    onInput={(event) => {
+                      setError(null);
+                      setLabels(event.currentTarget.value);
+                    }}
+                  />
                 </label>
               </>
             ) : (
@@ -248,7 +307,10 @@ export function RebuildDialog({
               Match
               <select
                 value={match}
-                onChange={(event) => setMatch(event.currentTarget.value as 'all' | 'any')}
+                onChange={(event) => {
+                  setError(null);
+                  setMatch(event.currentTarget.value as 'all' | 'any');
+                }}
               >
                 <option value="all">All</option>
                 <option value="any">Any</option>
@@ -262,12 +324,20 @@ export function RebuildDialog({
                 onChange={(key, value) => update(index, key, value)}
               />
             ))}
-            <button onClick={() => setConditions((items) => [...items, blank()])}>
+            <button
+              onClick={() => {
+                setError(null);
+                setConditions((items) => [...items, blank()]);
+              }}
+            >
               Add condition
             </button>
           </>
         )}
-        <button disabled={kind === 'threshold_group' && !hasNumberColumn} onClick={addRule}>
+        <button
+          disabled={!!error || (kind === 'threshold_group' && !hasNumberColumn)}
+          onClick={addRule}
+        >
           Add rule
         </button>
         {error && (
@@ -279,7 +349,9 @@ export function RebuildDialog({
           <p class="dialog-note" role="alert">
             This removes every rule from the new workbook.
             <br />
-            <button onClick={() => void rebuild()}>Rebuild without rules</button>
+            <button disabled={pending} onClick={() => void rebuild()}>
+              Rebuild without rules
+            </button>
             <button onClick={() => setConfirmEmpty(false)}>Keep editing</button>
           </p>
         )}
@@ -299,7 +371,11 @@ export function RebuildDialog({
         )}
         <div class="dialog-actions">
           <button onClick={close}>Cancel</button>
-          <button class="primary" disabled={pending || confirmEmpty} onClick={() => void rebuild()}>
+          <button
+            class="primary"
+            disabled={pending || confirmEmpty || !!error}
+            onClick={() => void rebuild()}
+          >
             Rebuild
           </button>
         </div>
@@ -318,12 +394,7 @@ function ConditionRow({
   onChange: (key: keyof RuleCondition, value: string) => void;
 }) {
   const column = plan.outputColumns.find((item) => `answer.${item.name}` === condition.field);
-  const available = operators
-    .filter(
-      (operator) =>
-        !['lt', 'le', 'gt', 'ge'].includes(operator) || (column && numeric(column.type)),
-    )
-    .filter((operator) => operator !== 'contains' || column?.type === 'string');
+  const available = availableOperators(column);
   const noValue = condition.op === 'is_null' || condition.op === 'not_null';
   return (
     <div class="condition-row">
@@ -407,6 +478,29 @@ function ValueControl({
 function numeric(type: string) {
   return type === 'integer' || type === 'number';
 }
+function availableOperators(column?: OutputColumn) {
+  return operators
+    .filter(
+      (operator) =>
+        !['lt', 'le', 'gt', 'ge'].includes(operator) || (column && numeric(column.type)),
+    )
+    .filter((operator) => operator !== 'contains' || column?.type === 'string');
+}
+function validateCondition(condition: RuleCondition, plan: PlanCard): string[] {
+  if (condition.op === 'is_null' || condition.op === 'not_null') return [];
+  const column = plan.outputColumns.find((item) => `answer.${item.name}` === condition.field);
+  const values = String(condition.value ?? '')
+    .split(',')
+    .map((item) => item.trim());
+  if (values.some((value) => !value)) return ['Enter a value'];
+  if (column?.type === 'integer' && values.some((value) => !/^-?\d+$/.test(value)))
+    return ['Whole numbers only'];
+  if (column?.type === 'number' && values.some((value) => !Number.isFinite(Number(value))))
+    return ['Enter a finite number'];
+  if (column?.type === 'boolean' && values.some((value) => value !== 'true' && value !== 'false'))
+    return ['Choose Yes or No'];
+  return [];
+}
 function typedCondition(condition: RuleCondition, plan: PlanCard): RuleCondition {
   const column = plan.outputColumns.find((item) => `answer.${item.name}` === condition.field);
   const values = String(condition.value ?? '')
@@ -432,6 +526,23 @@ function typedCondition(condition: RuleCondition, plan: PlanCard): RuleCondition
               : convert(values[0] ?? ''),
         }),
   };
+}
+function nextName(base: string, rules: Rule[]) {
+  const names = new Set(rules.map((rule) => ('name' in rule ? rule.name : undefined)));
+  let index = 1;
+  while (names.has(`${base} ${index}`)) index += 1;
+  return `${base} ${index}`;
+}
+function withoutNullValue(rule: Rule): Rule {
+  if (!('conditions' in rule)) return rule;
+  return {
+    ...rule,
+    conditions: rule.conditions.map((condition) =>
+      condition.op === 'is_null' || condition.op === 'not_null'
+        ? { field: condition.field, op: condition.op }
+        : condition,
+    ),
+  } as Rule;
 }
 function ruleTitle(rule: Rule) {
   if (rule.kind === 'threshold_group') return rule.name;

@@ -306,8 +306,14 @@ export function SampleCard({ job, onFocus }: { job: string; onFocus?: () => void
           Approve sample
         </button>
         {sample.file && (
-          <button onClick={() => void openProjectFile(selectedProject.value ?? '', sample.file!)}>
-            Open {sample.file}
+          <button
+            onClick={() =>
+              void openProjectFile(selectedProject.value ?? '', sample.file!).catch((value) =>
+                setError(value),
+              )
+            }
+          >
+            Open {sample.file.split(/[\\/]/).pop()}
           </button>
         )}
         <button onClick={() => onFocus?.()}>Change the plan</button>

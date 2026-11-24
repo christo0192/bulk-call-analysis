@@ -27,11 +27,13 @@ export function DoneView({
   project,
   rebuildOpen,
   onCloseRebuild,
+  onPlanError,
 }: {
   id: string;
   project: string;
   rebuildOpen: boolean;
   onCloseRebuild: () => void;
+  onPlanError?: (error: unknown) => void;
 }) {
   const [outputs, setOutputs] = useState<JobOutputs | null>(null);
   const [plan, setPlan] = useState<PlanCard | null>(null);
@@ -48,6 +50,7 @@ export function DoneView({
       loadedJob.current = id;
     }
     setLoadError(null);
+    onPlanError?.(null);
     void bridge
       .call('job/outputs', { job: id })
       .then((value) => {
@@ -59,10 +62,13 @@ export function DoneView({
     void bridge
       .call('job/plan', { job: id })
       .then((value) => {
-        if (current) setPlan(value);
+        if (current) {
+          setPlan(value);
+          onPlanError?.(null);
+        }
       })
-      .catch(() => {
-        /* results remain useful without a plan */
+      .catch((error) => {
+        if (current) onPlanError?.(error);
       });
     return () => {
       current = false;
@@ -87,7 +93,7 @@ export function DoneView({
   const results = files
     .filter((file) => file.kind === 'results' && file.name.endsWith('.xlsx'))
     .sort((a, b) => compareRank(fileRank(b), fileRank(a)))[0];
-  const summary = files.find((file) => file.kind === 'summary');
+  const summary = files.find((file) => file.name === 'summary.md');
   const verify =
     files.find((file) => file.kind === 'report' && file.specVersion === results?.specVersion) ??
     files.find((file) => file.kind === 'report');
@@ -195,7 +201,7 @@ export function DoneView({
                     <>
                       <p>
                         First{' '}
-                        {listed.length < issue.leads.length
+                        {listed.length < issue.count
                           ? `50 of ${count(issue.count)}`
                           : listed.length}
                       </p>
