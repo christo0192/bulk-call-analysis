@@ -5,18 +5,53 @@ import { EngineError } from '../../engine/client';
 import { plan } from '../../mock/fixtures/data';
 import { openProjectFile } from '../../engine/shellCommands';
 import { RebuildDialog } from './RebuildDialog';
+import type { PlanCard } from '../../engine/types';
 
 vi.mock('../../engine/shellCommands', () => ({ openProjectFile: vi.fn() }));
 
 beforeEach(() => mockBridge.resetForTest());
 
-const renderDialog = (onClose = vi.fn()) => {
-  render(<RebuildDialog job="job-one" plan={plan} onClose={onClose} />);
+const recordedPlan: PlanCard = {
+  ...plan,
+  job: 'job-one',
+  project: 'project-one',
+  outputColumns: [{ name: 'answer', type: 'string' }],
+  rules: [],
+};
+const planWithRules: PlanCard = {
+  ...recordedPlan,
+  rules: [
+    {
+      kind: 'threshold_group',
+      summary: 'Answer from the call, not metadata',
+      definition: {
+        kind: 'threshold_group',
+        name: 'Answer from the call, not metadata',
+        field: 'answer.answer',
+        edges: [1],
+        labels: ['low', 'high'],
+      },
+    },
+    {
+      kind: 'review_flag',
+      summary: 'Include a short masked quote for every answer',
+      definition: {
+        kind: 'review_flag',
+        name: 'Review answer',
+        match: 'all',
+        conditions: [{ field: 'answer.answer', op: 'contains', value: 'urgent' }],
+      },
+    },
+  ],
+};
+
+const renderDialog = (onClose = vi.fn(), currentPlan = recordedPlan) => {
+  render(<RebuildDialog job="job-one" plan={currentPlan} onClose={onClose} />);
   return screen.getByRole('dialog');
 };
 
 it('lists current rules and removes one', () => {
-  const dialog = renderDialog();
+  const dialog = renderDialog(vi.fn(), planWithRules);
   expect(within(dialog).getByText('Answer from the call, not metadata')).toBeInTheDocument();
   expect(within(dialog).getAllByRole('button', { name: 'Remove' })).toHaveLength(2);
   fireEvent.click(within(dialog).getAllByRole('button', { name: 'Remove' })[0]!);
@@ -58,7 +93,7 @@ it('adds an in scope rule with typed values', async () => {
   const dialog = renderDialog();
   fireEvent.click(within(dialog).getByRole('button', { name: 'In scope' }));
   fireEvent.change(within(dialog).getByLabelText('Field'), {
-    target: { value: 'answer.asked_discount' },
+    target: { value: 'answer.answer' },
   });
   fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'eq' } });
   fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: 'true' } });
@@ -72,7 +107,7 @@ it('adds an in scope rule with typed values', async () => {
         rules: expect.arrayContaining([
           expect.objectContaining({
             kind: 'in_scope',
-            conditions: [{ field: 'answer.asked_discount', op: 'eq', value: true }],
+            conditions: [{ field: 'answer.answer', op: 'eq', value: 'true' }],
           }),
         ]),
       },
@@ -81,20 +116,20 @@ it('adds an in scope rule with typed values', async () => {
 });
 
 it('rebuild success shows the new file with open', async () => {
-  const dialog = renderDialog();
+  const dialog = renderDialog(vi.fn(), planWithRules);
   fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
   expect(
     await within(dialog).findByText(/output\/results\.v2\.rebuild1\.xlsx/),
   ).toBeInTheDocument();
   fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }));
-  expect(openProjectFile).toHaveBeenCalledWith('demo-setup', 'output/results.v2.rebuild1.xlsx');
+  expect(openProjectFile).toHaveBeenCalledWith('project-one', 'output/results.v2.rebuild1.xlsx');
 });
 
 it('invalid rules shows the engine detail', async () => {
   mockBridge.setResponse('job/rebuildRules', async () => {
     throw new EngineError(-32000, 'rules invalid', 'invalid_rules', { detail: 'Edges overlap' });
   });
-  const dialog = renderDialog();
+  const dialog = renderDialog(vi.fn(), planWithRules);
   fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
   expect(await within(dialog).findByRole('alert')).toHaveTextContent('Edges overlap');
 });

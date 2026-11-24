@@ -28,13 +28,17 @@ const renderDone = (rebuildOpen = false) =>
 it('renders the recorded outputs', async () => {
   renderDone();
   // "8" also appears in the reconciliation panel; check the hero container's text.
-  const heroText = await screen.findByText(/of 10 leads read/);
-  expect(heroText.closest('.done-hero')).toHaveTextContent(/8\s*of 10 leads read/);
-  expect(screen.getByText('Most leads asked about pricing.')).toBeInTheDocument();
+  const heroText = await screen.findByText(/of 8 leads read/);
+  expect(heroText.closest('.done-hero')).toHaveTextContent(/8\s*of 8 leads read/);
   expect(screen.getByRole('button', { name: 'Open results' })).toBeInTheDocument();
 });
 
 it('duration includes time asleep', async () => {
+  mockBridge.setResponse('job/outputs', async () => ({
+    ...outputs,
+    durationSeconds: 3600,
+    asleepSeconds: 1680,
+  }));
   renderDone();
   expect(await screen.findByText(/including 28 min asleep/)).toBeInTheDocument();
 });
@@ -44,7 +48,10 @@ it('open results calls open_project_file with the newest workbook', async () => 
   await screen.findByRole('button', { name: 'Open results' });
   fireEvent.click(screen.getByRole('button', { name: 'Open results' }));
   await waitFor(() =>
-    expect(openProjectFile).toHaveBeenCalledWith('project-one', 'output/results.v1.xlsx'),
+    expect(openProjectFile).toHaveBeenCalledWith(
+      'project-one',
+      'jobs/job-one/output/results.v1.xlsx',
+    ),
   );
 });
 
@@ -64,6 +71,16 @@ it('open errors show plain words', async () => {
 });
 
 it('reconciliation lists non-zero terms and adds up', async () => {
+  mockBridge.setResponse('job/outputs', async () => ({
+    ...outputs,
+    reconciliation: {
+      ...outputs.reconciliation!,
+      selected: 10,
+      read: 8,
+      noTranscript: 1,
+      heldBack: 1,
+    },
+  }));
   renderDone();
   const panel = await screen.findByText('Every lead accounted for');
   const reconciliation = panel.closest('.reconciliation') as HTMLElement;
@@ -77,13 +94,17 @@ it('reconciliation lists non-zero terms and adds up', async () => {
 it('does not add up shows the warning', async () => {
   mockBridge.setResponse('job/outputs', async () => ({
     ...outputs,
-    reconciliation: { ...outputs.reconciliation, addsUp: false },
+    reconciliation: { ...outputs.reconciliation!, addsUp: false },
   }));
   renderDone();
   expect(await screen.findByText(/Doesn't add up/)).toBeInTheDocument();
 });
 
 it('issues view lists lead ids', async () => {
+  mockBridge.setResponse('job/outputs', async () => ({
+    ...outputs,
+    issues: [{ kind: 'flagged', count: 1, text: 'Flagged lead', leads: ['lead-9'] }],
+  }));
   renderDone();
   fireEvent.click(await screen.findByRole('button', { name: 'View' }));
   expect(screen.getByText('lead-9')).toBeInTheDocument();

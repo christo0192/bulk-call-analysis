@@ -426,15 +426,16 @@ export function RunView({ id }: { id: string }) {
             ))}
         </div>
         <div class="accounted">
-          <b>{number(progress.total)} = </b>
-          {accounting}
+          <span>
+            {number(progress.total)} = {accounting}
+          </span>
           {!addsUp && (
             <strong class="accounting-error">Doesn&apos;t add up — see the verify report</strong>
           )}
         </div>
         {unusable > 0 && (
           <div class="accounted">
-            {number(counts.selected)} selected = {usability}
+            {number(counts.selected)} = {usability}
           </div>
         )}
         {reasonsOpen && (

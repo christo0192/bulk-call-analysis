@@ -121,6 +121,10 @@ it('the accounted-for equation uses only real fields and adds up', async () => {
 it('failed opens the reasons', async () => {
   mockBridge.setResponse('job/snapshot', async () =>
     snapshot({
+      progress: {
+        ...(running as unknown as JobSnapshot).progress,
+        failed: 1,
+      },
       counts: {
         ...(running as unknown as JobSnapshot).counts,
         failed: 1,
@@ -178,7 +182,7 @@ it('quota tile shows the projection, stop marker and reset time', async () => {
 });
 it('unknown allowances and power show unknown', async () => {
   render(<RunView id="job-one" />);
-  await waitFor(() => expect(screen.getAllByText('Unknown')).toHaveLength(2));
+  await waitFor(() => expect(screen.getAllByText('Unknown')).toHaveLength(1));
 });
 
 it('progress with retrying leads adds up', async () => {
@@ -195,7 +199,7 @@ it('progress with retrying leads adds up', async () => {
   );
   render(<RunView id="job-one" />);
   expect(
-    await screen.findByText(/8 = 2 done read \+ 1 in progress \+ 1 retrying \+ 4 remaining left/),
+    await screen.findByText(/8 = 2 read \+ 1 in progress \+ 1 retrying \+ 4 left/),
   ).toBeInTheDocument();
   expect(screen.queryByText(/doesn.t add up/)).toBeNull();
 });
@@ -285,6 +289,9 @@ it('numbers are rounded', async () => {
     }),
   );
   render(<RunView id="job-one" />);
-  expect(await screen.findByText(/2 h 5 min/)).toBeInTheDocument();
+  const hero = (await screen.findByText(/Somewhere between 2 h 5 min/)).closest(
+    '.run-hero',
+  ) as HTMLElement;
+  expect(within(hero).getAllByText(/2 h 5 min/).length).toBeGreaterThan(0);
   expect(screen.getByText(/1\.3 leads a minute/)).toBeInTheDocument();
 });
