@@ -245,16 +245,29 @@ impl<R: Runtime> Engine<R> {
             }));
         let mut latest_eta: Option<String> = None;
         let mut latest_progress = (0_u64, 0_u64);
+        let mut latest_job: Option<String> = None;
         while let Some(notification) = rx.recv().await {
             self.update_power_for_notification(&notification).await;
+            {
+                let mut ctx = self
+                    .inner
+                    .notifications
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                crate::notifications::observe(&notification, &mut ctx);
+            }
             let method = notification.get("method").and_then(Value::as_str);
             if method == Some("engine/event") {
                 let params = notification.get("params").cloned().unwrap_or_default();
                 if params.get("kind").and_then(Value::as_str) == Some("eta") {
-                    latest_eta = format_eta(
-                        params.get("low").and_then(Value::as_u64),
-                        params.get("high").and_then(Value::as_u64),
-                    );
+                    latest_eta = if params.get("known").and_then(Value::as_bool) == Some(false) {
+                        None
+                    } else {
+                        format_eta(
+                            params.get("low").and_then(Value::as_f64),
+                            params.get("high").and_then(Value::as_f64),
+                        )
+                    };
                 }
             }
             if method == Some("job/progress") && !self.inner.shutting_down.load(Ordering::Acquire) {
@@ -267,9 +280,7 @@ impl<R: Runtime> Engine<R> {
                         let _ = tray.set_tooltip(Some(format_tray_tooltip(
                             done,
                             total,
-                            latest_eta
-                                .as_deref()
-                                .or_else(|| params.get("remaining").and_then(Value::as_str)),
+                            latest_eta.as_deref(),
                         )));
                     }
                 }
@@ -280,23 +291,42 @@ impl<R: Runtime> Engine<R> {
                     .get("state")
                     .or_else(|| params.get("status"))
                     .and_then(Value::as_str);
+                let job = params.get("job").and_then(Value::as_str).map(str::to_owned);
+                if job != latest_job {
+                    latest_job = job;
+                    latest_eta = None;
+                    latest_progress = (0, 0);
+                }
                 if let Some(app) = &self.inner.app {
                     if let Some(tray) = app.tray_by_id("main") {
                         let tooltip = match state {
-                            Some("paused") => {
-                                format_tray_status(false, true, 0, 0, None, Some("usage limit"))
-                            }
-                            Some("done") | Some("done_with_issues") => "Bulk Call Analysis".into(),
-                            _ => format_tray_tooltip(
+                            Some("paused") => format_tray_status(
+                                false,
+                                true,
+                                0,
+                                0,
+                                None,
+                                self.inner.notifications.lock().ok().and_then(|ctx| {
+                                    ctx.pause_reason.as_deref().map(pause_reason_label)
+                                }),
+                            ),
+                            Some("done")
+                            | Some("done_with_issues")
+                            | Some("failed")
+                            | Some("cancelled") => "Done".into(),
+                            Some("running") | Some("starting") | Some("active")
+                            | Some("in_progress") => format_tray_tooltip(
                                 latest_progress.0,
                                 latest_progress.1,
                                 latest_eta.as_deref(),
                             ),
+                            _ => "Bulk Call Analysis".into(),
                         };
                         let _ = tray.set_tooltip(Some(tooltip));
                     }
                 }
             }
+            self.spawn_notification_refresh(notification);
             self.emit("engine-event", notification);
         }
         ping_task.abort();
@@ -422,6 +452,26 @@ impl<R: Runtime> Engine<R> {
             if self.inner.shutting_down.load(Ordering::Acquire) {
                 break;
             }
+            let status = self.power_status();
+            let battery_transition = {
+                let mut ctx = self
+                    .inner
+                    .notifications
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let transition = self.inner.power.is_held()
+                    && ctx.previous_power
+                        == Some(PowerStatus {
+                            on_ac: Some(true),
+                            percent: ctx.previous_power.and_then(|p| p.percent),
+                        })
+                    && status.on_ac == Some(false);
+                ctx.previous_power = Some(status);
+                transition
+            };
+            if battery_transition {
+                self.send_battery_notification(status.percent);
+            }
             if let Err(error) = self.send_power_status().await {
                 log::debug!("could not send power status: {error}");
             }
@@ -448,23 +498,76 @@ impl<R: Runtime> Engine<R> {
     }
     fn emit(&self, event: &str, payload: Value) {
         if let Some(app) = &self.inner.app {
-            if event == "engine-event" {
-                let mut ctx = self
-                    .inner
-                    .notifications
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let result = crate::notifications::dispatch_notification(
+            let _ = app.emit(event, payload);
+        }
+    }
+
+    fn spawn_notification_refresh(&self, event: Value) {
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            this.notify_event(event).await;
+        });
+    }
+
+    async fn notify_event(&self, event: Value) {
+        let project = event
+            .get("params")
+            .and_then(|p| p.get("project"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(project) = project {
+            let unknown = self
+                .inner
+                .notifications
+                .lock()
+                .map(|c| !c.project_titles.contains_key(&project))
+                .unwrap_or(false);
+            if unknown {
+                if let Ok(Ok(Value::Array(items))) = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    self.call("projects/list", json!({})),
+                )
+                .await
+                {
+                    if let Ok(mut ctx) = self.inner.notifications.lock() {
+                        for item in items {
+                            if let (Some(id), Some(title)) = (
+                                item.get("project").and_then(Value::as_str),
+                                item.get("title").and_then(Value::as_str),
+                            ) {
+                                ctx.project_titles.insert(id.into(), title.into());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(app) = &self.inner.app {
+            if let Ok(mut ctx) = self.inner.notifications.lock() {
+                if let Err(error) = crate::notifications::dispatch_notification(
                     &mut ctx,
-                    &payload,
+                    &event,
                     SystemTime::now(),
                     |title, body| app.notification().builder().title(title).body(body).show(),
-                );
-                if let Err(error) = result {
+                ) {
                     log::debug!("could not show notification: {error}");
                 }
             }
-            let _ = app.emit(event, payload);
+        }
+    }
+
+    fn send_battery_notification(&self, percent: Option<u8>) {
+        if let Some(app) = &self.inner.app {
+            if let Ok(mut ctx) = self.inner.notifications.lock() {
+                let event = json!({"method":"engine/event","params":{"kind":"battery","job":ctx.active_job.clone().unwrap_or_default()}});
+                if let Some((title, body)) =
+                    crate::notifications::battery_notification(&ctx, percent)
+                {
+                    if crate::notifications::should_notify(&mut ctx, &event) {
+                        let _ = app.notification().builder().title(title).body(body).show();
+                    }
+                }
+            }
         }
     }
 }
@@ -852,12 +955,8 @@ pub fn minimal_environment() -> std::collections::HashMap<String, String> {
         .collect()
 }
 #[allow(dead_code)]
-pub fn format_tooltip(done: u64, total: u64, remaining: String) -> String {
-    format!(
-        "{} / {} · {remaining}",
-        format_number(done),
-        format_number(total)
-    )
+pub fn format_tooltip(done: u64, total: u64, _unused: String) -> String {
+    format!("{} / {}", format_number(done), format_number(total))
 }
 
 pub fn format_tray_tooltip(done: u64, total: u64, eta: Option<&str>) -> String {
@@ -895,15 +994,28 @@ pub fn format_tray_status(
     "Bulk Call Analysis".into()
 }
 
-pub fn format_eta(low_seconds: Option<u64>, high_seconds: Option<u64>) -> Option<String> {
+pub fn format_eta(low_seconds: Option<f64>, high_seconds: Option<f64>) -> Option<String> {
     let seconds = high_seconds.or(low_seconds)?;
-    if seconds == 0 {
+    if !seconds.is_finite() || seconds <= 0.0 {
         return None;
     }
+    let seconds = seconds.ceil() as u64;
     if seconds >= 3600 {
         Some(format!("about {} h left", seconds.div_ceil(3600)))
     } else {
         Some(format!("about {} m left", seconds.div_ceil(60)))
+    }
+}
+
+fn pause_reason_label(reason: &str) -> &str {
+    match reason {
+        "quota" | "usage_limit" => "usage limit",
+        "sleep" => "computer asleep",
+        "operator" => "paused by you",
+        "battery" => "on battery",
+        "credit" | "credits" | "spend" | "spend_control" => "avoid paid credits",
+        "model_unavailable" => "model unavailable",
+        _ => "paused",
     }
 }
 
@@ -965,11 +1077,11 @@ mod tests {
     #[test]
     fn eta_formats_hours_and_minutes() {
         assert_eq!(
-            format_eta(Some(60), Some(300)),
+            format_eta(Some(60.0), Some(300.0)),
             Some("about 5 m left".into())
         );
         assert_eq!(
-            format_eta(Some(14_000), Some(18_000)),
+            format_eta(Some(14_000.0), Some(18_000.0)),
             Some("about 5 h left".into())
         );
         assert_eq!(format_eta(None, None), None);
@@ -985,7 +1097,7 @@ mod tests {
     fn tooltip() {
         assert_eq!(
             format_tooltip(4312, 10727, "~9 h 40 m".into()),
-            "4,312 / 10,727 · ~9 h 40 m"
+            "4,312 / 10,727"
         );
     }
     #[test]
@@ -1036,9 +1148,6 @@ mod tests {
 
     #[test]
     fn tooltip_handles_zero_and_large_numbers() {
-        assert_eq!(
-            format_tooltip(0, 1_000_000, "done".into()),
-            "0 / 1,000,000 · done"
-        );
+        assert_eq!(format_tooltip(0, 1_000_000, "done".into()), "0 / 1,000,000");
     }
 }

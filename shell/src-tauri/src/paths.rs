@@ -9,6 +9,12 @@ pub enum OpenError {
     OutsideProject,
     #[error("file type is not allowed")]
     TypeNotAllowed,
+    InvalidPath,
+}
+
+pub fn is_unsafe_path(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.starts_with(r"\\") || text.starts_with(r"\\?\UNC\") || text.starts_with(r"\\.\")
 }
 
 pub fn validate_project_path(
@@ -16,12 +22,11 @@ pub fn validate_project_path(
     candidate: &Path,
     allowed_exts: &[&str],
 ) -> Result<PathBuf, OpenError> {
-    let project = project_dir
-        .canonicalize()
-        .map_err(|_| OpenError::FileNotFound)?;
-    let path = candidate
-        .canonicalize()
-        .map_err(|_| OpenError::FileNotFound)?;
+    if is_unsafe_path(project_dir) || is_unsafe_path(candidate) {
+        return Err(OpenError::InvalidPath);
+    }
+    let project = dunce::canonicalize(project_dir).map_err(|_| OpenError::FileNotFound)?;
+    let path = dunce::canonicalize(candidate).map_err(|_| OpenError::FileNotFound)?;
     if !path.starts_with(&project) {
         return Err(OpenError::OutsideProject);
     }
@@ -42,9 +47,10 @@ pub fn validate_project_path(
 }
 
 pub fn validate_project_folder(project_dir: &Path) -> Result<PathBuf, OpenError> {
-    let path = project_dir
-        .canonicalize()
-        .map_err(|_| OpenError::FileNotFound)?;
+    if is_unsafe_path(project_dir) {
+        return Err(OpenError::InvalidPath);
+    }
+    let path = dunce::canonicalize(project_dir).map_err(|_| OpenError::FileNotFound)?;
     if path.is_dir() {
         Ok(path)
     } else {
@@ -67,14 +73,14 @@ mod tests {
         fs::write(&file, "x").unwrap();
         assert_eq!(
             validate_project_path(&project, &file, &["md"]).unwrap(),
-            file.canonicalize().unwrap()
-        );
-        assert_eq!(
-            validate_project_path(&project, &project.join("..").join("outside.md"), &["md"]),
-            Err(OpenError::FileNotFound)
+            dunce::canonicalize(&file).unwrap()
         );
         let outside = root.path().join("outside.md");
         fs::write(&outside, "x").unwrap();
+        assert_eq!(
+            validate_project_path(&project, &project.join("..").join("outside.md"), &["md"]),
+            Err(OpenError::OutsideProject)
+        );
         assert_eq!(
             validate_project_path(&project, &outside, &["md"]),
             Err(OpenError::OutsideProject)
@@ -135,9 +141,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn symlink_escape_requires_a_junction_and_is_not_run_without_admin() {
-        eprintln!(
-            "symlink escape test skipped: creating a junction without admin is not guaranteed"
+    fn rejects_junction_escape_after_canonicalization() {
+        use std::os::windows::fs::symlink_dir;
+        use std::process::Command;
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "x").unwrap();
+        let junction = project.join("link");
+        if symlink_dir(&outside, &junction).is_err() {
+            let status = Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    junction.to_str().unwrap(),
+                    outside.to_str().unwrap(),
+                ])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        assert_eq!(
+            validate_project_path(&project, &junction.join("secret.txt"), &["txt"]),
+            Err(OpenError::OutsideProject)
         );
     }
 }

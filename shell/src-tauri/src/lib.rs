@@ -176,6 +176,54 @@ async fn engine_status(engine: State<'_, Engine>) -> Result<String, String> {
 
 const PROJECT_EXTENSIONS: &[&str] = &["xlsx", "md", "csv", "txt", "json"];
 
+fn valid_project_slug(project: &str) -> bool {
+    let bytes = project.as_bytes();
+    (4..=64).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && (bytes[bytes.len() - 1].is_ascii_lowercase() || bytes[bytes.len() - 1].is_ascii_digit())
+        && bytes[1..bytes.len() - 1]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+fn malformed_engine_reply() -> CommandError {
+    CommandError {
+        code: None,
+        message: "The engine is unavailable".into(),
+        data: Some(json!({"reason":"engine_unavailable"})),
+    }
+}
+
+async fn projects_root<R: tauri::Runtime>(
+    engine: &Engine<R>,
+    project: &str,
+) -> Result<PathBuf, CommandError> {
+    if !valid_project_slug(project) {
+        return Err(path_error(paths::OpenError::InvalidPath));
+    }
+    let status = engine
+        .call("app/status", json!({}))
+        .await
+        .map_err(CommandError::from)?;
+    let data_dir = status
+        .get("dataDir")
+        .and_then(Value::as_str)
+        .ok_or_else(malformed_engine_reply)?;
+    let data_dir = PathBuf::from(data_dir);
+    let projects = data_dir.join("projects");
+    if data_dir.as_os_str().is_empty() || paths::is_unsafe_path(&data_dir) {
+        return Err(path_error(paths::OpenError::InvalidPath));
+    }
+    let root =
+        dunce::canonicalize(&projects).map_err(|_| path_error(paths::OpenError::FileNotFound))?;
+    let project_dir = dunce::canonicalize(root.join(project))
+        .map_err(|_| path_error(paths::OpenError::FileNotFound))?;
+    if project_dir.parent() != Some(root.as_path()) || !project_dir.is_dir() {
+        return Err(path_error(paths::OpenError::OutsideProject));
+    }
+    Ok(project_dir)
+}
+
 #[tauri::command]
 async fn open_project_file(
     app: tauri::AppHandle,
@@ -187,24 +235,13 @@ async fn open_project_file(
         .call("files/path", json!({"project": project, "name": name}))
         .await
         .map_err(CommandError::from)?;
-    let project_dir = result
-        .get("projectDir")
-        .and_then(Value::as_str)
-        .ok_or(CommandError {
-            code: None,
-            message: "The engine is unavailable".into(),
-            data: Some(json!({"reason":"engine_unavailable"})),
-        })?;
+    let project_dir = projects_root(&engine, &project).await?;
     let candidate = result
         .get("path")
         .and_then(Value::as_str)
-        .ok_or(CommandError {
-            code: None,
-            message: "File not found".into(),
-            data: Some(json!({"reason":"file_not_found"})),
-        })?;
+        .ok_or_else(malformed_engine_reply)?;
     let path = paths::validate_project_path(
-        std::path::Path::new(project_dir),
+        &project_dir,
         std::path::Path::new(candidate),
         PROJECT_EXTENSIONS,
     )
@@ -214,7 +251,7 @@ async fn open_project_file(
         .map_err(|error| CommandError {
             code: None,
             message: error.to_string(),
-            data: Some(json!({"reason":"engine_unavailable"})),
+            data: Some(json!({"reason":"open_failed"})),
         })
 }
 
@@ -224,26 +261,14 @@ async fn open_project_folder(
     engine: State<'_, Engine>,
     project: String,
 ) -> Result<(), CommandError> {
-    let result = engine
-        .call("files/path", json!({"project": project, "name": ""}))
-        .await
-        .map_err(CommandError::from)?;
-    let project_dir = result
-        .get("projectDir")
-        .and_then(Value::as_str)
-        .ok_or(CommandError {
-            code: None,
-            message: "File not found".into(),
-            data: Some(json!({"reason":"file_not_found"})),
-        })?;
-    let path =
-        paths::validate_project_folder(std::path::Path::new(project_dir)).map_err(path_error)?;
+    let path = projects_root(&engine, &project).await?;
+    let path = paths::validate_project_folder(&path).map_err(path_error)?;
     tauri_plugin_opener::OpenerExt::opener(&app)
         .open_path(path.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|error| CommandError {
             code: None,
             message: error.to_string(),
-            data: Some(json!({"reason":"engine_unavailable"})),
+            data: Some(json!({"reason":"open_failed"})),
         })
 }
 
@@ -252,6 +277,7 @@ fn path_error(error: paths::OpenError) -> CommandError {
         paths::OpenError::FileNotFound => "file_not_found",
         paths::OpenError::OutsideProject => "outside_project",
         paths::OpenError::TypeNotAllowed => "type_not_allowed",
+        paths::OpenError::InvalidPath => "outside_project",
     };
     CommandError {
         code: None,

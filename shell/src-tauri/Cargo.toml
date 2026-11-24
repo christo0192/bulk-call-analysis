@@ -12,6 +12,7 @@ name = "bulk_call_analysis_lib"
 crate-type = ["lib", "staticlib"]
 
 [dependencies]
+dunce = "1.0.5"
 log = "0.4.22"
 serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0.133"

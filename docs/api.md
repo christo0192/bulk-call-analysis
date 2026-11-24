@@ -40,6 +40,15 @@ successful results.
 
 The shell only forwards an allowlisted subset of methods to the UI; see `shell/src-tauri/src/lib.rs`.
 
+## Shell commands
+
+`open_project_file(project, name)` and `open_project_folder(project)` are Tauri
+commands invoked directly with `invoke`; they are not sent through
+`engine_call`. Both return `null` on success and reject with
+`{code, message, data: {reason}}`. The shell derives the project directory from
+`app/status.dataDir`, validates the project slug and containment, and reports
+`open_failed` when the desktop opener cannot open the validated path.
+
 `chat/send` starts one masked, subscription-backed Claude turn for a project.
 It is exempt from the generic 30-second request timeout, but it can be
 cancelled with `chat/stop` or by shutdown. Only one turn per project runs at a
