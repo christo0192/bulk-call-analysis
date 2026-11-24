@@ -734,10 +734,15 @@ impl<R: Runtime> Engine<R> {
 
     async fn title_projects_list(&self) -> Result<Value, RpcError> {
         #[cfg(test)]
-        if let Some(client) = self.inner.test_title_rpc.lock().await.clone() {
-            return client
-                .request("projects/list", json!({}), method_timeout("projects/list"))
-                .await;
+        {
+            // Clone first: holding this lock across the request would serialise the lookups and
+            // hide a missing coalescing.
+            let client = self.inner.test_title_rpc.lock().await.clone();
+            if let Some(client) = client {
+                return client
+                    .request("projects/list", json!({}), method_timeout("projects/list"))
+                    .await;
+            }
         }
         self.call("projects/list", json!({})).await
     }
@@ -1243,7 +1248,10 @@ mod tests {
                 )
                 .await;
             for task in tasks {
-                task.await.unwrap();
+                tokio::time::timeout(Duration::from_secs(2), task)
+                    .await
+                    .expect("a toast task hung")
+                    .unwrap();
             }
             {
                 let ctx = engine.notification_ctx();

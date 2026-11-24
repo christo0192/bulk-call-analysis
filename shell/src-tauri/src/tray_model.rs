@@ -366,8 +366,13 @@ mod tests {
             ("paused", "sample_ready"),
             ("sample_ready", "done"),
         ] {
-            let m = model(&[state("low", lower), state("high", higher)]);
-            assert!(!m.tooltip().contains(lower), "{higher} lost to {lower}");
+            // The lower job changes last, so only the priority order can keep the higher one.
+            let m = model(&[state("high", higher), state("low", lower)]);
+            assert_eq!(
+                m.tooltip(),
+                model(&[state("high", higher)]).tooltip(),
+                "{higher} lost to {lower}"
+            );
         }
         let newer_paused = model(&[
             state("old", "paused"),
