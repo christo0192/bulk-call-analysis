@@ -53,7 +53,8 @@ under `jobs/<job>/output/`; internal chat, raw, masked, and state files are
 never opened. The shell opens the canonical path it checked, but a same-user
 process can still replace a directory in the remaining window before the OS
 opener. Shell command rejection reasons are `file_not_found`,
-`outside_project`, `type_not_allowed`, `open_failed`, `engine_unavailable`,
+`outside_project`, `type_not_allowed`, `open_failed`, `invalid_slug`,
+`engine_unavailable`,
 `timeout`, `invalid_name`, and `project_not_found`.
 
 `chat/send` starts one masked, subscription-backed Claude turn for a project.

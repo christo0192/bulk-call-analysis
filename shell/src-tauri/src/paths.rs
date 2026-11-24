@@ -11,10 +11,13 @@ pub enum OpenError {
     TypeNotAllowed,
     #[error("invalid path")]
     InvalidPath,
+    #[error("invalid slug")]
+    InvalidSlug,
 }
 
 pub fn is_unsafe_path(path: &Path) -> bool {
-    path.to_string_lossy().replace('\\', "/").starts_with("//")
+    let value = path.to_string_lossy().replace('\\', "/");
+    value.starts_with("//") || value.starts_with("/??/")
 }
 
 pub fn validate_project_path(
@@ -131,6 +134,8 @@ mod tests {
             "//?/C:/file.md",
             r"\\.\C:\file.md",
             "//./C:/file.md",
+            r"\??\C:\file.md",
+            r"\??\UNC\host\share\file.md",
         ] {
             assert!(is_unsafe_path(Path::new(value)), "{value}");
         }

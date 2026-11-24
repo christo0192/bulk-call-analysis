@@ -6,6 +6,7 @@ mod procguard;
 pub mod rpc;
 mod sleepwatch;
 mod tray;
+mod tray_model;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
@@ -227,7 +228,7 @@ async fn projects_root<R: tauri::Runtime>(
     project: &str,
 ) -> Result<PathBuf, CommandError> {
     if !valid_project_slug(project) {
-        return Err(path_error(paths::OpenError::InvalidPath));
+        return Err(path_error(paths::OpenError::InvalidSlug));
     }
     let status = engine
         .call("app/status", json!({}))
@@ -311,6 +312,7 @@ fn path_error(error: paths::OpenError) -> CommandError {
         paths::OpenError::OutsideProject => "outside_project",
         paths::OpenError::TypeNotAllowed => "type_not_allowed",
         paths::OpenError::InvalidPath => "outside_project",
+        paths::OpenError::InvalidSlug => "invalid_slug",
     };
     CommandError {
         code: None,
@@ -458,8 +460,9 @@ fn start_shutdown(app: tauri::AppHandle) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        exit_action, handle_exit, handle_tray_quit, method_not_allowed_error, run_event_action,
-        ui_method_allowed, CommandError, Engine, ExitAction, RunEventAction, SHUTDOWN_STARTED,
+        exit_action, handle_exit, handle_tray_quit, is_allowed_project_file,
+        method_not_allowed_error, run_event_action, ui_method_allowed, CommandError, Engine,
+        ExitAction, RunEventAction, SHUTDOWN_STARTED,
     };
     use crate::rpc::RpcError;
     use serde_json::json;
@@ -492,6 +495,35 @@ mod tests {
         assert!(!super::valid_project_slug("bad"));
         for value in ["//host/share", r"\\?\C:\projects", r"\\.\C:\projects"] {
             assert!(crate::paths::is_unsafe_path(std::path::Path::new(value)));
+        }
+    }
+
+    #[test]
+    fn allowlist_accepts_every_listed_output_and_refuses_the_rest() {
+        let root = std::path::Path::new("project");
+        for path in [
+            "jobs/j1/output/results.v1.xlsx",
+            "jobs/j1/output/results.v1.rebuild2.xlsx",
+            "jobs/j1/output/verify.v1.md",
+            "summary.md",
+        ] {
+            assert!(is_allowed_project_file(root, &root.join(path)), "{path}");
+        }
+        for path in [
+            "jobs/j1/raw/call.json",
+            "jobs/j1/masked/call.json",
+            "jobs/j1/chat/chat.json",
+            "inputs/source.xlsx",
+            "jobs/j1/output/results.v1.rules.json",
+            "jobs/j1/output/reconciliation.v1.json",
+            "jobs/j1/output/state.sqlite3",
+            "jobs/j1/output/x.xlsx.exe",
+            "jobs/j1/output/X.XLSX:stream",
+            "JOBS/j1/RAW/call.json",
+            "Jobs/j1/Masked/call.json",
+            "jobs/j1/Chat/chat.json",
+        ] {
+            assert!(!is_allowed_project_file(root, &root.join(path)), "{path}");
         }
     }
 

@@ -26,13 +26,8 @@ pub fn show_main_window(app: &AppHandle) -> tauri::Result<()> {
 
 pub fn setup(app: &AppHandle, engine: Engine) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open window", true, None::<&str>)?;
-    let pause = MenuItem::with_id(
-        app,
-        "pause",
-        "Pause job",
-        engine.active_job_id().is_some(),
-        None::<&str>,
-    )?;
+    let pause = MenuItem::with_id(app, "pause", "Pause job", false, None::<&str>)?;
+    engine.set_pause_item(pause.clone());
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &pause, &quit])?;
     if let Some(tray) = app.tray_by_id("main") {
@@ -46,8 +41,10 @@ pub fn setup(app: &AppHandle, engine: Engine) -> tauri::Result<()> {
         "pause" => {
             let e = engine.clone();
             tauri::async_runtime::spawn(async move {
-                if let Some(job) = e.active_job_id() {
-                    let _ = e.call("job/pause", json!({"job": job})).await;
+                if let Some(job) = e.pausable_job() {
+                    if let Err(error) = e.call("job/pause", json!({"job": job})).await {
+                        log::warn!("tray pause failed: {error}");
+                    }
                 }
             });
         }

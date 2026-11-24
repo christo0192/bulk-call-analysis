@@ -2,6 +2,7 @@ use crate::notifications::NotifyCtx;
 use crate::power::{self, KeepAwake, PowerStatus};
 use crate::procguard;
 use crate::rpc::{self, Client, RpcError};
+use crate::tray_model::TrayModel;
 use log::{error, warn};
 use serde_json::{json, Value};
 use std::{
@@ -11,7 +12,7 @@ use std::{
     sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant, SystemTime},
 };
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{menu::MenuItem, AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -52,6 +53,9 @@ struct Inner<R: Runtime> {
     power: KeepAwake<Box<dyn power::PowerOs>>,
     notifications: StdMutex<NotifyCtx>,
     pending_title_lookups: StdMutex<HashSet<String>>,
+    tray_model: StdMutex<TrayModel>,
+    pause_item: StdMutex<Option<MenuItem<R>>>,
+    last_tray: StdMutex<Option<(String, bool)>>,
 }
 
 #[derive(Debug)]
@@ -95,6 +99,13 @@ impl<R: Runtime> Clone for Engine<R> {
 }
 
 impl<R: Runtime> Engine<R> {
+    fn notification_ctx(&self) -> std::sync::MutexGuard<'_, NotifyCtx> {
+        self.inner
+            .notifications
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn new(app: AppHandle<R>) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -108,6 +119,9 @@ impl<R: Runtime> Engine<R> {
                 power: power::platform(),
                 notifications: StdMutex::new(NotifyCtx::default()),
                 pending_title_lookups: StdMutex::new(HashSet::new()),
+                tray_model: StdMutex::new(TrayModel::default()),
+                pause_item: StdMutex::new(None),
+                last_tray: StdMutex::new(None),
             }),
         }
     }
@@ -125,6 +139,9 @@ impl<R: Runtime> Engine<R> {
                 power: power::platform(),
                 notifications: StdMutex::new(NotifyCtx::default()),
                 pending_title_lookups: StdMutex::new(HashSet::new()),
+                tray_model: StdMutex::new(TrayModel::default()),
+                pause_item: StdMutex::new(None),
+                last_tray: StdMutex::new(None),
             }),
         }
     }
@@ -140,12 +157,21 @@ impl<R: Runtime> Engine<R> {
         });
     }
 
-    pub fn active_job_id(&self) -> Option<String> {
-        self.inner
-            .notifications
+    pub fn set_pause_item(&self, item: MenuItem<R>) {
+        *self
+            .inner
+            .pause_item
             .lock()
-            .ok()
-            .and_then(|ctx| ctx.active_job.clone())
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item);
+        self.render_tray();
+    }
+
+    pub fn pausable_job(&self) -> Option<String> {
+        self.inner
+            .tray_model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pausable_job()
     }
     async fn supervise(&self) {
         loop {
@@ -155,7 +181,7 @@ impl<R: Runtime> Engine<R> {
             match self.spawn_once().await {
                 Ok(()) => {}
                 Err(e) => {
-                    self.render_tray(&JobTrayState::default());
+                    self.clear_tray();
                     if self.inner.shutting_down.load(Ordering::Acquire) {
                         break;
                     }
@@ -245,6 +271,7 @@ impl<R: Runtime> Engine<R> {
                 }
             }
         });
+        self.seed_active_jobs().await;
         let ping_engine = self.clone();
         let ping_guard: Arc<dyn HealthKill> = guard.clone();
         let ping_task =
@@ -256,19 +283,14 @@ impl<R: Runtime> Engine<R> {
                     }
                 }
             }));
-        let mut tray_state = JobTrayState::default();
         while let Some(notification) = rx.recv().await {
-            {
-                let mut ctx = self
-                    .inner
-                    .notifications
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                crate::notifications::observe(&notification, &mut ctx);
-            }
             self.update_power_for_notification(&notification).await;
-            update_tray_state(&mut tray_state, &notification);
-            self.render_tray(&tray_state);
+            self.inner
+                .tray_model
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .apply(&notification);
+            self.render_tray();
             self.spawn_notification_refresh(notification.clone());
             self.emit("engine-event", notification);
         }
@@ -279,13 +301,50 @@ impl<R: Runtime> Engine<R> {
         procguard::terminate_group(child.id().unwrap_or_default());
         #[cfg(windows)]
         let _ = child.kill().await;
-        self.render_tray(&JobTrayState::default());
+        self.clear_tray();
         let _ = child.wait().await;
         self.inner.active_pid.store(0, Ordering::Release);
         *self.inner.guard.lock().await = None;
         *self.inner.rpc.lock().await = None;
         let _ = self.inner.power.release();
         Err(RpcError::Closed)
+    }
+
+    async fn seed_active_jobs(&self) {
+        let Ok(Ok(Value::Array(projects))) = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.call("projects/list", json!({})),
+        )
+        .await
+        else {
+            return;
+        };
+        let mut model = self
+            .inner
+            .tray_model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for project in projects {
+            let Some(active) = project.get("activeJob") else {
+                continue;
+            };
+            let Some(job) = active.get("job").and_then(Value::as_str) else {
+                continue;
+            };
+            let state = active
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("paused");
+            model.apply(&json!({"method":"job/state","params":{"job":job,"state":state}}));
+            if let (Some(done), Some(total)) = (active.get("done"), active.get("total")) {
+                model.apply(&json!({"method":"job/progress","params":{"job":job,"done":done,"total":total}}));
+            }
+            if let Some(reason) = active.get("pauseReason").and_then(Value::as_str) {
+                model.apply(&json!({"method":"engine/event","params":{"job":job,"kind":"pause","reason":reason}}));
+            }
+        }
+        drop(model);
+        self.render_tray();
     }
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let rpc = self
@@ -392,14 +451,62 @@ impl<R: Runtime> Engine<R> {
         self.emit("engine/status", payload);
     }
 
-    fn render_tray(&self, state: &JobTrayState) {
+    fn clear_tray(&self) {
+        self.inner
+            .tray_model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .engine_died();
+        self.render_tray();
+    }
+
+    fn render_tray(&self) {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return;
         }
         if let Some(app) = &self.inner.app {
-            if let Some(tray) = app.tray_by_id("main") {
-                let _ = tray.set_tooltip(Some(render_job_tray_state(state)));
+            let (tooltip, enabled) = {
+                let model = self
+                    .inner
+                    .tray_model
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    model.tooltip(),
+                    crate::tray_model::pause_item_enabled(&model),
+                )
+            };
+            let changed = {
+                let mut last = self
+                    .inner
+                    .last_tray
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let changed = last.as_ref() != Some(&(tooltip.clone(), enabled));
+                if changed {
+                    *last = Some((tooltip.clone(), enabled));
+                }
+                changed
+            };
+            if !changed {
+                return;
             }
+            let tray = app.tray_by_id("main");
+            let item = self
+                .inner
+                .pause_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let app = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Some(tray) = tray {
+                    let _ = tray.set_tooltip(Some(&tooltip));
+                }
+                if let Some(item) = item {
+                    let _ = item.set_enabled(enabled);
+                }
+            });
         }
     }
     async fn power_status_loop(&self) {
@@ -409,18 +516,9 @@ impl<R: Runtime> Engine<R> {
             }
             let status = self.power_status();
             let battery_transition = {
-                let mut ctx = self
-                    .inner
-                    .notifications
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let transition = self.inner.power.is_held()
-                    && ctx.previous_power
-                        == Some(PowerStatus {
-                            on_ac: Some(true),
-                            percent: ctx.previous_power.and_then(|p| p.percent),
-                        })
-                    && status.on_ac == Some(false);
+                let mut ctx = self.notification_ctx();
+                let transition =
+                    battery_transition(ctx.previous_power, status, self.inner.power.is_held());
                 ctx.previous_power = Some(status);
                 transition
             };
@@ -440,17 +538,16 @@ impl<R: Runtime> Engine<R> {
                     .get("params")
                     .and_then(|p| p.get("job"))
                     .and_then(Value::as_str);
-                let paused = self
+                let holds = self
                     .inner
-                    .notifications
+                    .tray_model
                     .lock()
-                    .ok()
-                    .and_then(|ctx| job.and_then(|id| ctx.states.get(id).map(|s| s == "paused")))
-                    .unwrap_or(false);
-                if paused {
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .holds_awake();
+                if job.is_some() && !holds {
                     None
                 } else {
-                    Some(true)
+                    Some(holds)
                 }
             } else {
                 job_event_requires_keep_awake(notification)
@@ -486,20 +583,23 @@ impl<R: Runtime> Engine<R> {
     }
 
     async fn notify_event(&self, event: Value) {
+        let will_toast = {
+            let ctx = self.notification_ctx();
+            crate::notifications::notification_for(&event, &ctx).is_some()
+        };
+        if !will_toast {
+            return;
+        }
         let project = event
             .get("params")
             .and_then(|p| p.get("project"))
             .and_then(Value::as_str)
             .map(str::to_owned);
         if let Some(project) = project {
-            let unknown = self
-                .inner
-                .notifications
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            let unknown = !self
+                .notification_ctx()
                 .project_titles
                 .contains_key(&project);
-            let unknown = !unknown;
             if unknown {
                 let should_lookup = self
                     .inner
@@ -516,14 +616,13 @@ impl<R: Runtime> Engine<R> {
                 )
                 .await
                 {
-                    if let Ok(mut ctx) = self.inner.notifications.lock() {
-                        for item in items {
-                            if let (Some(id), Some(title)) = (
-                                item.get("project").and_then(Value::as_str),
-                                item.get("title").and_then(Value::as_str),
-                            ) {
-                                ctx.project_titles.insert(id.into(), title.into());
-                            }
+                    let mut ctx = self.notification_ctx();
+                    for item in items {
+                        if let (Some(id), Some(title)) = (
+                            item.get("project").and_then(Value::as_str),
+                            item.get("title").and_then(Value::as_str),
+                        ) {
+                            ctx.project_titles.insert(id.into(), title.into());
                         }
                     }
                 }
@@ -539,11 +638,7 @@ impl<R: Runtime> Engine<R> {
 
     async fn dispatch_notification(&self, event: Value) {
         if let Some(app) = &self.inner.app {
-            let mut ctx = self
-                .inner
-                .notifications
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ctx = self.notification_ctx();
             if let Err(error) = crate::notifications::dispatch_notification(
                 &mut ctx,
                 &event,
@@ -557,14 +652,17 @@ impl<R: Runtime> Engine<R> {
 
     fn send_battery_notification(&self, percent: Option<u8>) {
         if let Some(app) = &self.inner.app {
-            if let Ok(mut ctx) = self.inner.notifications.lock() {
-                let event = json!({"method":"engine/event","params":{"kind":"battery","job":ctx.active_job.clone().unwrap_or_default()}});
-                if let Some((title, body)) =
-                    crate::notifications::battery_notification(&ctx, percent)
-                {
-                    if crate::notifications::should_notify(&mut ctx, &event) {
-                        let _ = app.notification().builder().title(title).body(body).show();
-                    }
+            let mut ctx = self.notification_ctx();
+            let event = json!({"method":"engine/event","params":{"kind":"battery"}});
+            let held = self
+                .inner
+                .tray_model
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .holds_awake();
+            if let Some((title, body)) = crate::notifications::battery_notification(held, percent) {
+                if crate::notifications::should_notify(&mut ctx, &event) {
+                    let _ = app.notification().builder().title(title).body(body).show();
                 }
             }
         }
@@ -590,6 +688,11 @@ pub fn job_event_requires_keep_awake(notification: &Value) -> Option<bool> {
             .map(is_running_job_state),
         _ => None,
     }
+}
+
+pub fn battery_transition(previous: Option<PowerStatus>, current: PowerStatus, held: bool) -> bool {
+    held && previous.is_some_and(|status| status.on_ac == Some(true))
+        && current.on_ac == Some(false)
 }
 
 pub(crate) fn exit_backstop_grace() -> Duration {
@@ -959,6 +1062,7 @@ pub fn format_tooltip(done: u64, total: u64, _unused: String) -> String {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct JobTrayState {
     pub job: Option<String>,
     pub project: Option<String>,
@@ -969,6 +1073,7 @@ pub struct JobTrayState {
     pub eta: Option<String>,
 }
 
+#[allow(dead_code)]
 pub fn update_tray_state(state: &mut JobTrayState, event: &Value) {
     let p = event.get("params").unwrap_or(event);
     match event.get("method").and_then(Value::as_str) {
@@ -1026,6 +1131,7 @@ pub fn update_tray_state(state: &mut JobTrayState, event: &Value) {
     }
 }
 
+#[allow(dead_code)]
 pub fn render_job_tray_state(state: &JobTrayState) -> String {
     match state.state.as_deref() {
         Some("running") | Some("starting") | Some("active") | Some("in_progress") => format!(
@@ -1051,6 +1157,7 @@ pub fn render_job_tray_state(state: &JobTrayState) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub fn format_eta(low_seconds: Option<f64>, high_seconds: Option<f64>) -> Option<String> {
     let seconds = high_seconds.or(low_seconds)?;
     if !seconds.is_finite() || seconds <= 0.0 {

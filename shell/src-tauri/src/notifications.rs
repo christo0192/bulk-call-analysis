@@ -7,10 +7,6 @@ use std::{
 #[derive(Debug)]
 pub struct NotifyCtx {
     pub project_titles: HashMap<String, String>,
-    pub progress: HashMap<String, (u64, u64)>,
-    pub active_job: Option<String>,
-    pub pause_reason: Option<String>,
-    pub states: HashMap<String, String>,
     pub previous_power: Option<crate::power::PowerStatus>,
     pub now: SystemTime,
     seen: HashMap<(String, String), SystemTime>,
@@ -20,10 +16,6 @@ impl Default for NotifyCtx {
     fn default() -> Self {
         Self {
             project_titles: HashMap::new(),
-            progress: HashMap::new(),
-            active_job: None,
-            pause_reason: None,
-            states: HashMap::new(),
             previous_power: None,
             now: SystemTime::UNIX_EPOCH,
             seen: HashMap::new(),
@@ -33,46 +25,6 @@ impl Default for NotifyCtx {
 
 fn params(event: &Value) -> &Value {
     event.get("params").unwrap_or(event)
-}
-
-pub fn observe(event: &Value, ctx: &mut NotifyCtx) {
-    let p = params(event);
-    match event.get("method").and_then(Value::as_str) {
-        Some("job/progress") => {
-            if let Some(job) = p.get("job").and_then(Value::as_str) {
-                ctx.progress.insert(
-                    job.to_owned(),
-                    (
-                        p.get("done").and_then(Value::as_u64).unwrap_or(0),
-                        p.get("total").and_then(Value::as_u64).unwrap_or(0),
-                    ),
-                );
-                if ctx.active_job.is_none() {
-                    ctx.active_job = Some(job.to_owned());
-                }
-            }
-        }
-        Some("job/state") => {
-            if let Some(job) = p.get("job").and_then(Value::as_str) {
-                let state = p.get("state").and_then(Value::as_str).unwrap_or("");
-                ctx.states.insert(job.to_owned(), state.to_owned());
-                if matches!(state, "running" | "starting" | "active" | "in_progress") {
-                    ctx.active_job = Some(job.to_owned());
-                } else if matches!(state, "done" | "done_with_issues" | "failed" | "cancelled")
-                    && ctx.active_job.as_deref() == Some(job)
-                {
-                    ctx.active_job = None;
-                }
-                if matches!(state, "running" | "starting" | "active" | "in_progress") {
-                    ctx.pause_reason = None;
-                }
-            }
-        }
-        Some("engine/event") if p.get("kind").and_then(Value::as_str) == Some("pause") => {
-            ctx.pause_reason = p.get("reason").and_then(Value::as_str).map(str::to_owned);
-        }
-        _ => {}
-    }
 }
 
 pub fn pause_reason_label(reason: &str) -> Option<&'static str> {
@@ -94,7 +46,7 @@ pub fn pause_reason_label(reason: &str) -> Option<&'static str> {
 fn relative_resume(now: SystemTime, value: Option<&Value>) -> String {
     let Some(seconds) = value.and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|n| n as i64)))
     else {
-        return "Resumes on its own when the allowance resets.".into();
+        return "Press Resume when your allowance is back.".into();
     };
     if !(946_684_800..=4_134_038_400).contains(&seconds) {
         return "Press Resume when your allowance is back.".into();
@@ -107,15 +59,10 @@ fn relative_resume(now: SystemTime, value: Option<&Value>) -> String {
     if seconds == 0 {
         return "Press Resume when your allowance is back.".into();
     }
-    let minutes = seconds.div_ceil(60);
     let time = if seconds < 60 {
         "less than a minute".into()
-    } else if minutes < 60 {
-        format!("about {minutes} min")
-    } else if minutes % 60 == 0 {
-        format!("about {} h", minutes / 60)
     } else {
-        format!("about {} h {} min", minutes / 60, minutes % 60)
+        crate::tray_model::format_duration(seconds)
     };
     format!("Starts again on its own in {time}.")
 }
@@ -178,8 +125,8 @@ pub fn notification_for(event: &Value, ctx: &NotifyCtx) -> Option<(String, Strin
     }
 }
 
-pub fn battery_notification(ctx: &NotifyCtx, percent: Option<u8>) -> Option<(String, String)> {
-    ctx.active_job.as_ref()?;
+pub fn battery_notification(held: bool, percent: Option<u8>) -> Option<(String, String)> {
+    held.then_some(())?;
     Some((
         "On battery".into(),
         percent.map_or_else(
@@ -270,25 +217,11 @@ mod tests {
             ..Default::default()
         };
         let n = notification_for(&json!({"method":"engine/event","params":{"kind":"pause","job":"j","reason":"quota","resume_at":1795000000}}), &c).unwrap();
-        assert_eq!(n.1, "Starts again on its own in about 3 h 15 min.");
+        assert_eq!(n.1, "Starts again on its own in about 3 h.");
     }
     #[test]
     fn battery_requires_active_job() {
-        assert!(battery_notification(&NotifyCtx::default(), Some(42)).is_none());
-    }
-
-    #[test]
-    fn battery_transition_toasts_once_and_hides_unknown_percent() {
-        let mut ctx = NotifyCtx::default();
-        observe(
-            &json!({"method":"job/progress","params":{"job":"j","done":1,"total":2}}),
-            &mut ctx,
-        );
-        assert_eq!(
-            battery_notification(&ctx, None).unwrap().1,
-            "On battery. Plug in to keep the job going."
-        );
-        assert!(battery_notification(&ctx, Some(42)).is_some());
+        assert!(battery_notification(false, Some(42)).is_none());
     }
 
     #[test]
@@ -373,5 +306,96 @@ mod tests {
             .unwrap();
         }
         assert_eq!(sent.len(), 1);
+    }
+
+    #[test]
+    fn maps_done_and_done_with_issues() {
+        let c = NotifyCtx::default();
+        assert_eq!(
+            notification_for(&json!({"method":"job/state","params":{"state":"done"}}), &c)
+                .unwrap()
+                .0,
+            "Job finished"
+        );
+        assert_eq!(
+            notification_for(
+                &json!({"method":"job/state","params":{"state":"done_with_issues"}}),
+                &c
+            )
+            .unwrap()
+            .0,
+            "Job finished with issues to check"
+        );
+    }
+
+    #[test]
+    fn maps_stalled() {
+        assert_eq!(
+            notification_for(
+                &json!({"method":"job/state","params":{"state":"stalled"}}),
+                &NotifyCtx::default()
+            )
+            .unwrap()
+            .1,
+            "No reply from the reader for a few minutes."
+        );
+    }
+
+    #[test]
+    fn non_notification_event_is_ignored() {
+        assert!(notification_for(
+            &json!({"method":"chat/event","params":{"text":"synthetic"}}),
+            &NotifyCtx::default()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn notifications_are_deduplicated_per_job_and_kind_within_ten_minutes() {
+        let mut c = NotifyCtx::default();
+        let event = json!({"method":"job/state","params":{"job":"j","state":"done"}});
+        assert!(should_notify(&mut c, &event));
+        assert!(!should_notify(&mut c, &event));
+        assert!(should_notify(
+            &mut c,
+            &json!({"method":"job/state","params":{"job":"other","state":"done"}})
+        ));
+        assert!(should_notify(
+            &mut c,
+            &json!({"method":"job/state","params":{"job":"j","state":"stalled"}})
+        ));
+        c.now += Duration::from_secs(601);
+        assert!(should_notify(&mut c, &event));
+    }
+
+    #[test]
+    fn quota_pause_without_a_reset_time_never_promises_a_resume() {
+        let event = json!({"method":"engine/event","params":{"kind":"pause","job":"j","reason":"quota","resume_at":null}});
+        assert_eq!(
+            notification_for(&event, &NotifyCtx::default()).unwrap().1,
+            "Press Resume when your allowance is back."
+        );
+    }
+
+    #[test]
+    fn battery_transition_toasts_once_and_hides_unknown_percent() {
+        let ac = crate::power::PowerStatus {
+            on_ac: Some(true),
+            percent: Some(80),
+        };
+        let battery = crate::power::PowerStatus {
+            on_ac: Some(false),
+            percent: None,
+        };
+        assert!(crate::engine::battery_transition(Some(ac), battery, true));
+        assert!(!crate::engine::battery_transition(
+            Some(battery),
+            battery,
+            true
+        ));
+        assert_eq!(
+            battery_notification(true, None).unwrap().1,
+            "On battery. Plug in to keep the job going."
+        );
     }
 }
