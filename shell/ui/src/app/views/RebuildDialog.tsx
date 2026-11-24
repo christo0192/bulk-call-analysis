@@ -57,6 +57,7 @@ export function RebuildDialog({
   const [pending, setPending] = useState(false);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
   const firstJob = useRef(job);
+  const hasNumberColumn = plan.outputColumns.some((column) => numeric(column.type));
   useEffect(() => {
     opener.current = document.activeElement;
     const focusFirst = requestAnimationFrame(() =>
@@ -216,24 +217,30 @@ export function RebuildDialog({
         )}
         {kind === 'threshold_group' ? (
           <>
-            <label>
-              Numeric field
-              <select value={field} onChange={(event) => setField(event.currentTarget.value)}>
-                {plan.outputColumns
-                  .filter((column) => numeric(column.type))
-                  .map((column) => (
-                    <option value={`answer.${column.name}`}>{column.name}</option>
-                  ))}
-              </select>
-            </label>
-            <label>
-              Edges
-              <input value={edges} onInput={(event) => setEdges(event.currentTarget.value)} />
-            </label>
-            <label>
-              Labels
-              <input value={labels} onInput={(event) => setLabels(event.currentTarget.value)} />
-            </label>
+            {hasNumberColumn ? (
+              <>
+                <label>
+                  Numeric field
+                  <select value={field} onChange={(event) => setField(event.currentTarget.value)}>
+                    {plan.outputColumns
+                      .filter((column) => numeric(column.type))
+                      .map((column) => (
+                        <option value={`answer.${column.name}`}>{column.name}</option>
+                      ))}
+                  </select>
+                </label>
+                <label>
+                  Edges
+                  <input value={edges} onInput={(event) => setEdges(event.currentTarget.value)} />
+                </label>
+                <label>
+                  Labels
+                  <input value={labels} onInput={(event) => setLabels(event.currentTarget.value)} />
+                </label>
+              </>
+            ) : (
+              <p class="dialog-note">Bands need a number column; this job has none.</p>
+            )}
           </>
         ) : (
           <>
@@ -260,7 +267,9 @@ export function RebuildDialog({
             </button>
           </>
         )}
-        <button onClick={addRule}>Add rule</button>
+        <button disabled={kind === 'threshold_group' && !hasNumberColumn} onClick={addRule}>
+          Add rule
+        </button>
         {error && (
           <p class="dialog-error" role="alert">
             {error}

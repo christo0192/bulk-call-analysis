@@ -45,6 +45,10 @@ const planWithRules: PlanCard = {
     },
   ],
 };
+const planWithNumberColumn: PlanCard = {
+  ...recordedPlan,
+  outputColumns: [{ name: 'score', type: 'number' }],
+};
 
 const renderDialog = (onClose = vi.fn(), currentPlan = recordedPlan) => {
   render(<RebuildDialog job="job-one" plan={currentPlan} onClose={onClose} />);
@@ -60,7 +64,7 @@ it('lists current rules and removes one', () => {
 });
 
 it('adds a bands rule and validates edges and labels', () => {
-  const dialog = renderDialog();
+  const dialog = renderDialog(vi.fn(), planWithNumberColumn);
   fireEvent.input(within(dialog).getByLabelText('Edges'), { target: { value: '10, 5' } });
   fireEvent.input(within(dialog).getByLabelText('Labels'), {
     target: { value: 'low, high, very high' },
@@ -88,6 +92,14 @@ it('adds a bands rule and validates edges and labels', () => {
       }),
     }),
   );
+});
+
+it('bands explain when there is no number column', () => {
+  const dialog = renderDialog();
+  expect(
+    within(dialog).getByText('Bands need a number column; this job has none.'),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByRole('button', { name: 'Add rule' })).toBeDisabled();
 });
 
 it('adds an in scope rule with typed values', async () => {

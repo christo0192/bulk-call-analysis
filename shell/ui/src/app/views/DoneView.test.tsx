@@ -70,6 +70,30 @@ it('open errors show plain words', async () => {
   expect(await screen.findByRole('alert')).toHaveTextContent("The app can't open that file type");
 });
 
+it('rebuild success stays visible while outputs reload', async () => {
+  let releaseOutputs!: () => void;
+  const outputsReloaded = new Promise<void>((resolve) => {
+    releaseOutputs = resolve;
+  });
+  let outputsCalls = 0;
+  mockBridge.setResponse('job/outputs', async () => {
+    outputsCalls += 1;
+    if (outputsCalls === 2) await outputsReloaded;
+    return outputsCalls === 2 ? { ...outputs, headline: 'Reloaded results' } : outputs;
+  });
+  renderDone(true);
+  await screen.findByRole('button', { name: 'Rebuild' });
+  fireEvent.click(screen.getByRole('button', { name: 'Rebuild' }));
+  // The recorded plan has no rules, so the dialog asks before rebuilding with none.
+  fireEvent.click(await screen.findByRole('button', { name: 'Rebuild without rules' }));
+  expect(await screen.findByText(/Rebuilt: results\.v2\.rebuild1\.xlsx/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Open' })).toBeInTheDocument();
+  releaseOutputs();
+  expect(await screen.findByText('Reloaded results')).toBeInTheDocument();
+  expect(screen.getByText(/Rebuilt: results\.v2\.rebuild1\.xlsx/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Open' })).toBeInTheDocument();
+});
+
 it('reconciliation lists non-zero terms and adds up', async () => {
   mockBridge.setResponse('job/outputs', async () => ({
     ...outputs,

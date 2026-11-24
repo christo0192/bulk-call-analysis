@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import { openProjectFile, openProjectFolder } from '../../engine/shellCommands';
@@ -39,10 +39,14 @@ export function DoneView({
   const [openError, setOpenError] = useState<string | null>(null);
   const [shownIssues, setShownIssues] = useState(new Set<string>());
   const [reload, setReload] = useState(0);
+  const loadedJob = useRef(id);
   useEffect(() => {
     let current = true;
-    setOutputs(null);
-    setPlan(null);
+    if (loadedJob.current !== id) {
+      setOutputs(null);
+      setPlan(null);
+      loadedJob.current = id;
+    }
     setLoadError(null);
     void bridge
       .call('job/outputs', { job: id })
