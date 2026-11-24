@@ -27,10 +27,10 @@ from .spoken_email import (
     DOMAIN_STOPS,
     FILE_ENDINGS,
     KNOWN_TLDS,
+    ORDINARY_BEFORE_AT,
     PROVIDERS,
     SPLIT_PROVIDERS,
     UPI_HANDLES,
-    find_spoken_emails,
 )
 
 
@@ -77,8 +77,8 @@ def _scan_spoken_email_tokens_legacy(text: str) -> list[Hit]:
             if (
                 left
                 and right
-                and any(c.isalpha() for c in left)
                 and any(c.isalpha() for c in right)
+                and (any(c.isalpha() for c in left) or left.isdigit())
                 and right.casefold() not in UPI_HANDLES
             ):
                 hits.append(Hit("EMAIL_LIKE", match.start(), match.end()))
@@ -89,6 +89,14 @@ def _scan_spoken_email_tokens_legacy(text: str) -> list[Hit]:
                     hits.append(Hit("EMAIL_LIKE", tokens[i - 1].start(), match.end()))
                 continue
         anchor = lower in {"at", "@"}
+        if lower == "at" and i > 0:
+            previous = tokens[i - 1].group().strip(",.;:!?)]}" + "'").casefold()
+            if (
+                previous in ORDINARY_BEFORE_AT
+                and not any(char.isdigit() or char in "._-" for char in previous)
+                and not (len(previous) == 1 and previous.isalpha())
+            ):
+                continue
         if (
             lower == "at"
             and i + 2 < len(tokens)
@@ -200,14 +208,47 @@ def _scan_spoken_email_tokens_legacy(text: str) -> list[Hit]:
                     end = candidate
                     break
         if end is not None:
-            local = i > 0 and tokens[i - 1].group().strip(",.;:!?)]}" + "'").casefold() not in DOMAIN_STOPS
-            if local:
+            has_local = (
+                i > 0 and tokens[i - 1].group().strip(",.;:!?)]}" + "'").casefold() not in DOMAIN_STOPS
+            )
+            if has_local:
                 hits.append(Hit("EMAIL_LIKE", tokens[i - 1].start(), tokens[end].end()))
+    for i, match in enumerate(tokens):
+        provider = match.group().strip(",.;:!?)]}" + "'").casefold()
+        provider_end = i
+        if i + 1 < len(tokens) and (provider, tokens[i + 1].group().casefold()) in SPLIT_PROVIDERS:
+            provider_end = i + 1
+        elif "." in provider:
+            name, _, tld = provider.partition(".")
+            if name not in PROVIDERS or tld not in KNOWN_TLDS:
+                continue
+        elif provider not in PROVIDERS:
+            continue
+        suffix_end = provider_end
+        if (
+            suffix_end + 2 < len(tokens)
+            and tokens[suffix_end + 1].group().casefold()
+            in {
+                "dot",
+                "period",
+                "point",
+            }
+            and tokens[suffix_end + 2].group().strip(",.;:!?)]}" + "'").casefold() in KNOWN_TLDS
+        ):
+            suffix_end += 2
+        elif "." not in provider:
+            continue
+        if i == 0:
+            continue
+        local_word = tokens[i - 1].group().strip(",.;:!?)]}" + "'").casefold()
+        if local_word in DOMAIN_STOPS or local_word in ORDINARY_BEFORE_AT:
+            continue
+        hits.append(Hit("EMAIL_LIKE", tokens[i - 1].start(), tokens[suffix_end].end()))
     return hits
 
 
 def _scan_spoken_email_tokens(text: str) -> list[Hit]:
-    return [Hit("EMAIL_LIKE", start, end) for start, end in find_spoken_emails(text)]
+    return _scan_spoken_email_tokens_legacy(text)
 
 
 def scan_text(

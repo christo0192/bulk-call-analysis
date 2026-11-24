@@ -77,8 +77,9 @@ def test_spoken_email_known_false_positives_still_left_alone() -> None:
 
 
 def test_accepted_over_masking_cases_are_documented() -> None:
-    assert mask_text("visit us at example dot com", MaskingContext()).text == "[EMAIL]"
-    assert mask_text("I work at amazon dot in", MaskingContext()).text == "[EMAIL]"
+    for text in ("visit us at example dot com", "I work at amazon dot in"):
+        assert mask_text(text, MaskingContext()).text == text
+        assert not any(hit.detector == "EMAIL_LIKE" for hit in scan_text(text))
 
 
 def test_leak_scan_holds_back_an_unmasked_spoken_email(tmp_path: Path) -> None:
@@ -90,8 +91,46 @@ def test_leak_scan_holds_back_an_unmasked_spoken_email(tmp_path: Path) -> None:
 
 
 def test_leak_scan_email_net_is_independent_of_the_masker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bca.mask.spoken_email.find_spoken_emails", lambda text: [])
     monkeypatch.setattr("bca.mask.patterns._spoken_email_replacements", lambda text: [])
     assert any(hit.detector == "EMAIL_LIKE" for hit in scan_text("contact ravi at the rate acme dot info"))
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "my email is ravi kumar at gmail dot com",
+        "ravi at gmail dot com",
+        "ravi@gmail",
+        "ravi at acme dot com",
+        "ravi dot kumar at the rate acme dot co dot in",
+        "r a v i at gmail dot com",
+        "ravi92 at yahoo dot in",
+        "ravi at hotmail",
+        "ravi at rediffmail dot com",
+        "ravi kumar gmail dot com",
+        "ravi gmail.com",
+        "ravi @ acme dot com",
+        "ravi at icloud dot com",
+        "ravi at ymail",
+    ),
+)
+def test_net_holds_common_forms_when_the_masker_is_broken(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    monkeypatch.setattr("bca.mask.spoken_email.find_spoken_emails", lambda value: [])
+    monkeypatch.setattr("bca.mask.patterns._spoken_email_replacements", lambda value: [])
+    assert any(hit.detector == "EMAIL_LIKE" for hit in scan_text(mask_text(text, MaskingContext()).text))
+
+
+def test_net_module_imports_no_parser_function() -> None:
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(__file__).parents[2].joinpath("src/bca/mask/leakscan.py").read_text())
+    imports = [
+        node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module == "spoken_email"
+    ]
+    assert imports
+    assert all(alias.name.isupper() for node in imports for alias in node.names)
 
 
 def test_leak_scan_email_net_ignores_placeholders() -> None:

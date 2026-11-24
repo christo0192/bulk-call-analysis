@@ -5,10 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .spoken_email import (
-    find_spoken_emails,
-    provider_replacements,
-)
+from . import spoken_email
 
 
 @dataclass(frozen=True)
@@ -81,7 +78,7 @@ def _money_spans(text: str) -> list[tuple[int, int]]:
 
 def _spoken_email_replacements(text: str) -> list[tuple[int, int]]:
     """Compatibility hook retained for callers that monkeypatch this name."""
-    return provider_replacements(text)
+    return spoken_email.provider_replacements(text)
 
 
 def _number_word_spans(text: str) -> list[tuple[int, int]]:
@@ -116,8 +113,10 @@ def apply_patterns(
 ) -> tuple[str, dict[str, int]]:
     counts: dict[str, int] = {}
     spans: list[tuple[int, int, str, str]] = []
-    email_spans = set(_spoken_email_replacements(text) + find_spoken_emails(text))
+    email_spans = set(_spoken_email_replacements(text) + spoken_email.find_spoken_emails(text))
     for start, end in email_spans:
+        if text[start:end] in allow_ids:
+            continue
         while start < end and text[start] in "(\"'":
             start += 1
         counts["EMAIL"] = counts.get("EMAIL", 0) + 1
@@ -158,8 +157,13 @@ def apply_patterns(
                 match.start() < end and match.end() > start for start, end in protected
             ):
                 continue
+            start = match.start()
+            if detector.name == "URL" and email_spans:
+                prefix = re.search(r"(?i)\blinkedin\s+is\s*$", text[:start])
+                if prefix:
+                    start = prefix.start()
             counts[detector.name] = counts.get(detector.name, 0) + 1
-            spans.append((match.start(), match.end(), detector.replacement, detector.name))
+            spans.append((start, match.end(), detector.replacement, detector.name))
     merged: list[tuple[int, int, str, str, int]] = []
     for start, end, replacement, detector_name in sorted(spans):
         if merged and start <= merged[-1][1]:

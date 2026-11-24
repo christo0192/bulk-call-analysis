@@ -35,7 +35,9 @@ KNOWN_TLDS = frozenset(
         "tech",
     }
 )
-PROVIDERS = frozenset({"gmail", "yahoo", "rediff", "outlook"})
+PROVIDERS = frozenset(
+    {"gmail", "yahoo", "rediff", "outlook", "hotmail", "rediffmail", "icloud", "ymail", "protonmail"}
+)
 SPLIT_PROVIDERS = {
     ("g", "mail"),
     ("hot", "mail"),
@@ -46,6 +48,7 @@ SPLIT_PROVIDERS = {
     ("zoho", "mail"),
     ("rediff", "mail"),
     ("yahoo", "mail"),
+    ("red", "gmail"),
 }
 UPI_HANDLES = frozenset({"okaxis", "oksbi", "okhdfcbank", "ybl", "paytm", "upi", "ibl", "icici"})
 NUMBER_WORDS = frozenset(
@@ -179,6 +182,89 @@ LOCAL_STOPS = frozenset(
         "at",
     ]
 )
+ORDINARY_BEFORE_AT = LOCAL_STOPS | frozenset(
+    [
+        "am",
+        "are",
+        "were",
+        "been",
+        "being",
+        "we",
+        "us",
+        "they",
+        "he",
+        "she",
+        "him",
+        "her",
+        "them",
+        "look",
+        "looks",
+        "looking",
+        "looked",
+        "work",
+        "works",
+        "working",
+        "worked",
+        "job",
+        "joined",
+        "join",
+        "visit",
+        "visited",
+        "visiting",
+        "saw",
+        "see",
+        "seen",
+        "check",
+        "checking",
+        "checked",
+        "available",
+        "here",
+        "there",
+        "stuck",
+        "good",
+        "bad",
+        "better",
+        "best",
+        "placed",
+        "selected",
+        "rejected",
+        "interviewed",
+        "employed",
+        "studied",
+        "study",
+        "studying",
+        "live",
+        "living",
+        "lived",
+        "stay",
+        "staying",
+        "stayed",
+        "reached",
+        "arrived",
+        "office",
+        "home",
+        "ad",
+        "ads",
+        "team",
+        "people",
+        "friend",
+        "friends",
+        "manager",
+        "hr",
+        "batches",
+        "classes",
+        "currently",
+        "now",
+        "also",
+        "still",
+        "even",
+        "only",
+        "just",
+        "recently",
+        "already",
+        "both",
+    ]
+)
 EMPLOYER_WORDS = frozenset(
     [
         "working",
@@ -305,6 +391,7 @@ class Token:
     core_start: int
     core_end: int
     value: str
+    raw_value: str
 
 
 @lru_cache(maxsize=8)
@@ -317,7 +404,14 @@ def tokenize(text: str) -> list[Token]:
         if raw[left:right].casefold().endswith("'s"):
             right -= 2
         result.append(
-            Token(match.start(), match.end(), match.start() + left, match.start() + right, raw[left:right])
+            Token(
+                match.start(),
+                match.end(),
+                match.start() + left,
+                match.start() + right,
+                raw[left:right],
+                raw,
+            )
         )
     return result
 
@@ -346,10 +440,20 @@ def _provider(tokens: list[Token], index: int) -> int | None:
     if index >= len(tokens):
         return None
     one = tokens[index].value.casefold().strip("-")
-    if index + 1 < len(tokens) and (one, tokens[index + 1].value.casefold()) in SPLIT_PROVIDERS:
-        return index + 1
-    if one in PROVIDERS or one in {"g-mail", "hotmail", "rediffmail"}:
+    if index + 1 < len(tokens):
+        second = tokens[index + 1].value.casefold()
+        if (one, second) in SPLIT_PROVIDERS:
+            return index + 1
+        if any(first == one for first, _ in SPLIT_PROVIDERS):
+            second_base, _, second_tld = second.partition(".")
+            if (one, second_base) in SPLIT_PROVIDERS and _tld(second_tld):
+                return index + 1
+    if one in PROVIDERS or one in {"g-mail"}:
         return index
+    if "." in one:
+        provider, _, _ = one.partition(".")
+        if provider in PROVIDERS and _tld(one.rsplit(".", 1)[-1]):
+            return index
     return None
 
 
@@ -363,7 +467,11 @@ def _ending(tokens: list[Token], index: int, domain_end: int, strong: bool) -> i
         return index
     if "." in value and _glued_ending(value, tokens[index], tokens, index):
         return index
-    if index + 1 < len(tokens) and tokens[index + 1].value in KNOWN_TLDS:
+    if (
+        index + 1 < len(tokens)
+        and tokens[index + 1].value in KNOWN_TLDS
+        and (tokens[index].raw_value.endswith(".") or tokens[index + 1].raw_value.startswith("."))
+    ):
         tld = tokens[index + 1].value
         if tld.islower():
             return index + 1
@@ -378,7 +486,7 @@ def _ending(tokens: list[Token], index: int, domain_end: int, strong: bool) -> i
             return next_index
         if (
             lower == "dot"
-            and 2 <= len(tld) <= 24
+            and 2 <= len(tld) <= 10
             and tld.casefold() not in NUMBER_WORDS
             and tld.casefold() not in DOMAIN_STOPS
             and tld.casefold() not in ENDING_STOPS
@@ -424,7 +532,9 @@ def _walk_local(tokens: list[Token], before: int, text: str) -> int | None:
             and not value.isdigit()
         ):
             break
-        if not value or (lower in SPEAKING_LABELS and index + 1 < len(tokens)):
+        if not value or (
+            lower in SPEAKING_LABELS and index + 1 < len(tokens) and token.raw_value.endswith(":")
+        ):
             break
         if lower in LOCAL_STOPS and not (
             index > 0 and tokens[index - 1].value.casefold() in {"dot", "underscore", "hyphen", "dash"}
@@ -489,8 +599,17 @@ def _provider_has_email_context(tokens: list[Token], index: int) -> bool:
     )
 
 
+def _speaker_start(text: str, start: int) -> int:
+    prefix = text[:start]
+    match = re.search(r"(?i)(?:^|\s)(?:lead|advisor):\s*$", prefix)
+    return match.start() if match else start
+
+
 def find_spoken_emails(text: str) -> list[tuple[int, int]]:
-    if not re.search(r"(?i)(?:@|\bat\b|\b(?:gmail|yahoo|rediff|outlook|zoho|hot|out|proton|i|y|g)\b)", text):
+    provider_words = "|".join(
+        re.escape(word) for word in sorted(PROVIDERS | {part for pair in SPLIT_PROVIDERS for part in pair})
+    )
+    if not re.search(rf"(?i)(?:@|\bat\b|\b(?:{provider_words})\b)", text):
         return []
     tokens = tokenize(text)
     spans: list[tuple[int, int]] = []
@@ -498,19 +617,34 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
         core = token.value
         if "@" in core:
             left, right = core.split("@", 1)
-            if left and right and any(c.isalpha() for c in left) and any(c.isalpha() for c in right):
+            if (
+                left
+                and right
+                and any(c.isalpha() for c in right)
+                and (any(c.isalpha() for c in left) or left.isdigit())
+            ):
                 if right.casefold() not in UPI_HANDLES:
                     end = token.core_end
                     if token.raw_end > token.core_end and i + 1 < len(tokens) and _tld(tokens[i + 1].value):
                         end = tokens[i + 1].core_end
-                    spans.append((token.core_start, end))
+                    local_candidate = _walk_local(tokens, i, text)
+                    local = token.core_start if local_candidate is None else local_candidate
+                    if (
+                        end == token.core_end
+                        and i + 2 < len(tokens)
+                        and tokens[i + 1].value.casefold() in {"dot", "period", "point"}
+                        and _tld(tokens[i + 2].value)
+                    ):
+                        end = tokens[i + 2].core_end
+                    spans.append((local, end))
                 continue
             if left and not right and i + 1 < len(tokens):
                 domain = tokens[i + 1].value
                 if (
                     _label(domain) or _glued_ending(domain, tokens[i + 1], tokens, i + 1)
                 ) and domain.casefold() not in UPI_HANDLES:
-                    local = _walk_local(tokens, i, text) or token.core_start
+                    local_candidate = _walk_local(tokens, i, text)
+                    local = token.core_start if local_candidate is None else local_candidate
                     if local is not None:
                         end = i + 1
                         if end + 1 < len(tokens) and _glued_ending(
@@ -533,6 +667,16 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
             strong = core == "@"
             if (
                 core.casefold() == "at"
+                and i > 0
+                and tokens[i - 1].value.casefold() in ORDINARY_BEFORE_AT
+                and not (
+                    any(char.isdigit() or char in "._-" for char in tokens[i - 1].value)
+                    or (len(tokens[i - 1].value) == 1 and tokens[i - 1].value.isalpha())
+                )
+            ):
+                continue
+            if (
+                core.casefold() == "at"
                 and i + 2 < len(tokens)
                 and tokens[i + 1].value.casefold() == "the"
                 and tokens[i + 2].value.casefold() == "rate"
@@ -549,6 +693,13 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
                 anchor_end, strong = i + 2, True
             elif core.casefold() == "at" and i + 1 < len(tokens) and tokens[i + 1].value.casefold() == "sign":
                 anchor_end, strong = i + 1, True
+            elif (
+                core.casefold() == "at"
+                and i + 2 < len(tokens)
+                and tokens[i + 1].value.casefold() == "the"
+                and _provider(tokens, i + 2) is not None
+            ):
+                anchor_end = i + 1
         else:
             continue
         domain_at = anchor_end + 1
@@ -580,6 +731,12 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
             if local_candidate is not None and (
                 not bare or not provider_name or end > domain_at or _bare_provider_local_ok(tokens, i)
             ):
+                if (
+                    i > 0
+                    and tokens[i - 1].value.casefold() in SPEAKING_LABELS
+                    and tokens[i - 1].raw_value.endswith(":")
+                ):
+                    local_candidate = tokens[i - 1].core_start
                 spans.append((local_candidate, tokens[end].core_end))
             continue
         domain_end = _domain_start(tokens, domain_at, strong)
@@ -624,13 +781,22 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
             continue
         local_candidate = _walk_local(tokens, i, text)
         if local_candidate is not None:
+            if (
+                i > 0
+                and tokens[i - 1].value.casefold() in SPEAKING_LABELS
+                and tokens[i - 1].raw_value.endswith(":")
+            ):
+                local_candidate = tokens[i - 1].core_start
             spans.append((local_candidate, tokens[ending].core_end))
-    return sorted(set(spans))
+    return sorted({(_speaker_start(text, start), end) for start, end in set(spans)})
 
 
 def provider_replacements(text: str) -> list[tuple[int, int]]:
     # The provider-only rule is deliberately implemented through the same token table.
-    if not re.search(r"(?i)\b(?:gmail|yahoo|rediff|outlook|zoho|hot|out|proton|i|y|g)\b", text):
+    provider_words = "|".join(
+        re.escape(word) for word in sorted(PROVIDERS | {part for pair in SPLIT_PROVIDERS for part in pair})
+    )
+    if not re.search(rf"(?i)\b(?:{provider_words})\b", text):
         return []
     tokens = tokenize(text)
     result: list[tuple[int, int]] = []
@@ -641,22 +807,70 @@ def provider_replacements(text: str) -> list[tuple[int, int]]:
         local = _walk_local(tokens, i, text)
         if local is None:
             continue
+        local_has_digit = any(char.isdigit() for char in text[local : tokens[i].core_start])
         if end + 1 < len(tokens):
             ending = _ending(tokens, end + 1, end + 1, True)
+            if (
+                ending is None
+                and end != i
+                and tokens[i].value.casefold() in {"i", "y", "g", "out", "hot", "proton"}
+                and not local_has_digit
+                and not _provider_has_email_context(tokens, i)
+            ):
+                continue
             if ending is not None:
                 end = ending
             elif (
                 tokens[end].raw_end > tokens[end].core_end and tokens[end + 1].value.casefold() in KNOWN_TLDS
             ):
                 end += 1
-            elif tokens[i].value.casefold() not in {"gmail", "yahoo", "rediff", "outlook", "zoho"} or (
-                tokens[i].value.casefold() in {"yahoo", "outlook", "zoho"}
+            elif "." in tokens[end].value and tokens[end].value.casefold().rsplit(".", 1)[-1] in KNOWN_TLDS:
+                pass
+            elif (
+                not local_has_digit
+                and tokens[i].value.casefold() in {"yahoo", "outlook", "zoho"}
                 and not _provider_has_email_context(tokens, i)
             ):
                 continue
-        elif tokens[i].value.casefold() in {"yahoo", "outlook", "zoho"} and not _provider_has_email_context(
-            tokens, i
+        elif (
+            end != i
+            and tokens[i].value.casefold() in {"i", "y", "g", "out", "hot", "proton"}
+            and not local_has_digit
+            and not _provider_has_email_context(tokens, i)
+        ):
+            continue
+        elif "." in tokens[end].value and tokens[end].value.casefold().rsplit(".", 1)[-1] in KNOWN_TLDS:
+            pass
+        elif (
+            not local_has_digit
+            and tokens[i].value.casefold() in {"yahoo", "outlook", "zoho"}
+            and not _provider_has_email_context(tokens, i)
         ):
             continue
         result.append((local, tokens[end].core_end))
-    return result
+    provider_pattern = r"(?:gmail|yahoo|rediff(?:mail)?|outlook|hotmail|icloud|ymail|protonmail|g\s*mail)"
+    for match in re.finditer(
+        rf"(?i)(?<!\w)([A-Za-z0-9][\w.'-]*)\s*(?:at[-/,]|/)[\s\"“”']*({provider_pattern})",
+        text,
+    ):
+        result.append((match.start(1), match.end(2)))
+    provider_pattern = r"(?:gmail|yahoo|rediff(?:mail)?|outlook|hotmail|icloud|ymail|protonmail|g\s*mail)"
+    ordinary = ORDINARY_BEFORE_AT
+    for match in re.finditer(
+        rf"(?i)(?<!\w)([A-Za-z0-9][\w.']*)\s*(?:at|at[-/,]|[@/])\s*[\"“”']*({provider_pattern})",
+        text,
+    ):
+        local_word = match.group(1).casefold()
+        if local_word not in ordinary or any(char.isdigit() for char in local_word):
+            result.append((match.start(1), match.end(2)))
+    for match in re.finditer(
+        rf"(?i)\[EMAIL\]\s+at\s*[\"“”']*({provider_pattern})",
+        text,
+    ):
+        result.append((match.start(), match.end(1)))
+    for match in re.finditer(
+        rf"(?i)(?<!\w)([A-Za-z0-9][\w.'-]*)-({provider_pattern})(?:\.[a-z0-9]+)*",
+        text,
+    ):
+        result.append((match.start(1), match.end()))
+    return [(_speaker_start(text, start), end) for start, end in result]
