@@ -321,4 +321,84 @@ mod tests {
         assert!(!pause_item_enabled(&model(&[state("j", "paused")])));
         assert!(!pause_item_enabled(&model(&[state("j", "done")])));
     }
+
+    #[test]
+    fn tray_texts_priority_and_limit() {
+        let running = model(&[
+            state("j", "running"),
+            progress("j"),
+            json!({"method":"engine/event","params":{"job":"j","kind":"eta","high":7140.0}}),
+        ]);
+        assert_eq!(
+            running.tooltip(),
+            "Bulk Call Analysis — Reading 10 of 20 · about 2 h left"
+        );
+        assert_eq!(
+            model(&[state("j", "running")]).tooltip(),
+            "Bulk Call Analysis — Working"
+        );
+        assert_eq!(
+            model(&[state("j", "stalled")]).tooltip(),
+            "Stalled: no reply from the reader"
+        );
+        assert_eq!(model(&[state("j", "paused")]).tooltip(), "Paused");
+        assert_eq!(
+            model(&[state("j", "paused"), pause("j", "quota")]).tooltip(),
+            "Paused (allowance limit)"
+        );
+        assert_eq!(
+            model(&[state("j", "sample_ready")]).tooltip(),
+            "Sample ready to check"
+        );
+        assert_eq!(model(&[state("j", "done")]).tooltip(), "Done");
+        assert_eq!(
+            model(&[state("j", "done_with_issues")]).tooltip(),
+            "Done, with issues to check"
+        );
+        assert_eq!(
+            model(&[state("j", "failed")]).tooltip(),
+            "Stopped: the job failed"
+        );
+
+        for (higher, lower) in [
+            ("running", "stalled"),
+            ("stalled", "paused"),
+            ("paused", "sample_ready"),
+            ("sample_ready", "done"),
+        ] {
+            let m = model(&[state("low", lower), state("high", higher)]);
+            assert!(!m.tooltip().contains(lower), "{higher} lost to {lower}");
+        }
+        let newer_paused = model(&[
+            state("old", "paused"),
+            pause("old", "user"),
+            state("new", "paused"),
+            pause("new", "quota"),
+        ]);
+        assert_eq!(newer_paused.tooltip(), "Paused (allowance limit)");
+
+        let mut events = vec![
+            state("running", "running"),
+            state("paused", "paused"),
+            state("stalled", "stalled"),
+        ];
+        for index in 0..22 {
+            events.push(state(&format!("done-{index}"), "done"));
+        }
+        let limited = model(&events);
+        assert!(limited.jobs.contains_key("running"));
+        assert!(limited.jobs.contains_key("paused"));
+        assert!(limited.jobs.contains_key("stalled"));
+        assert_eq!(
+            limited
+                .jobs
+                .values()
+                .filter(|job| finished(job.state.as_deref()))
+                .count(),
+            20
+        );
+        assert_eq!(format_number(1_234_567), "1,234,567");
+        assert_eq!(format_duration(7140), "about 2 h");
+        assert_eq!(format_duration(3660), "about 1 h");
+    }
 }

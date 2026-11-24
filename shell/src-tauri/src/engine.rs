@@ -44,6 +44,8 @@ impl HealthKill for procguard::Guard {
 struct Inner<R: Runtime> {
     app: Option<AppHandle<R>>,
     rpc: Mutex<Option<Arc<Client<tokio::process::ChildStdin>>>>,
+    #[cfg(test)]
+    test_title_rpc: Mutex<Option<Arc<Client<tokio::io::DuplexStream>>>>,
     status: Mutex<String>,
     restarts: Mutex<RestartTracker>,
     active_pid: AtomicU32,
@@ -143,6 +145,8 @@ impl<R: Runtime> Engine<R> {
             inner: Arc::new(Inner {
                 app: Some(app),
                 rpc: Mutex::new(None),
+                #[cfg(test)]
+                test_title_rpc: Mutex::new(None),
                 status: Mutex::new("starting".into()),
                 restarts: Mutex::new(RestartTracker::new()),
                 active_pid: AtomicU32::new(0),
@@ -164,6 +168,8 @@ impl<R: Runtime> Engine<R> {
             inner: Arc::new(Inner {
                 app: None,
                 rpc: Mutex::new(None),
+                #[cfg(test)]
+                test_title_rpc: Mutex::new(None),
                 status: Mutex::new("starting".into()),
                 restarts: Mutex::new(RestartTracker::new()),
                 active_pid: AtomicU32::new(0),
@@ -666,7 +672,7 @@ impl<R: Runtime> Engine<R> {
                 .project_titles
                 .contains_key(&project);
             if unknown {
-                let (notify, owner) = {
+                let (notify, owner, waiter) = {
                     let mut pending = self
                         .inner
                         .pending_title_lookups
@@ -676,10 +682,13 @@ impl<R: Runtime> Engine<R> {
                         std::collections::hash_map::Entry::Vacant(entry) => {
                             let notify = Arc::new(tokio::sync::Notify::new());
                             entry.insert(notify.clone());
-                            (notify, true)
+                            (notify, true, None)
                         }
                         std::collections::hash_map::Entry::Occupied(entry) => {
-                            (entry.get().clone(), false)
+                            let notify = entry.get().clone();
+                            let mut waiter = Box::pin(notify.clone().notified_owned());
+                            waiter.as_mut().enable();
+                            (notify, false, Some(waiter))
                         }
                     }
                 };
@@ -690,11 +699,9 @@ impl<R: Runtime> Engine<R> {
                         notify: notify.clone(),
                         armed: true,
                     };
-                    if let Ok(Ok(Value::Array(items))) = tokio::time::timeout(
-                        Duration::from_secs(10),
-                        self.call("projects/list", json!({})),
-                    )
-                    .await
+                    if let Ok(Ok(Value::Array(items))) =
+                        tokio::time::timeout(title_lookup_timeout(), self.title_projects_list())
+                            .await
                     {
                         let mut ctx = self.notification_ctx();
                         for item in items {
@@ -714,11 +721,25 @@ impl<R: Runtime> Engine<R> {
                     notify.notify_waiters();
                     lookup_guard.disarm();
                 } else {
-                    notify.notified().await;
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        waiter.expect("occupied title lookup has a waiter"),
+                    )
+                    .await;
                 }
             }
         }
         self.dispatch_notification(event).await;
+    }
+
+    async fn title_projects_list(&self) -> Result<Value, RpcError> {
+        #[cfg(test)]
+        if let Some(client) = self.inner.test_title_rpc.lock().await.clone() {
+            return client
+                .request("projects/list", json!({}), method_timeout("projects/list"))
+                .await;
+        }
+        self.call("projects/list", json!({})).await
     }
 
     async fn dispatch_notification(&self, event: Value) {
@@ -736,9 +757,12 @@ impl<R: Runtime> Engine<R> {
     }
 
     fn send_battery_notification(&self, percent: Option<u8>) {
+        self.send_battery_notification_at(percent, SystemTime::now());
+    }
+
+    fn send_battery_notification_at(&self, percent: Option<u8>, now: SystemTime) {
         if let Some(app) = &self.inner.app {
             let mut ctx = self.notification_ctx();
-            ctx.now = SystemTime::now();
             let job = self
                 .inner
                 .tray_model
@@ -754,11 +778,24 @@ impl<R: Runtime> Engine<R> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .holds_awake();
             if let Some((title, body)) = crate::notifications::battery_notification(held, percent) {
-                if crate::notifications::should_notify(&mut ctx, &event) {
+                if battery_should_notify(&mut ctx, &event, now) {
                     let _ = app.notification().builder().title(title).body(body).show();
                 }
             }
         }
+    }
+}
+
+fn battery_should_notify(ctx: &mut NotifyCtx, event: &Value, now: SystemTime) -> bool {
+    ctx.now = now;
+    crate::notifications::should_notify(ctx, event)
+}
+
+fn title_lookup_timeout() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(100)
+    } else {
+        Duration::from_secs(10)
     }
 }
 
@@ -1165,6 +1202,202 @@ mod tests {
         let mut engine = Engine::<tauri::Wry>::new_without_app();
         Arc::get_mut(&mut engine.inner).unwrap().power = KeepAwake::new(Box::new(power.clone()));
         (engine, power)
+    }
+
+    #[test]
+    fn project_title_lookup_is_coalesced_and_falls_back_to_a_job() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let engine = Engine::<tauri::Wry>::new_without_app();
+            let (client_io, mut server_io) = tokio::io::duplex(8192);
+            let client = Client::new(client_io);
+            *engine.inner.test_title_rpc.lock().await = Some(client.clone());
+            let event =
+                json!({"method":"job/state","params":{"job":"j","project":"p","state":"done"}});
+            let mut tasks = Vec::new();
+            for _ in 0..5 {
+                tasks.push(tokio::spawn({
+                    let engine = engine.clone();
+                    let event = event.clone();
+                    async move { engine.notify_event(event).await }
+                }));
+            }
+            let mut reader = tokio::io::BufReader::new(&mut server_io);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "projects/list");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(client.pending_len().await, 1);
+            assert!(tokio::time::timeout(
+                Duration::from_millis(50),
+                reader.read_line(&mut String::new())
+            )
+            .await
+            .is_err());
+            let (notifications, _) = mpsc::channel(1);
+            client
+                .dispatch(
+                    json!({"id":request["id"],"result":[{"project":"p","title":"Project title"}]}),
+                    &notifications,
+                )
+                .await;
+            for task in tasks {
+                task.await.unwrap();
+            }
+            {
+                let ctx = engine.notification_ctx();
+                assert_eq!(ctx.project_titles["p"], "Project title");
+                for _ in 0..5 {
+                    assert_eq!(
+                        crate::notifications::notification_for(&event, &ctx)
+                            .unwrap()
+                            .1,
+                        "Project title"
+                    );
+                }
+            }
+            assert_eq!(client.pending_len().await, 0);
+
+            engine.notification_ctx().project_titles.clear();
+            let (client_io, mut server_io) = tokio::io::duplex(8192);
+            let client = Client::new(client_io);
+            *engine.inner.test_title_rpc.lock().await = Some(client.clone());
+            let mut tasks = Vec::new();
+            for _ in 0..5 {
+                tasks.push(tokio::spawn({
+                    let engine = engine.clone();
+                    let event = event.clone();
+                    async move { engine.notify_event(event).await }
+                }));
+            }
+            let mut line = String::new();
+            tokio::io::AsyncBufReadExt::read_line(
+                &mut tokio::io::BufReader::new(&mut server_io),
+                &mut line,
+            )
+            .await
+            .unwrap();
+            for task in tasks {
+                task.await.unwrap();
+            }
+            assert_eq!(client.pending_len().await, 0);
+            {
+                let ctx = engine.notification_ctx();
+                assert_eq!(
+                    crate::notifications::notification_for(&event, &ctx)
+                        .unwrap()
+                        .1,
+                    "A job"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn battery_toast_repeats_after_ten_minutes() {
+        let mut ctx = NotifyCtx::default();
+        let event = json!({"method":"engine/event","params":{"job":"j","kind":"battery"}});
+        let start = SystemTime::UNIX_EPOCH;
+        assert!(battery_should_notify(&mut ctx, &event, start));
+        assert!(!battery_should_notify(
+            &mut ctx,
+            &event,
+            start + Duration::from_secs(300)
+        ));
+        assert!(battery_should_notify(
+            &mut ctx,
+            &event,
+            start + Duration::from_secs(660)
+        ));
+        assert!(!battery_should_notify(
+            &mut ctx,
+            &event,
+            start + Duration::from_secs(960)
+        ));
+    }
+
+    #[test]
+    fn seed_never_overwrites_a_known_job() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (engine, _) = test_engine();
+            engine.inner.tray_model.lock().unwrap().apply(&json!({"method":"job/state","params":{"job":"known","state":"paused"}}));
+            let (writer, mut reader) = tokio::io::duplex(4096);
+            let client = Client::new(writer);
+            let reply_client = client.clone();
+            let (notifications, _) = mpsc::channel(1);
+            let server = tokio::spawn(async move {
+                let mut line = String::new();
+                tokio::io::AsyncBufReadExt::read_line(&mut tokio::io::BufReader::new(&mut reader), &mut line).await.unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                reply_client.dispatch(json!({"id":request["id"],"result":[{"activeJob":{"job":"known","state":"running"}}]}), &notifications).await;
+            });
+            engine.seed_active_jobs(client, 0).await;
+            server.await.unwrap();
+            assert_eq!(engine.inner.tray_model.lock().unwrap().jobs["known"].state.as_deref(), Some("paused"));
+        });
+    }
+
+    #[test]
+    fn stale_seed_generation_applies_nothing() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (engine, _) = test_engine();
+            engine.inner.generation.store(2, Ordering::Release);
+            let (writer, mut reader) = tokio::io::duplex(4096);
+            let client = Client::new(writer);
+            let reply_client = client.clone();
+            let (notifications, _) = mpsc::channel(1);
+            let server = tokio::spawn(async move {
+                let mut line = String::new();
+                tokio::io::AsyncBufReadExt::read_line(&mut tokio::io::BufReader::new(&mut reader), &mut line).await.unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                reply_client.dispatch(json!({"id":request["id"],"result":[{"activeJob":{"job":"stale","state":"running"}}]}), &notifications).await;
+            });
+            engine.seed_active_jobs(client, 1).await;
+            server.await.unwrap();
+            assert!(engine.inner.tray_model.lock().unwrap().jobs.is_empty());
+        });
+    }
+
+    #[test]
+    fn title_lookup_waiters_register_before_pending_is_released() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let pending = Arc::new(StdMutex::new(std::collections::HashMap::new()));
+            let notify = Arc::new(tokio::sync::Notify::new());
+            pending.lock().unwrap().insert("p".into(), notify.clone());
+            let waiter = {
+                let _guard = pending.lock().unwrap();
+                let mut waiter = Box::pin(notify.clone().notified_owned());
+                waiter.as_mut().enable();
+                waiter
+            };
+            pending.lock().unwrap().remove("p");
+            notify.notify_waiters();
+            tokio::time::timeout(Duration::from_secs(10), waiter)
+                .await
+                .expect("enabled waiter missed notify");
+
+            let notify = Arc::new(tokio::sync::Notify::new());
+            pending.lock().unwrap().insert("p".into(), notify.clone());
+            let waiter = {
+                let _guard = pending.lock().unwrap();
+                let mut waiter = Box::pin(notify.clone().notified_owned());
+                waiter.as_mut().enable();
+                waiter
+            };
+            drop(TitleLookupGuard {
+                pending: pending.clone(),
+                project: "p".into(),
+                notify: notify.clone(),
+                armed: true,
+            });
+            tokio::time::timeout(Duration::from_secs(10), waiter)
+                .await
+                .expect("guard drop missed notify");
+        });
     }
 
     #[test]

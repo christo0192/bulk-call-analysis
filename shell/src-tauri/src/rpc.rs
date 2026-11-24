@@ -86,6 +86,11 @@ pub struct Client<W> {
 }
 
 impl<W: AsyncWrite + Unpin + Send + 'static> Client<W> {
+    #[cfg(test)]
+    pub(crate) async fn pending_len(&self) -> usize {
+        self.pending.lock().await.len()
+    }
+
     pub fn new(writer: W) -> Arc<Self> {
         Self::with_write_timeout(writer, DEFAULT_WRITE_TIMEOUT)
     }
@@ -352,6 +357,36 @@ mod tests {
                 Err(RpcError::Timeout)
             ));
             assert!(client.pending.lock().await.is_empty());
+        });
+    }
+
+    #[test]
+    fn dropped_request_frees_its_pending_id() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, mut server_io) = tokio::io::duplex(1024);
+            let client = Client::new(client_io);
+            let server = tokio::spawn(async move {
+                let mut line = String::new();
+                BufReader::new(&mut server_io)
+                    .read_line(&mut line)
+                    .await
+                    .unwrap();
+            });
+            let _ = tokio::time::timeout(
+                Duration::from_millis(50),
+                client.request("slow", json!({}), Duration::from_secs(30)),
+            )
+            .await;
+            server.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while client.pending_len().await != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("dropped request remained pending");
+            assert_eq!(client.pending_len().await, 0);
         });
     }
 

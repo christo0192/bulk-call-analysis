@@ -227,9 +227,6 @@ async fn projects_root<R: tauri::Runtime>(
     engine: &Engine<R>,
     project: &str,
 ) -> Result<PathBuf, CommandError> {
-    if !valid_project_slug(project) {
-        return Err(path_error(paths::OpenError::InvalidSlug));
-    }
     let status = engine
         .call("app/status", json!({}))
         .await
@@ -238,11 +235,8 @@ async fn projects_root<R: tauri::Runtime>(
         .get("dataDir")
         .and_then(Value::as_str)
         .ok_or_else(malformed_engine_reply)?;
-    let data_dir = PathBuf::from(data_dir);
+    let data_dir = validate_project_request(project, PathBuf::from(data_dir))?;
     let projects = data_dir.join("projects");
-    if data_dir.as_os_str().is_empty() || paths::is_unsafe_path(&data_dir) {
-        return Err(path_error(paths::OpenError::InvalidPath));
-    }
     let root =
         dunce::canonicalize(&projects).map_err(|_| path_error(paths::OpenError::FileNotFound))?;
     let project_dir = dunce::canonicalize(root.join(project))
@@ -253,6 +247,16 @@ async fn projects_root<R: tauri::Runtime>(
     Ok(project_dir)
 }
 
+fn validate_project_request(project: &str, data_dir: PathBuf) -> Result<PathBuf, CommandError> {
+    if !valid_project_slug(project) {
+        return Err(path_error(paths::OpenError::InvalidSlug));
+    }
+    if data_dir.as_os_str().is_empty() || paths::is_unsafe_path(&data_dir) {
+        return Err(path_error(paths::OpenError::InvalidPath));
+    }
+    Ok(data_dir)
+}
+
 #[tauri::command]
 async fn open_project_file(
     app: tauri::AppHandle,
@@ -260,9 +264,6 @@ async fn open_project_file(
     project: String,
     name: String,
 ) -> Result<(), CommandError> {
-    if !valid_project_slug(&project) {
-        return Err(path_error(paths::OpenError::InvalidSlug));
-    }
     let result = engine
         .call("files/path", json!({"project": project, "name": name}))
         .await
@@ -464,8 +465,8 @@ fn start_shutdown(app: tauri::AppHandle) -> bool {
 mod tests {
     use super::{
         exit_action, handle_exit, handle_tray_quit, is_allowed_project_file,
-        method_not_allowed_error, run_event_action, ui_method_allowed, CommandError, Engine,
-        ExitAction, RunEventAction, SHUTDOWN_STARTED,
+        method_not_allowed_error, run_event_action, ui_method_allowed, validate_project_request,
+        CommandError, Engine, ExitAction, RunEventAction, SHUTDOWN_STARTED,
     };
     use crate::rpc::RpcError;
     use serde_json::json;
@@ -494,11 +495,26 @@ mod tests {
 
     #[test]
     fn open_project_folder_rejects_bad_slugs_unc_and_device_paths() {
-        assert!(!super::valid_project_slug("Bad Project"));
-        assert!(!super::valid_project_slug("bad"));
-        for value in ["//host/share", r"\\?\C:\projects", r"\\.\C:\projects"] {
-            assert!(crate::paths::is_unsafe_path(std::path::Path::new(value)));
+        let mut opener_called = false;
+        for project in ["Bad Project", "bad", "bad_project"] {
+            let error = validate_project_request(project, std::path::PathBuf::from("safe"))
+                .inspect(|_| opener_called = true)
+                .unwrap_err();
+            assert_eq!(error.data, Some(json!({"reason":"invalid_slug"})));
         }
+        for value in [
+            "//host/share",
+            r"\\?\C:\projects",
+            r"\\.\C:\projects",
+            r"\??\C:\projects",
+            "//?/",
+        ] {
+            let error = validate_project_request("project", std::path::PathBuf::from(value))
+                .inspect(|_| opener_called = true)
+                .unwrap_err();
+            assert_eq!(error.data, Some(json!({"reason":"outside_project"})));
+        }
+        assert!(!opener_called);
     }
 
     #[test]
