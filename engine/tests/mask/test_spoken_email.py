@@ -9,6 +9,8 @@ import pytest
 from bca.mask.leakscan import scan_lead, scan_text
 from bca.mask.masker import MaskingContext, mask_text
 
+NET_ALONE = json.loads((Path(__file__).parent / "email_net_alone.json").read_text(encoding="utf-8"))
+
 
 def test_spoken_work_email_is_masked() -> None:
     expected = {
@@ -96,25 +98,7 @@ def test_leak_scan_email_net_is_independent_of_the_masker(monkeypatch: pytest.Mo
     assert any(hit.detector == "EMAIL_LIKE" for hit in scan_text("contact ravi at the rate acme dot info"))
 
 
-@pytest.mark.parametrize(
-    "text",
-    (
-        "my email is ravi kumar at gmail dot com",
-        "ravi at gmail dot com",
-        "ravi@gmail",
-        "ravi at acme dot com",
-        "ravi dot kumar at the rate acme dot co dot in",
-        "r a v i at gmail dot com",
-        "ravi92 at yahoo dot in",
-        "ravi at hotmail",
-        "ravi at rediffmail dot com",
-        "ravi kumar gmail dot com",
-        "ravi gmail.com",
-        "ravi @ acme dot com",
-        "ravi at icloud dot com",
-        "ravi at ymail",
-    ),
-)
+@pytest.mark.parametrize("text", NET_ALONE)
 def test_net_holds_common_forms_when_the_masker_is_broken(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
     monkeypatch.setattr("bca.mask.spoken_email.find_spoken_emails", lambda value: [])
     monkeypatch.setattr("bca.mask.patterns._spoken_email_replacements", lambda value: [])

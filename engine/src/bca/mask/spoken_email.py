@@ -180,6 +180,15 @@ LOCAL_STOPS = frozenset(
         "official",
         "contact",
         "at",
+        "the",
+        "a",
+        "an",
+        "your",
+        "his",
+        "her",
+        "their",
+        "our",
+        "this",
     ]
 )
 ORDINARY_BEFORE_AT = LOCAL_STOPS | frozenset(
@@ -264,6 +273,48 @@ ORDINARY_BEFORE_AT = LOCAL_STOPS | frozenset(
         "recently",
         "already",
         "both",
+        "call",
+        "applied",
+        "applying",
+        "enrolled",
+        "enroll",
+        "registered",
+        "signed",
+        "posted",
+        "listed",
+        "found",
+        "read",
+        "watched",
+        "practiced",
+        "practice",
+        "practicing",
+        "solved",
+        "solving",
+        "learning",
+        "learned",
+        "learnt",
+        "certified",
+        "course",
+        "courses",
+        "review",
+        "reviews",
+        "batch",
+        "training",
+        "trained",
+        "internship",
+        "interview",
+        "interviews",
+        "round",
+        "rounds",
+        "opening",
+        "openings",
+        "profile",
+        "account",
+        "hired",
+        "hiring",
+        "met",
+        "meet",
+        "meeting",
     ]
 )
 EMPLOYER_WORDS = frozenset(
@@ -499,6 +550,7 @@ def _ending(tokens: list[Token], index: int, domain_end: int, strong: bool) -> i
         if lower == "dot":
             position = next_index
             found = False
+            letters = 0
             while position < len(tokens):
                 group_start = position
                 while (
@@ -510,10 +562,11 @@ def _ending(tokens: list[Token], index: int, domain_end: int, strong: bool) -> i
                 if position == group_start:
                     break
                 found = True
+                letters += position - group_start
                 if position >= len(tokens) or tokens[position].value.casefold() != "dot":
-                    return position - 1
+                    return position - 1 if letters >= 2 else None
                 position += 1
-            if found:
+            if found and letters >= 2:
                 return position - 1
     return None
 
@@ -537,11 +590,15 @@ def _walk_local(tokens: list[Token], before: int, text: str, glued: bool = False
             lower in SPEAKING_LABELS and index + 1 < len(tokens) and token.raw_value.endswith(":")
         ):
             break
-        if lower in LOCAL_STOPS and not (
-            index > 0 and tokens[index - 1].value.casefold() in {"dot", "underscore", "hyphen", "dash"}
+        if (
+            lower in LOCAL_STOPS
+            and not (len(value) == 1 and value.isalpha())
+            and not (
+                index > 0 and tokens[index - 1].value.casefold() in {"dot", "underscore", "hyphen", "dash"}
+            )
         ):
             break
-        if glued and lower in ORDINARY_BEFORE_AT:
+        if lower in ORDINARY_BEFORE_AT and not (len(value) == 1 and value.isalpha()):
             break
         if not _LOCAL_WORD.fullmatch(value):
             break
@@ -555,7 +612,7 @@ def _walk_local(tokens: list[Token], before: int, text: str, glued: bool = False
                 break
             words += 1
         accepted += 1
-        start = token.core_start
+        start = token.raw_start if token.raw_value.startswith("[") else token.core_start
     return start if accepted else None
 
 
@@ -615,14 +672,7 @@ def _provider_has_email_context(tokens: list[Token], index: int) -> bool:
     )
 
 
-def _speaker_start(text: str, start: int, end: int) -> int:
-    prefix_start = max(0, start - 10)
-    match = re.search(r"(?i)(?:^|\s)(?:lead|advisor):\s*$", text[prefix_start:start])
-    if not match:
-        return start
-    provider_words = PROVIDERS | {part for pair in SPLIT_PROVIDERS for part in pair}
-    if re.search(rf"(?i)\b(?:{'|'.join(re.escape(word) for word in provider_words)})\b", text[start:end]):
-        return start - (start - prefix_start - match.start())
+def _speaker_start(_text: str, start: int, _end: int) -> int:
     return start
 
 
@@ -688,9 +738,21 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
                 continue
         anchor_end = i
         strong = False
-        if core.casefold() in {"@", "at"}:
+        if core.casefold() in {"@", "at"} or (
+            core.casefold() in {"the", "d"}
+            and i + 1 < len(tokens)
+            and tokens[i + 1].value.casefold() == "rate"
+        ):
             strong = core == "@"
             if (
+                core.casefold() in {"the", "d"}
+                and i + 1 < len(tokens)
+                and tokens[i + 1].value.casefold() == "rate"
+            ):
+                anchor_end, strong = i + 1, True
+                if anchor_end + 1 < len(tokens) and tokens[anchor_end + 1].value.casefold() == "of":
+                    anchor_end += 1
+            elif (
                 core.casefold() == "at"
                 and i > 0
                 and tokens[i - 1].value.casefold() in ORDINARY_BEFORE_AT
@@ -707,6 +769,10 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
                 and tokens[i + 2].value.casefold() == "rate"
             ):
                 anchor_end, strong = i + 2, True
+                if anchor_end + 1 < len(tokens) and tokens[anchor_end + 1].value.casefold() == "of":
+                    anchor_end += 1
+            elif core.casefold() == "at" and i + 1 < len(tokens) and tokens[i + 1].value.casefold() == "rate":
+                anchor_end, strong = i + 1, True
                 if anchor_end + 1 < len(tokens) and tokens[anchor_end + 1].value.casefold() == "of":
                     anchor_end += 1
             elif (
@@ -748,6 +814,10 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
                 end + 1 < len(tokens)
                 and tokens[end + 1].value.casefold() in KNOWN_TLDS
                 and text[tokens[end].core_end : tokens[end].raw_end].startswith(".")
+            ) or (
+                end + 1 < len(tokens)
+                and tokens[end + 1].value.casefold().startswith(".")
+                and _tld(tokens[end + 1].value[1:])
             ):
                 end += 1
             local_candidate = _walk_local(tokens, i, text)
@@ -804,7 +874,7 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
     return sorted({(_speaker_start(text, start, end), end) for start, end in set(spans)})
 
 
-def provider_replacements(text: str) -> list[tuple[int, int]]:
+def _provider_replacements_legacy(text: str) -> list[tuple[int, int]]:
     # The provider-only rule is deliberately implemented through the same token table.
     provider_words = "|".join(
         re.escape(word) for word in sorted(PROVIDERS | {part for pair in SPLIT_PROVIDERS for part in pair})
@@ -876,14 +946,31 @@ def provider_replacements(text: str) -> list[tuple[int, int]]:
         local_word = match.group(1).casefold()
         if local_word not in ordinary or any(char.isdigit() for char in local_word):
             result.append((match.start(1), match.end(2)))
+    tld_pattern = "|".join(sorted(KNOWN_TLDS, key=len, reverse=True))
+    for match in re.finditer(
+        rf"(?i)(?<![\w.'-])([A-Za-z0-9][\w.'-]*)\s*(?:at|at[-/,]|[@/])\s*"
+        rf"({provider_pattern})\s+(?:dot|period|point)\s+(?:{tld_pattern})\b",
+        text,
+    ):
+        result.append((match.start(1), match.end()))
     for match in re.finditer(
         rf"(?i)\[EMAIL\]\s+at\s*[\"“”']*({provider_pattern})",
         text,
     ):
         result.append((match.start(), match.end(1)))
     for match in re.finditer(
-        rf"(?i)(?<!\w)([A-Za-z0-9][\w.'-]*)-({provider_pattern})(?:\.[a-z0-9]+)*",
+        rf"(?i)(?<![\w.'-])([A-Za-z0-9][\w.'-]*)-({provider_pattern})(?:\.[a-z0-9]+)*",
         text,
     ):
         result.append((match.start(1), match.end()))
     return [(_speaker_start(text, start, end), end) for start, end in result]
+
+
+def provider_replacements(text: str) -> list[tuple[int, int]]:
+    # Avoid handing a token with unbounded internal punctuation to the legacy
+    # fallback regexes; their token-list path has no useful match in this case.
+    if any(
+        len(token.value) > 1024 and any(char in token.value for char in ".-' ") for token in tokenize(text)
+    ):
+        return []
+    return _provider_replacements_legacy(text)

@@ -25,8 +25,10 @@ from .patterns import (
 )
 from .spoken_email import (
     DOMAIN_STOPS,
+    ENDING_STOPS,
     FILE_ENDINGS,
     KNOWN_TLDS,
+    NUMBER_WORDS,
     ORDINARY_BEFORE_AT,
     PROVIDERS,
     SPLIT_PROVIDERS,
@@ -97,7 +99,12 @@ def _scan_spoken_email_tokens_legacy(text: str) -> list[Hit]:
                 and not (len(previous) == 1 and previous.isalpha())
             ):
                 continue
-        if (
+        if lower in {"the", "d"} and i + 1 < len(tokens) and tokens[i + 1].group().casefold() == "rate":
+            anchor = True
+            i_end = i + 1
+            if i_end + 1 < len(tokens) and tokens[i_end + 1].group().casefold() == "of":
+                i_end += 1
+        elif (
             lower == "at"
             and i + 2 < len(tokens)
             and tokens[i + 1].group().casefold() in {"the", "d"}
@@ -105,6 +112,13 @@ def _scan_spoken_email_tokens_legacy(text: str) -> list[Hit]:
         ):
             anchor = True
             i_end = i + 2
+            if i_end + 1 < len(tokens) and tokens[i_end + 1].group().casefold() == "of":
+                i_end += 1
+        elif lower == "at" and i + 1 < len(tokens) and tokens[i + 1].group().casefold() == "rate":
+            anchor = True
+            i_end = i + 1
+            if i_end + 1 < len(tokens) and tokens[i_end + 1].group().casefold() == "of":
+                i_end += 1
         elif lower == "at" and i + 1 < len(tokens) and tokens[i + 1].group().casefold() == "sign":
             anchor, i_end = True, i + 1
         else:
@@ -121,14 +135,21 @@ def _scan_spoken_email_tokens_legacy(text: str) -> list[Hit]:
         split_provider = (
             start + 1 < len(tokens) and (first, tokens[start + 1].group().casefold()) in SPLIT_PROVIDERS
         )
-        if first in PROVIDERS or split_provider:
+        first_base, first_dot, first_tld = first.partition(".")
+        glued_domain = bool(
+            first_dot
+            and first_base.isalnum()
+            and first_tld.split(".")[-1] in KNOWN_TLDS
+            and all(part.isalnum() for part in first.split("."))
+        )
+        if first in PROVIDERS or split_provider or glued_domain:
             provider_end = start + 1 if split_provider else start
         end = provider_end
         if end is None:
             limit = 4
             for candidate in range(start + 1, min(len(tokens), start + limit + 1)):
                 word = tokens[candidate - 1].group().strip(",.;:!?)]}" + "'").casefold()
-                if word in DOMAIN_STOPS or word.isdigit():
+                if word in DOMAIN_STOPS and word not in NUMBER_WORDS:
                     break
                 marker = (
                     tokens[candidate].group().strip(",.;:!?)]}" + "'").casefold()
@@ -152,14 +173,42 @@ def _scan_spoken_email_tokens_legacy(text: str) -> list[Hit]:
                         or tokens[candidate - 1].group().casefold() in {"dot", "period", "point"}
                     ):
                         continue
-                if marker == "dot" and tld_word.casefold() in FILE_ENDINGS:
+                    if marker != "com" and candidate + 1 < len(tokens):
+                        following = tokens[candidate + 1].group().strip(",.;:!?)]}" + "'").casefold()
+                        if (
+                            following
+                            and following not in KNOWN_TLDS
+                            and not following.startswith((".", ",", ";", ":"))
+                        ):
+                            continue
+                    if (
+                        tokens[candidate - 1].group().casefold() in {"dot", "period", "point"}
+                        and candidate > 1
+                        and tokens[candidate - 2].group().casefold() in NUMBER_WORDS
+                    ):
+                        continue
+                if marker == "dot" and (
+                    tld_word.casefold() in FILE_ENDINGS
+                    or tld_word.casefold() in ENDING_STOPS
+                    or len(tld_word) == 1
+                    or tld_word.casefold() == "dot"
+                ):
                     continue
                 if marker in {"dot", "period", "point", "full"} and candidate + 1 < len(tokens):
+                    if not tld_word.isalpha() or tld_word.casefold() in NUMBER_WORDS:
+                        continue
                     after = (
                         tokens[candidate + 2].group().strip(",.;:!?)]}" + "'").casefold()
                         if candidate + 2 < len(tokens)
                         else ""
                     )
+                    if (
+                        tld_word.casefold() != "com"
+                        and not tokens[candidate + 1].group().startswith(".")
+                        and not tokens[candidate].group().rstrip().endswith(".")
+                        and after
+                    ):
+                        continue
                     if tld_word.casefold() != "com" and after in {
                         "developer",
                         "framework",
@@ -208,9 +257,8 @@ def _scan_spoken_email_tokens_legacy(text: str) -> list[Hit]:
                     end = candidate
                     break
         if end is not None:
-            has_local = (
-                i > 0 and tokens[i - 1].group().strip(",.;:!?)]}" + "'").casefold() not in DOMAIN_STOPS
-            )
+            local_word = tokens[i - 1].group().strip(",.;:!?)]}" + "'").casefold() if i > 0 else ""
+            has_local = i > 0 and (local_word not in DOMAIN_STOPS or local_word in NUMBER_WORDS)
             if has_local:
                 hits.append(Hit("EMAIL_LIKE", tokens[i - 1].start(), tokens[end].end()))
     for i, match in enumerate(tokens):
@@ -241,7 +289,9 @@ def _scan_spoken_email_tokens_legacy(text: str) -> list[Hit]:
         if i == 0:
             continue
         local_word = tokens[i - 1].group().strip(",.;:!?)]}" + "'").casefold()
-        if local_word in DOMAIN_STOPS or local_word in ORDINARY_BEFORE_AT:
+        if (
+            local_word in DOMAIN_STOPS and local_word not in NUMBER_WORDS
+        ) or local_word in ORDINARY_BEFORE_AT:
             continue
         hits.append(Hit("EMAIL_LIKE", tokens[i - 1].start(), tokens[suffix_end].end()))
     return hits

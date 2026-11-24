@@ -5253,5 +5253,785 @@
   "kind": "ordinary",
   "text": "Lead: I stayed at home for a period of six months",
   "main": "Lead: I stayed at home for a period of six months"
+ },
+ {
+  "kind": "address",
+  "text": "Lead: yes, it's a n k i t dot s h a h at gmail dot com",
+  "main": "Lead: yes, it's [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "my personal id is sneha.p1990 at gmail dot com, office one I will share later",
+  "main": "my personal id is [EMAIL], office one I will share later"
+ },
+ {
+  "kind": "address",
+  "text": "it is karthik underscore r at outlook dot in",
+  "main": "it is [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "mail me at rohit hyphen jain at yahoo dot co dot in",
+  "main": "mail me [EMAIL] dot in"
+ },
+ {
+  "kind": "address",
+  "text": "yeah note it down, pallavi at the rate rediffmail dot com",
+  "main": "yeah note it [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "my email is deepa nair at infosys dot com, ok?",
+  "main": "my email is deepa nair at infosys dot com, ok?"
+ },
+ {
+  "kind": "address",
+  "text": "the id is abhishek nine eight at gmail dot com",
+  "main": "the id is [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "suresh.k@zoho.in is my official one",
+  "main": "[EMAIL] is my official one"
+ },
+ {
+  "kind": "address",
+  "text": "my mail id: tanvi dot m at hotmail dot com",
+  "main": "my mail [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "Lead: kavya at the rate gmail dot com. Advisor: thank you",
+  "main": "[EMAIL]. Advisor: thank you"
+ },
+ {
+  "kind": "address",
+  "text": "ramesh at capgemini dot com is my work email",
+  "main": "ramesh at capgemini dot com is my work email"
+ },
+ {
+  "kind": "address",
+  "text": "my email is nikhil k at g mail dot com",
+  "main": "my email is [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "it's anand22 at yahoo",
+  "main": "it's [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "send to rakesh dot verma at hcl dot com please",
+  "main": "send to rakesh dot verma at hcl dot com please"
+ },
+ {
+  "kind": "address",
+  "text": "my gmail is manish sharma 1 9 9 5 at gmail dot com",
+  "main": "my gmail is [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "sana at the rate of outlook dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "it's vijay at iitb dot ac dot in",
+  "main": "it's vijay at iitb dot ac dot in"
+ },
+ {
+  "kind": "address",
+  "text": "my id is ajay at rate gmail dot com",
+  "main": "my id is [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "email is lakshmi at gmail dot c o m",
+  "main": "email is [EMAIL] dot c o m"
+ },
+ {
+  "kind": "address",
+  "text": "write it down sir, s u n i l at yahoo dot in",
+  "main": "write it down sir, [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "pradeep dot nair at gmail dot com is the right one",
+  "main": "[EMAIL] is the right one"
+ },
+ {
+  "kind": "address",
+  "text": "it's Meera at Gmail dot com",
+  "main": "it's [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "My email is Rahul.Mehta at Gmail.com",
+  "main": "My email is [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ID is gaurav underscore 07 at gmail dot com",
+  "main": "ID is [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "you can mail on rohan at accenture dot com",
+  "main": "you can mail on rohan at accenture dot com"
+ },
+ {
+  "kind": "address",
+  "text": "it is divya at the rate of gmail dot com only",
+  "main": "it is [EMAIL] only"
+ },
+ {
+  "kind": "address",
+  "text": "farhan khan at hotmail dot co dot uk",
+  "main": "[EMAIL] dot uk"
+ },
+ {
+  "kind": "address",
+  "text": "my email address is varun at protonmail dot com",
+  "main": "my email address is [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "it's sameer at gmail.com.",
+  "main": "it's [EMAIL]."
+ },
+ {
+  "kind": "address",
+  "text": "mail id swati bansal gmail dot com",
+  "main": "mail id [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "my email id is mohit 2 0 0 1 at the rate gmail dot com",
+  "main": "my email id is [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "itsme.arun at gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "it is priya at wipro dot com. Advisor: okay",
+  "main": "it is priya at wipro dot com. Advisor: okay"
+ },
+ {
+  "kind": "address",
+  "text": "Lead: my id is jatin.arora@gmail.com Advisor: got it",
+  "main": "Lead: my id is [EMAIL] Advisor: got it"
+ },
+ {
+  "kind": "address",
+  "text": "it's kunal at the rate gmail dot com, k u n a l",
+  "main": "it's [EMAIL], k u n a l"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at gmail.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at yahoo.co.in",
+  "main": "[EMAIL].in"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at hotmail.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate of gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi nine eight at gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi kumar at gmail dot co dot in",
+  "main": "[EMAIL] dot in"
+ },
+ {
+  "kind": "address",
+  "text": "ravi.kumar at gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi_kumar at gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at g mail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi@gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate gmail.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at outlook dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at yahoo dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at gmail",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi one two at gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi 98 at gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate of acme dot com",
+  "main": "ravi at the rate of acme dot com"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at acme.com",
+  "main": "ravi at acme.com"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at acme.co.in",
+  "main": "ravi at acme.co.in"
+ },
+ {
+  "kind": "address",
+  "text": "Ravi at Gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "my email is ravi at gmail.com",
+  "main": "my email is [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "it's ravi sharma at yahoo.com",
+  "main": "it's [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at Gmail.Com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at gmail.co.in",
+  "main": "[EMAIL].in"
+ },
+ {
+  "kind": "address",
+  "text": "ravi kumar at the rate of gmail.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi nine eight at the rate of gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "Ravi98 at Gmail.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at gmail .com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate of yahoo.co.in",
+  "main": "[EMAIL].in"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate of g mail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate of hotmail.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at acme.com.",
+  "main": "ravi at acme.com."
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate of acme.co.in",
+  "main": "ravi at the rate of acme.co.in"
+ },
+ {
+  "kind": "address",
+  "text": "ravi nine eight at gmail.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate of outlook.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate of rediffmail.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at gmail.com, ok?",
+  "main": "[EMAIL], ok?"
+ },
+ {
+  "kind": "address",
+  "text": "Lead: ravi at gmail.com Advisor: ok",
+  "main": "[EMAIL] Advisor: ok"
+ },
+ {
+  "kind": "address",
+  "text": "ravi one two three at gmail.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate of acme dot co dot in",
+  "main": "ravi at the rate of acme dot co dot in"
+ },
+ {
+  "kind": "address",
+  "text": "my email is ravi at the rate of gmail",
+  "main": "my email is [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate of icloud.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi sharma at hotmail.co.in",
+  "main": "[EMAIL].in"
+ },
+ {
+  "kind": "address",
+  "text": "it's r a v i at gmail.com",
+  "main": "it's [EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate gmail",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at gmail dot com dot",
+  "main": "[EMAIL] dot"
+ },
+ {
+  "kind": "address",
+  "text": "ravi dot kumar at the rate of gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at gmail.c o m",
+  "main": "[EMAIL].c o m"
+ },
+ {
+  "kind": "address",
+  "text": "ravi 1 2 3 at the rate of gmail.com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the rate of the gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at the gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "address",
+  "text": "ravi at rate of gmail dot com",
+  "main": "[EMAIL]"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I am at Infosys. In my team we use Python and SQL.",
+  "main": "I am at Infosys. In my team we use Python and SQL."
+ },
+ {
+  "kind": "ordinary",
+  "text": "my cousin at TCS. in fact he referred me to this program",
+  "main": "my cousin at TCS. in fact he referred me to this program"
+ },
+ {
+  "kind": "ordinary",
+  "text": "my cousin at Accenture. com- communication there is very formal",
+  "main": "my cousin at Accenture. com- communication there is very formal"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Lead: I was at Wipro. In 2019 I moved to Bangalore.",
+  "main": "Lead: I was at Wipro. In 2019 I moved to Bangalore."
+ },
+ {
+  "kind": "ordinary",
+  "text": "we met at Starbucks dot dot dot and then he told me about IK",
+  "main": "we met at Starbucks dot dot dot and then he told me about IK"
+ },
+ {
+  "kind": "ordinary",
+  "text": "the website is learnhub dot com, I checked the reviews there",
+  "main": "the website is learnhub dot com, I checked the reviews there"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I saw the fees on your site, learnhub dot com, it was high",
+  "main": "I saw the fees on your site, learnhub dot com, it was high"
+ },
+ {
+  "kind": "ordinary",
+  "text": "my score was seven point five in IELTS",
+  "main": "my score was seven point five in IELTS"
+ },
+ {
+  "kind": "ordinary",
+  "text": "my CGPA is eight point two",
+  "main": "my CGPA is eight point two"
+ },
+ {
+  "kind": "ordinary",
+  "text": "the salary hike was twenty point five percent",
+  "main": "the salary hike was twenty point five percent"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Python 3 point 10 is what we use at work",
+  "main": "Python 3 point 10 is what we use at work"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Advisor: so you are at Amazon right now? Lead: yes, at Amazon.",
+  "main": "Advisor: so you are at Amazon right now? Lead: yes, at Amazon."
+ },
+ {
+  "kind": "ordinary",
+  "text": "Lead: I am a QA at Cognizant. Advisor: okay.",
+  "main": "Lead: I am a QA at Cognizant. Advisor: okay."
+ },
+ {
+  "kind": "ordinary",
+  "text": "my manager at Deloitte. I mean he is not supportive.",
+  "main": "my manager at Deloitte. I mean he is not supportive."
+ },
+ {
+  "kind": "ordinary",
+  "text": "my brother at Google said the course is good",
+  "main": "my brother at Google said the course is good"
+ },
+ {
+  "kind": "ordinary",
+  "text": "my sister at Microsoft in Hyderabad suggested this",
+  "main": "my sister at Microsoft in Hyderabad suggested this"
+ },
+ {
+  "kind": "ordinary",
+  "text": "a friend at Flipkart. He cleared the interview.",
+  "main": "a friend at Flipkart. He cleared the interview."
+ },
+ {
+  "kind": "ordinary",
+  "text": "my colleague at Zoho. com- compensation there is less",
+  "main": "my colleague at Zoho. com- compensation there is less"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I studied at NIT Warangal and co founded a startup",
+  "main": "I studied at NIT Warangal and co founded a startup"
+ },
+ {
+  "kind": "ordinary",
+  "text": "the session at 7 pm is fine for me",
+  "main": "the session at 7 pm is fine for me"
+ },
+ {
+  "kind": "ordinary",
+  "text": "call me at 6 in the evening",
+  "main": "call me at 6 in the evening"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Lead: ok. Advisor: we start at 9 30 on Saturday.",
+  "main": "Lead: ok. Advisor: we start at 9 30 on Saturday."
+ },
+ {
+  "kind": "ordinary",
+  "text": "my teammate at Paytm. in the last appraisal he got nothing",
+  "main": "my teammate at Paytm. in the last appraisal he got nothing"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I was at Swiggy dot I mean Zomato, sorry",
+  "main": "I was at Swiggy dot I mean Zomato, sorry"
+ },
+ {
+  "kind": "ordinary",
+  "text": "the meeting is at noon dot I will join",
+  "main": "the meeting is at noon dot I will join"
+ },
+ {
+  "kind": "ordinary",
+  "text": "send the invoice on my gmail only",
+  "main": "send the invoice on my gmail only"
+ },
+ {
+  "kind": "ordinary",
+  "text": "my interview at Google dot it was tough",
+  "main": "my interview at Google dot it was tough"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I have 4 point 5 years of experience at HCL",
+  "main": "I have 4 point 5 years of experience at HCL"
+ },
+ {
+  "kind": "ordinary",
+  "text": "we use dot net core at Mphasis",
+  "main": "we use dot net core at Mphasis"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I am working on .net and angular at Capgemini",
+  "main": "I am working on .net and angular at Capgemini"
+ },
+ {
+  "kind": "ordinary",
+  "text": "she is good at maths dot she likes numbers",
+  "main": "she is good at maths dot she likes numbers"
+ },
+ {
+  "kind": "ordinary",
+  "text": "her husband at IBM. co incidentally also wants to join",
+  "main": "her husband at IBM. co incidentally also wants to join"
+ },
+ {
+  "kind": "ordinary",
+  "text": "the course is at least four months long",
+  "main": "the course is at least four months long"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Advisor: what is your current CTC? Lead: twelve point five lakhs",
+  "main": "Advisor: what is your current CTC? Lead: twelve point five lakhs"
+ },
+ {
+  "kind": "ordinary",
+  "text": "my mentor at Uber. in his opinion I should learn system design",
+  "main": "my mentor at Uber. in his opinion I should learn system design"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I got rejected at Amazon in the final round",
+  "main": "I got rejected at Amazon in the final round"
+ },
+ {
+  "kind": "ordinary",
+  "text": "my lead at Oracle. me and him do not get along",
+  "main": "my lead at Oracle. me and him do not get along"
+ },
+ {
+  "kind": "ordinary",
+  "text": "the batch at Bangalore dot com- commences next week",
+  "main": "the batch at Bangalore dot com- commences next week"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I will check the gmail tonight",
+  "main": "I will check the gmail tonight"
+ },
+ {
+  "kind": "ordinary",
+  "text": "send it to the gmail id I gave",
+  "main": "send it to the gmail id I gave"
+ },
+ {
+  "kind": "ordinary",
+  "text": "the gmail one is my personal",
+  "main": "the gmail one is my personal"
+ },
+ {
+  "kind": "ordinary",
+  "text": "the yahoo one is old",
+  "main": "the yahoo one is old"
+ },
+ {
+  "kind": "ordinary",
+  "text": "check the outlook calendar",
+  "main": "check the outlook calendar"
+ },
+ {
+  "kind": "ordinary",
+  "text": "is the gmail working?",
+  "main": "is the gmail working?"
+ },
+ {
+  "kind": "ordinary",
+  "text": "log in to the gmail app",
+  "main": "log in to the gmail app"
+ },
+ {
+  "kind": "ordinary",
+  "text": "my cousin at Amazon dot I mean AWS",
+  "main": "my cousin at Amazon dot I mean AWS"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Lead: yes, at Flipkart dot I mean Myntra",
+  "main": "Lead: yes, at Flipkart dot I mean Myntra"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Advisor: where? Lead: out at the office",
+  "main": "Advisor: where? Lead: out at the office"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Lead: I am looking out for a job",
+  "main": "Lead: I am looking out for a job"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I applied at naukri dot com",
+  "main": "I applied at naukri dot com"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I found you at linkedin dot com",
+  "main": "I found you at linkedin dot com"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I enrolled at scaler dot com last year",
+  "main": "I enrolled at scaler dot com last year"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I read about you at quora dot com",
+  "main": "I read about you at quora dot com"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I saw the ad at youtube dot com",
+  "main": "I saw the ad at youtube dot com"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I applied on naukri dot com",
+  "main": "I applied on naukri dot com"
+ },
+ {
+  "kind": "ordinary",
+  "text": "check the reviews at glassdoor dot com",
+  "main": "check the reviews at glassdoor dot com"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I studied at coursera dot org",
+  "main": "I studied at coursera dot org"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I did a course at udemy dot com",
+  "main": "I did a course at udemy dot com"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Advisor: are you at Google? Lead: no, at Amazon dot I mean AWS",
+  "main": "Advisor: are you at Google? Lead: no, at Amazon dot I mean AWS"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I scored 8 point 5 at college",
+  "main": "I scored 8 point 5 at college"
+ },
+ {
+  "kind": "ordinary",
+  "text": "we are at version 3 point 2",
+  "main": "we are at version 3 point 2"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Lead: I got placed at Accenture. Advisor: great.",
+  "main": "Lead: I got placed at Accenture. Advisor: great."
+ },
+ {
+  "kind": "ordinary",
+  "text": "my friend is in the Gmail team at Google",
+  "main": "my friend is in the Gmail team at Google"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Advisor: which company? Lead: Infosys. Advisor: and location? Lead: Pune.",
+  "main": "Advisor: which company? Lead: Infosys. Advisor: and location? Lead: Pune."
+ },
+ {
+  "kind": "ordinary",
+  "text": "I joined Infosys in 2019 and moved to TCS in 2022",
+  "main": "I joined Infosys in 2019 and moved to TCS in 2022"
+ },
+ {
+  "kind": "ordinary",
+  "text": "Lead: I am at HCL. Advisor: Okay, and what is your role there?",
+  "main": "Lead: I am at HCL. Advisor: Okay, and what is your role there?"
+ },
+ {
+  "kind": "ordinary",
+  "text": "my wife at Accenture dot she is also interested",
+  "main": "my wife at Accenture dot she is also interested"
+ },
+ {
+  "kind": "ordinary",
+  "text": "the fee is 3 point 2 lakhs at most",
+  "main": "the fee is 3 point 2 lakhs at most"
+ },
+ {
+  "kind": "ordinary",
+  "text": "I heard about you at a webinar dot com- commerce one",
+  "main": "I heard about you at a webinar dot com- commerce one"
  }
 ]

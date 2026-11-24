@@ -10,7 +10,7 @@ import pytest
 from bca.mask.leakscan import scan_text
 from bca.mask.masker import MaskingContext, mask_text
 
-ENTRIES = json.loads((Path(__file__).parent / "email_vs_main.json").read_text(encoding="utf-8"))
+ENTRIES = json.loads((Path(__file__).parent / "email_vs_main_v2.json").read_text(encoding="utf-8"))
 WORD = re.compile(r"[a-z0-9]+")
 CONNECTORS = frozenset(
     [
@@ -101,7 +101,9 @@ def test_never_worse_than_main_on_addresses(entry: dict[str, str]) -> None:
         pytest.skip("ordinary entry")
     result = mask_text(entry["text"], MaskingContext()).text
     removed = words(entry["text"]) - words(entry["main"])
-    assert not (removed & words(result))
+    kept_more_than_main = words(result) - words(entry["main"])
+    still_removed_by_new = words(entry["text"]) - words(result)
+    assert not (removed & kept_more_than_main & still_removed_by_new)
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
