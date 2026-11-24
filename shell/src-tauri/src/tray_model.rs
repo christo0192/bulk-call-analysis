@@ -126,16 +126,24 @@ impl TrayModel {
             .or_else(|| {
                 self.jobs
                     .values()
-                    .find(|j| j.state.as_deref() == Some("stalled"))
+                    .filter(|j| j.state.as_deref() == Some("stalled"))
+                    .max_by_key(|j| j.last_change)
                     .map(|j| (j, 1))
             })
             .or_else(|| {
                 self.jobs
                     .values()
-                    .find(|j| j.state.as_deref() == Some("paused"))
+                    .filter(|j| j.state.as_deref() == Some("paused"))
+                    .max_by_key(|j| j.last_change)
                     .map(|j| (j, 2))
             })
-            .or_else(|| self.jobs.values().find(|j| j.in_sample).map(|j| (j, 3)))
+            .or_else(|| {
+                self.jobs
+                    .values()
+                    .filter(|j| j.in_sample)
+                    .max_by_key(|j| j.last_change)
+                    .map(|j| (j, 3))
+            })
             .or_else(|| {
                 let newest = self.jobs.values().map(|j| j.last_change).max()?;
                 self.jobs
@@ -148,6 +156,7 @@ impl TrayModel {
             return "Bulk Call Analysis".into();
         };
         match priority {
+            0 if job.total == 0 => "Bulk Call Analysis — Working".into(),
             0 => format!(
                 "Bulk Call Analysis — Reading {} of {}{}",
                 format_number(job.done),
@@ -198,7 +207,7 @@ pub fn format_duration(seconds: u64) -> String {
     if minutes < 60 {
         format!("about {minutes} min")
     } else {
-        format!("about {} h", minutes / 60)
+        format!("about {} h", (minutes + 30) / 60)
     }
 }
 

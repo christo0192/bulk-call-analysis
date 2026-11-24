@@ -54,6 +54,20 @@ pub fn decode(line: &[u8]) -> Result<Value, RpcError> {
 pub type Notification = Value;
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
 
+struct PendingGuard {
+    pending: Pending,
+    id: u64,
+}
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        let pending = self.pending.clone();
+        let id = self.id;
+        tokio::spawn(async move {
+            pending.lock().await.remove(&id);
+        });
+    }
+}
+
 const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Frame {
@@ -130,6 +144,10 @@ impl<W: AsyncWrite + Unpin + Send + 'static> Client<W> {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
+        let _pending_guard = PendingGuard {
+            pending: self.pending.clone(),
+            id,
+        };
         let message = json!({"jsonrpc":"2.0", "id": id, "method": method, "params": params});
         let bytes = encode(&message)?;
         if self.closed.load(Ordering::Acquire) {

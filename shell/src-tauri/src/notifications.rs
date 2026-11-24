@@ -255,6 +255,46 @@ mod tests {
     }
 
     #[test]
+    fn toast_texts_for_credit_spend_control_and_auth() {
+        let cases = [
+            (
+                "credit",
+                "Paused to avoid paid credits",
+                "Check that automatic top-up is off, then resume.",
+            ),
+            (
+                "spend_control",
+                "Paused: spending limit reached",
+                "Check your ChatGPT plan, then resume.",
+            ),
+            (
+                "auth",
+                "Sign in needed",
+                "Sign in to ChatGPT again, then resume.",
+            ),
+        ];
+        for (reason, title, body) in cases {
+            let event = json!({"method":"engine/event","params":{"kind":"pause","job":"j","reason":reason}});
+            assert_eq!(
+                notification_for(&event, &NotifyCtx::default()),
+                Some((title.into(), body.into()))
+            );
+        }
+    }
+
+    #[test]
+    fn battery_toast_repeats_after_ten_minutes() {
+        let event = json!({"method":"engine/event","params":{"job":"j","kind":"battery"}});
+        let mut ctx = NotifyCtx {
+            now: SystemTime::UNIX_EPOCH,
+            ..Default::default()
+        };
+        assert!(should_notify(&mut ctx, &event));
+        ctx.now += Duration::from_secs(601);
+        assert!(should_notify(&mut ctx, &event));
+    }
+
+    #[test]
     fn user_pause_does_not_suppress_a_quota_toast() {
         let mut c = NotifyCtx::default();
         let user =

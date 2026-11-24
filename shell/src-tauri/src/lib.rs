@@ -53,7 +53,7 @@ fn run_event_action(is_exit: bool, code: Option<i32>) -> RunEventAction {
 }
 
 #[doc(hidden)]
-pub use engine::{is_running_job_state, job_event_requires_keep_awake, Engine};
+pub use engine::Engine;
 
 static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_DONE: OnceLock<std::sync::Arc<Notify>> = OnceLock::new();
@@ -260,6 +260,9 @@ async fn open_project_file(
     project: String,
     name: String,
 ) -> Result<(), CommandError> {
+    if !valid_project_slug(&project) {
+        return Err(path_error(paths::OpenError::InvalidSlug));
+    }
     let result = engine
         .call("files/path", json!({"project": project, "name": name}))
         .await

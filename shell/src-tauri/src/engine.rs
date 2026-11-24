@@ -6,7 +6,6 @@ use crate::tray_model::TrayModel;
 use log::{error, warn};
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
     collections::VecDeque,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
     sync::{Arc, Mutex as StdMutex},
@@ -48,14 +47,47 @@ struct Inner<R: Runtime> {
     status: Mutex<String>,
     restarts: Mutex<RestartTracker>,
     active_pid: AtomicU32,
+    generation: std::sync::atomic::AtomicU64,
     shutting_down: AtomicBool,
     guard: Mutex<Option<Arc<procguard::Guard>>>,
     power: KeepAwake<Box<dyn power::PowerOs>>,
     notifications: StdMutex<NotifyCtx>,
-    pending_title_lookups: StdMutex<HashSet<String>>,
+    pending_title_lookups:
+        Arc<StdMutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>>,
     tray_model: StdMutex<TrayModel>,
     pause_item: StdMutex<Option<MenuItem<R>>>,
     last_tray: StdMutex<Option<(String, bool)>>,
+}
+
+struct TitleLookupGuard {
+    pending: Arc<StdMutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>>,
+    project: String,
+    notify: Arc<tokio::sync::Notify>,
+    armed: bool,
+}
+
+impl TitleLookupGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TitleLookupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let pending = self.pending.clone();
+        let project = self.project.clone();
+        let notify = self.notify.clone();
+        tokio::spawn(async move {
+            pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&project);
+            notify.notify_waiters();
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -114,11 +146,12 @@ impl<R: Runtime> Engine<R> {
                 status: Mutex::new("starting".into()),
                 restarts: Mutex::new(RestartTracker::new()),
                 active_pid: AtomicU32::new(0),
+                generation: std::sync::atomic::AtomicU64::new(0),
                 shutting_down: AtomicBool::new(false),
                 guard: Mutex::new(None),
                 power: power::platform(),
                 notifications: StdMutex::new(NotifyCtx::default()),
-                pending_title_lookups: StdMutex::new(HashSet::new()),
+                pending_title_lookups: Arc::new(StdMutex::new(std::collections::HashMap::new())),
                 tray_model: StdMutex::new(TrayModel::default()),
                 pause_item: StdMutex::new(None),
                 last_tray: StdMutex::new(None),
@@ -134,11 +167,12 @@ impl<R: Runtime> Engine<R> {
                 status: Mutex::new("starting".into()),
                 restarts: Mutex::new(RestartTracker::new()),
                 active_pid: AtomicU32::new(0),
+                generation: std::sync::atomic::AtomicU64::new(0),
                 shutting_down: AtomicBool::new(false),
                 guard: Mutex::new(None),
                 power: power::platform(),
                 notifications: StdMutex::new(NotifyCtx::default()),
-                pending_title_lookups: StdMutex::new(HashSet::new()),
+                pending_title_lookups: Arc::new(StdMutex::new(std::collections::HashMap::new())),
                 tray_model: StdMutex::new(TrayModel::default()),
                 pause_item: StdMutex::new(None),
                 last_tray: StdMutex::new(None),
@@ -271,28 +305,41 @@ impl<R: Runtime> Engine<R> {
                 }
             }
         });
-        self.seed_active_jobs().await;
+        let generation = self.inner.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let seed_task = Arc::new(Mutex::new(None));
+        let seed_started = Arc::new(AtomicBool::new(false));
         let ping_engine = self.clone();
         let ping_guard: Arc<dyn HealthKill> = guard.clone();
+        let seed_client = client.clone();
+        let seed_task_for_ping = seed_task.clone();
+        let seed_started_for_ping = seed_started.clone();
         let ping_task =
             tauri::async_runtime::spawn(health_ping(client.clone(), ping_guard, move || {
                 let ping_engine = ping_engine.clone();
+                let seed_client = seed_client.clone();
+                let seed_task = seed_task_for_ping.clone();
+                let seed_started = seed_started_for_ping.clone();
                 async move {
                     if *ping_engine.inner.status.lock().await != "ready" {
                         ping_engine.set_status("ready", None).await;
                     }
+                    if !seed_started.swap(true, Ordering::AcqRel) {
+                        let engine = ping_engine.clone();
+                        let client = seed_client.clone();
+                        *seed_task.lock().await = Some(tauri::async_runtime::spawn(async move {
+                            engine.seed_active_jobs(client, generation).await;
+                        }));
+                    }
                 }
             }));
         while let Some(notification) = rx.recv().await {
-            self.update_power_for_notification(&notification).await;
-            self.inner
-                .tray_model
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .apply(&notification);
-            self.render_tray();
+            self.apply_model_change(&notification).await;
             self.spawn_notification_refresh(notification.clone());
             self.emit("engine-event", notification);
+        }
+        if let Some(seed) = seed_task.lock().await.take() {
+            seed.abort();
+            let _ = seed.await;
         }
         ping_task.abort();
         let _ = ping_task.await;
@@ -310,40 +357,79 @@ impl<R: Runtime> Engine<R> {
         Err(RpcError::Closed)
     }
 
-    async fn seed_active_jobs(&self) {
-        let Ok(Ok(Value::Array(projects))) = tokio::time::timeout(
-            Duration::from_secs(2),
-            self.call("projects/list", json!({})),
-        )
-        .await
-        else {
+    async fn seed_active_jobs<W>(&self, client: Arc<Client<W>>, generation: u64)
+    where
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let mut result = client
+            .request("projects/list", json!({}), method_timeout("projects/list"))
+            .await;
+        if result.is_err() {
+            sleep(Duration::from_secs(10)).await;
+            result = client
+                .request("projects/list", json!({}), method_timeout("projects/list"))
+                .await;
+        }
+        let Ok(Value::Array(projects)) = result else {
             return;
         };
-        let mut model = self
+        if self.inner.generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        {
+            let mut model = self
+                .inner
+                .tray_model
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for project in projects {
+                let Some(active) = project.get("activeJob") else {
+                    continue;
+                };
+                let Some(job) = active.get("job").and_then(Value::as_str) else {
+                    continue;
+                };
+                let state = active
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("paused");
+                if model.jobs.contains_key(job) {
+                    continue;
+                }
+                model.apply(&json!({"method":"job/state","params":{"job":job,"state":state}}));
+                if let (Some(done), Some(total)) = (active.get("done"), active.get("total")) {
+                    model.apply(&json!({"method":"job/progress","params":{"job":job,"done":done,"total":total}}));
+                }
+                if let Some(reason) = active.get("pauseReason").and_then(Value::as_str) {
+                    model.apply(&json!({"method":"engine/event","params":{"job":job,"kind":"pause","reason":reason}}));
+                }
+            }
+        }
+        self.sync_power_and_tray().await;
+    }
+    async fn apply_model_change(&self, notification: &Value) {
+        self.inner
+            .tray_model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .apply(notification);
+        self.sync_power_and_tray().await;
+    }
+    async fn sync_power_and_tray(&self) {
+        let holds = self
             .inner
             .tray_model
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for project in projects {
-            let Some(active) = project.get("activeJob") else {
-                continue;
-            };
-            let Some(job) = active.get("job").and_then(Value::as_str) else {
-                continue;
-            };
-            let state = active
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("paused");
-            model.apply(&json!({"method":"job/state","params":{"job":job,"state":state}}));
-            if let (Some(done), Some(total)) = (active.get("done"), active.get("total")) {
-                model.apply(&json!({"method":"job/progress","params":{"job":job,"done":done,"total":total}}));
-            }
-            if let Some(reason) = active.get("pauseReason").and_then(Value::as_str) {
-                model.apply(&json!({"method":"engine/event","params":{"job":job,"kind":"pause","reason":reason}}));
-            }
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .holds_awake();
+        let result = if holds {
+            self.inner.power.hold()
+        } else {
+            self.inner.power.release()
+        };
+        if let Err(error) = result {
+            log::warn!("failed to update system awake hold: {error}");
         }
-        drop(model);
         self.render_tray();
     }
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
@@ -457,6 +543,20 @@ impl<R: Runtime> Engine<R> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .engine_died();
+        let holds = self
+            .inner
+            .tray_model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .holds_awake();
+        let result = if holds {
+            self.inner.power.hold()
+        } else {
+            self.inner.power.release()
+        };
+        if let Err(error) = result {
+            log::warn!("failed to update system awake hold: {error}");
+        }
         self.render_tray();
     }
 
@@ -531,41 +631,6 @@ impl<R: Runtime> Engine<R> {
             sleep(Duration::from_secs(30)).await;
         }
     }
-    async fn update_power_for_notification(&self, notification: &Value) {
-        let keep_awake =
-            if notification.get("method").and_then(Value::as_str) == Some("job/progress") {
-                let job = notification
-                    .get("params")
-                    .and_then(|p| p.get("job"))
-                    .and_then(Value::as_str);
-                let holds = self
-                    .inner
-                    .tray_model
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .holds_awake();
-                if job.is_some() && !holds {
-                    None
-                } else {
-                    Some(holds)
-                }
-            } else {
-                job_event_requires_keep_awake(notification)
-            };
-        match keep_awake {
-            Some(true) => {
-                if let Err(error) = self.inner.power.hold() {
-                    log::warn!("failed to hold system awake: {error}");
-                }
-            }
-            Some(false) => {
-                if let Err(error) = self.inner.power.release() {
-                    log::warn!("failed to release system awake hold: {error}");
-                }
-            }
-            None => {}
-        }
-    }
     fn power_status(&self) -> PowerStatus {
         self.inner.power.status()
     }
@@ -601,36 +666,56 @@ impl<R: Runtime> Engine<R> {
                 .project_titles
                 .contains_key(&project);
             if unknown {
-                let should_lookup = self
-                    .inner
-                    .pending_title_lookups
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(project.clone());
-                if !should_lookup {
-                    return self.dispatch_notification(event).await;
-                }
-                if let Ok(Ok(Value::Array(items))) = tokio::time::timeout(
-                    Duration::from_secs(10),
-                    self.call("projects/list", json!({})),
-                )
-                .await
-                {
-                    let mut ctx = self.notification_ctx();
-                    for item in items {
-                        if let (Some(id), Some(title)) = (
-                            item.get("project").and_then(Value::as_str),
-                            item.get("title").and_then(Value::as_str),
-                        ) {
-                            ctx.project_titles.insert(id.into(), title.into());
+                let (notify, owner) = {
+                    let mut pending = self
+                        .inner
+                        .pending_title_lookups
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match pending.entry(project.clone()) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            let notify = Arc::new(tokio::sync::Notify::new());
+                            entry.insert(notify.clone());
+                            (notify, true)
+                        }
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            (entry.get().clone(), false)
                         }
                     }
+                };
+                if owner {
+                    let mut lookup_guard = TitleLookupGuard {
+                        pending: self.inner.pending_title_lookups.clone(),
+                        project: project.clone(),
+                        notify: notify.clone(),
+                        armed: true,
+                    };
+                    if let Ok(Ok(Value::Array(items))) = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        self.call("projects/list", json!({})),
+                    )
+                    .await
+                    {
+                        let mut ctx = self.notification_ctx();
+                        for item in items {
+                            if let (Some(id), Some(title)) = (
+                                item.get("project").and_then(Value::as_str),
+                                item.get("title").and_then(Value::as_str),
+                            ) {
+                                ctx.project_titles.insert(id.into(), title.into());
+                            }
+                        }
+                    }
+                    self.inner
+                        .pending_title_lookups
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&project);
+                    notify.notify_waiters();
+                    lookup_guard.disarm();
+                } else {
+                    notify.notified().await;
                 }
-                self.inner
-                    .pending_title_lookups
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&project);
             }
         }
         self.dispatch_notification(event).await;
@@ -653,7 +738,15 @@ impl<R: Runtime> Engine<R> {
     fn send_battery_notification(&self, percent: Option<u8>) {
         if let Some(app) = &self.inner.app {
             let mut ctx = self.notification_ctx();
-            let event = json!({"method":"engine/event","params":{"kind":"battery"}});
+            ctx.now = SystemTime::now();
+            let job = self
+                .inner
+                .tray_model
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pausable_job()
+                .unwrap_or_default();
+            let event = json!({"method":"engine/event","params":{"job":job,"kind":"battery"}});
             let held = self
                 .inner
                 .tray_model
@@ -672,22 +765,6 @@ impl<R: Runtime> Engine<R> {
 fn short_reason(error: &RpcError) -> String {
     let reason = error.to_string();
     reason.chars().take(120).collect()
-}
-
-pub fn is_running_job_state(state: &str) -> bool {
-    matches!(state, "starting" | "running" | "active" | "in_progress")
-}
-
-pub fn job_event_requires_keep_awake(notification: &Value) -> Option<bool> {
-    match notification.get("method").and_then(Value::as_str) {
-        Some("job/progress") => Some(true),
-        Some("job/state" | "job/status") => notification
-            .get("params")
-            .and_then(|params| params.get("status").or_else(|| params.get("state")))
-            .and_then(Value::as_str)
-            .map(is_running_job_state),
-        _ => None,
-    }
 }
 
 pub fn battery_transition(previous: Option<PowerStatus>, current: PowerStatus, held: bool) -> bool {
@@ -879,30 +956,6 @@ mod health_tests {
             assert_eq!(target.kills.load(Ordering::Relaxed), 0);
             health.abort();
         });
-    }
-
-    #[test]
-    fn job_events_hold_and_release_power() {
-        assert_eq!(
-            job_event_requires_keep_awake(&json!({"method":"job/progress"})),
-            Some(true)
-        );
-        assert_eq!(
-            job_event_requires_keep_awake(
-                &json!({"method":"job/state","params":{"status":"running"}})
-            ),
-            Some(true)
-        );
-        assert_eq!(
-            job_event_requires_keep_awake(
-                &json!({"method":"job/state","params":{"status":"done"}})
-            ),
-            Some(false)
-        );
-        assert_eq!(
-            job_event_requires_keep_awake(&json!({"method":"other"})),
-            None
-        );
     }
 
     #[test]
