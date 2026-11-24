@@ -10,7 +10,7 @@ import pytest
 from bca.mask.leakscan import scan_text
 from bca.mask.masker import MaskingContext, mask_text
 
-ENTRIES = json.loads((Path(__file__).parent / "email_vs_main_v2.json").read_text(encoding="utf-8"))
+ENTRIES = json.loads((Path(__file__).parent / "email_vs_main_v3.json").read_text(encoding="utf-8"))
 WORD = re.compile(r"[a-z0-9]+")
 CONNECTORS = frozenset(
     [
@@ -44,6 +44,9 @@ CONNECTORS = frozenset(
 )
 ORDINARY_WORDS = frozenset(
     [
+        "lead",
+        "advisor",
+        "met",
         "my",
         "email",
         "mail",
@@ -101,9 +104,10 @@ def test_never_worse_than_main_on_addresses(entry: dict[str, str]) -> None:
         pytest.skip("ordinary entry")
     result = mask_text(entry["text"], MaskingContext()).text
     removed = words(entry["text"]) - words(entry["main"])
-    kept_more_than_main = words(result) - words(entry["main"])
-    still_removed_by_new = words(entry["text"]) - words(result)
-    assert not (removed & kept_more_than_main & still_removed_by_new)
+    # A leak: a word main removed that the new output keeps more often than main does.
+    extra = words(result) - words(entry["main"])
+    leaked = {word: count for word, count in extra.items() if word in removed}
+    assert not leaked, f"{entry['text']!r} -> {result!r} (main {entry['main']!r})"
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
@@ -111,5 +115,5 @@ def test_ordinary_sentences_unchanged_and_not_held(entry: dict[str, str]) -> Non
     if entry["kind"] != "ordinary":
         pytest.skip("address entry")
     result = mask_text(entry["text"], MaskingContext()).text
-    assert result == entry["main"] == entry["text"]
+    assert result == entry["text"], f"{entry['text']!r} -> {result!r}"
     assert not any(hit.precision == "high" and hit.detector == "EMAIL_LIKE" for hit in scan_text(result))

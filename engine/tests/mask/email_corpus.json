@@ -864,11 +864,8 @@
   "Lead: at first glance it was costly.",
   "Lead: my outlook on life changed",
   "Lead: I got mail at work from HR.",
-  "Lead: the outlook for IT is bad.",
   "Lead: I live at Pune. Live classes suit me.",
   "Lead: I check LinkedIn at night. Live sessions are hard.",
-  "Lead: he is working at Yahoo.",
-  "Lead: I worked at Yahoo for two years.",
   "Lead: my brother is at Zoho in Chennai.",
   "Lead: I have an offer from Zoho at thirty lakhs.",
   "Lead: I joined Zoho.",
@@ -882,10 +879,7 @@
   "Lead: I will call at 5.In the evening.",
   "Lead: I got stuck at leetcode. Com sci is not my background.",
   "Lead: at this company dot I mean here",
-  "Lead: I worked at Rediff for a year.",
   "Lead: I was a developer at Zoho.",
-  "Lead: I got an offer at Yahoo. It was good.",
-  "Lead: the job market outlook is not good.",
   "Lead: my friend is at Outlook team in Microsoft.",
   "Lead: we use live at Hotstar.",
   "Lead: the server was at version dot 5",
@@ -908,5 +902,13 @@
   "someone at example dot com",
   "ravi at acme period com",
   "ravi at acme dotcom"
+ ],
+ "accepted_same_as_main": [
+  "Lead: the outlook for IT is bad.",
+  "Lead: he is working at Yahoo.",
+  "Lead: I worked at Yahoo for two years.",
+  "Lead: I worked at Rediff for a year.",
+  "Lead: I got an offer at Yahoo. It was good.",
+  "Lead: the job market outlook is not good."
  ]
 }

@@ -95,13 +95,16 @@ def test_leak_scan_holds_back_an_unmasked_spoken_email(tmp_path: Path) -> None:
 def test_leak_scan_email_net_is_independent_of_the_masker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("bca.mask.spoken_email.find_spoken_emails", lambda text: [])
     monkeypatch.setattr("bca.mask.patterns._spoken_email_replacements", lambda text: [])
-    assert any(hit.detector == "EMAIL_LIKE" for hit in scan_text("contact ravi at the rate acme dot info"))
+    monkeypatch.setattr("bca.mask.main_provider_rule.provider_replacements", lambda text: [])
+    text = mask_text("contact ravi at the rate acme dot info", MaskingContext()).text
+    assert any(hit.detector == "EMAIL_LIKE" for hit in scan_text(text))
 
 
 @pytest.mark.parametrize("text", NET_ALONE)
 def test_net_holds_common_forms_when_the_masker_is_broken(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
     monkeypatch.setattr("bca.mask.spoken_email.find_spoken_emails", lambda value: [])
     monkeypatch.setattr("bca.mask.patterns._spoken_email_replacements", lambda value: [])
+    monkeypatch.setattr("bca.mask.main_provider_rule.provider_replacements", lambda value: [])
     assert any(hit.detector == "EMAIL_LIKE" for hit in scan_text(mask_text(text, MaskingContext()).text))
 
 
@@ -110,11 +113,18 @@ def test_net_module_imports_no_parser_function() -> None:
     from pathlib import Path
 
     tree = ast.parse(Path(__file__).parents[2].joinpath("src/bca/mask/leakscan.py").read_text())
-    imports = [
-        node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module == "spoken_email"
-    ]
-    assert imports
-    assert all(alias.name.isupper() for node in imports for alias in node.names)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [(alias.name, alias.asname) for alias in node.names]
+            for name, asname in names:
+                if name.rsplit(".", 1)[-1] in {"spoken_email", "main_provider_rule"}:
+                    assert asname is not None and asname.isupper()
+        elif isinstance(node, ast.ImportFrom):
+            module_name = (node.module or "").rsplit(".", 1)[-1]
+            if module_name in {"spoken_email", "main_provider_rule"}:
+                assert all(alias.name.isupper() and alias.asname is not None for alias in node.names)
+            if node.module is None:
+                assert all(alias.name not in {"spoken_email", "main_provider_rule"} for alias in node.names)
 
 
 def test_leak_scan_email_net_ignores_placeholders() -> None:

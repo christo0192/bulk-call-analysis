@@ -315,6 +315,31 @@ ORDINARY_BEFORE_AT = LOCAL_STOPS | frozenset(
         "met",
         "meet",
         "meeting",
+        "counsellor",
+        "counselor",
+        "advisor",
+        "adviser",
+        "mentor",
+        "lead",
+        "recruiter",
+        "teacher",
+        "trainer",
+        "colleague",
+        "colleagues",
+        "senior",
+        "seniors",
+        "junior",
+        "juniors",
+        "boss",
+        "cousin",
+        "uncle",
+        "aunt",
+        "father",
+        "mother",
+        "brother",
+        "sister",
+        "wife",
+        "husband",
     ]
 )
 EMPLOYER_WORDS = frozenset(
@@ -598,7 +623,17 @@ def _walk_local(tokens: list[Token], before: int, text: str, glued: bool = False
             )
         ):
             break
-        if lower in ORDINARY_BEFORE_AT and not (len(value) == 1 and value.isalpha()):
+        if (
+            lower in ORDINARY_BEFORE_AT
+            and not (len(value) == 1 and value.isalpha())
+            and not (
+                index > 0
+                and (
+                    tokens[index - 1].value.casefold() in {"dot", "underscore", "hyphen", "dash"}
+                    or tokens[index - 1].raw_value.endswith((".", "_"))
+                )
+            )
+        ):
             break
         if not _LOCAL_WORD.fullmatch(value):
             break
@@ -738,11 +773,7 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
                 continue
         anchor_end = i
         strong = False
-        if core.casefold() in {"@", "at"} or (
-            core.casefold() in {"the", "d"}
-            and i + 1 < len(tokens)
-            and tokens[i + 1].value.casefold() == "rate"
-        ):
+        if core.casefold() in {"@", "at"}:
             strong = core == "@"
             if (
                 core.casefold() in {"the", "d"}
@@ -759,13 +790,20 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
                 and not (
                     any(char.isdigit() or char in "._-" for char in tokens[i - 1].value)
                     or (len(tokens[i - 1].value) == 1 and tokens[i - 1].value.isalpha())
+                    or (
+                        i > 1
+                        and (
+                            tokens[i - 2].value.casefold() in {"dot", "underscore", "hyphen", "dash"}
+                            or tokens[i - 2].raw_value.endswith((".", "_"))
+                        )
+                    )
                 )
             ):
                 continue
             if (
                 core.casefold() == "at"
                 and i + 2 < len(tokens)
-                and tokens[i + 1].value.casefold() == "the"
+                and tokens[i + 1].value.casefold() in {"the", "d", "da"}
                 and tokens[i + 2].value.casefold() == "rate"
             ):
                 anchor_end, strong = i + 2, True
@@ -778,10 +816,12 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
             elif (
                 core.casefold() == "at"
                 and i + 2 < len(tokens)
-                and tokens[i + 1].value.casefold() == "d"
+                and tokens[i + 1].value.casefold() in {"d", "da"}
                 and tokens[i + 2].value.casefold() == "rate"
             ):
                 anchor_end, strong = i + 2, True
+                if anchor_end + 1 < len(tokens) and tokens[anchor_end + 1].value.casefold() == "of":
+                    anchor_end += 1
             elif core.casefold() == "at" and i + 1 < len(tokens) and tokens[i + 1].value.casefold() == "sign":
                 anchor_end, strong = i + 1, True
             elif (
@@ -802,6 +842,15 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
                 or tokens[end + 1].value.casefold().startswith("dot")
             ):
                 ending = _ending(tokens, end + 1, end + 1, True)
+                if (
+                    ending is not None
+                    and tokens[ending].value.casefold() != "com"
+                    and ending + 1 < len(tokens)
+                    and tokens[ending + 1].value.casefold() not in KNOWN_TLDS
+                    and tokens[ending + 1].value.casefold() not in {"dot", "period", "point"}
+                    and not tokens[ending + 1].raw_value.startswith((".", ",", ";", ":"))
+                ):
+                    ending = None
                 if ending is not None:
                     end = ending
                     while (
@@ -967,10 +1016,10 @@ def _provider_replacements_legacy(text: str) -> list[tuple[int, int]]:
 
 
 def provider_replacements(text: str) -> list[tuple[int, int]]:
-    # Avoid handing a token with unbounded internal punctuation to the legacy
-    # fallback regexes; their token-list path has no useful match in this case.
     if any(
         len(token.value) > 1024 and any(char in token.value for char in ".-' ") for token in tokenize(text)
     ):
-        return []
+        from .main_provider_rule import provider_replacements as main_provider_replacements
+
+        return main_provider_replacements(text)
     return _provider_replacements_legacy(text)

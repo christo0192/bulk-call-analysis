@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from . import spoken_email
+from . import main_provider_rule, spoken_email
 
 
 @dataclass(frozen=True)
@@ -113,7 +113,11 @@ def apply_patterns(
 ) -> tuple[str, dict[str, int]]:
     counts: dict[str, int] = {}
     spans: list[tuple[int, int, str, str]] = []
-    email_spans = set(_spoken_email_replacements(text) + spoken_email.find_spoken_emails(text))
+    email_spans = set(
+        _spoken_email_replacements(text)
+        + main_provider_rule.provider_replacements(text)
+        + spoken_email.find_spoken_emails(text)
+    )
     for start, end in email_spans:
         if text[start:end] in allow_ids:
             continue

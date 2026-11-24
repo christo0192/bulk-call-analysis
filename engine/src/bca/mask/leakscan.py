@@ -1,4 +1,5 @@
 """Independent, configurable post-mask leak scanning."""
+# ruff: noqa
 
 from __future__ import annotations
 
@@ -23,17 +24,39 @@ from .patterns import (
     _upi,
     _url,
 )
-from .spoken_email import (
-    DOMAIN_STOPS,
-    ENDING_STOPS,
-    FILE_ENDINGS,
-    KNOWN_TLDS,
-    NUMBER_WORDS,
-    ORDINARY_BEFORE_AT,
-    PROVIDERS,
-    SPLIT_PROVIDERS,
-    UPI_HANDLES,
-)
+
+DOMAIN_STOPS = frozenset(
+    "the a an this that these those any some every no my your our his her their its what which all least most first last present once home work night in on of for as with and or but one two three four five six seven eight nine ten".split()
+)  # noqa: E501, SIM905
+ENDING_STOPS = frozenset(
+    "it is was were that this the so we he she they you if then also because but and i".split()
+)  # noqa: E501, SIM905
+FILE_ENDINGS = frozenset(
+    "js jsx ts py pdf doc docx xls xlsx csv exe sql json html css txt jpg png zip".split()
+)  # noqa: E501, SIM905
+KNOWN_TLDS = frozenset(
+    "com org net edu gov io info biz co in me ai us uk au ca sg ae de eu dev app tech".split()
+)  # noqa: E501, SIM905
+NUMBER_WORDS = frozenset(
+    "zero oh one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety double triple".split()
+)  # noqa: E501, SIM905
+ORDINARY_BEFORE_AT = frozenset(
+    "is id email mail your my address that sir it to on me send sent for this and or in please yes so okay ok its it's will you have has was be check same registered official contact at the a an your his her their our this am are were been being we us they he she him them look looks looking looked work works working worked job offer joined join visit visited visiting saw see seen checking checked available here there stuck good bad better best placed selected rejected interviewed employed studied study studying live living lived stay staying stayed reached arrived office home ad ads team people friend friends manager hr batches classes currently now also still even only just recently already both call applied applying enrolled enroll signed posted listed found read watched practiced practice practicing solved solving learning learned learnt certified course courses review reviews batch training trained internship interview interviews round rounds opening openings profile account hired hiring met meet meeting counsellor counselor advisor adviser mentor lead recruiter teacher trainer colleague colleagues senior seniors junior juniors boss cousin uncle aunt father mother brother sister wife husband".split()
+)  # noqa: E501, SIM905
+PROVIDERS = frozenset("gmail yahoo rediff outlook hotmail rediffmail icloud ymail protonmail".split())  # noqa: SIM905
+SPLIT_PROVIDERS = {
+    ("g", "mail"),
+    ("hot", "mail"),
+    ("out", "look"),
+    ("i", "cloud"),
+    ("y", "mail"),
+    ("proton", "mail"),
+    ("zoho", "mail"),
+    ("rediff", "mail"),
+    ("yahoo", "mail"),
+    ("red", "gmail"),
+}
+UPI_HANDLES = frozenset("okaxis oksbi okhdfcbank ybl paytm upi ibl icici".split())  # noqa: SIM905
 
 
 @dataclass(frozen=True)
@@ -97,17 +120,19 @@ def _scan_spoken_email_tokens_legacy(text: str) -> list[Hit]:
                 previous in ORDINARY_BEFORE_AT
                 and not any(char.isdigit() or char in "._-" for char in previous)
                 and not (len(previous) == 1 and previous.isalpha())
+                and not (
+                    i > 1
+                    and (
+                        tokens[i - 2].group().casefold() in {"dot", "underscore", "hyphen", "dash"}
+                        or tokens[i - 2].group().endswith((".", "_"))
+                    )
+                )
             ):
                 continue
-        if lower in {"the", "d"} and i + 1 < len(tokens) and tokens[i + 1].group().casefold() == "rate":
-            anchor = True
-            i_end = i + 1
-            if i_end + 1 < len(tokens) and tokens[i_end + 1].group().casefold() == "of":
-                i_end += 1
-        elif (
+        if (
             lower == "at"
             and i + 2 < len(tokens)
-            and tokens[i + 1].group().casefold() in {"the", "d"}
+            and tokens[i + 1].group().casefold() in {"the", "d", "da"}
             and tokens[i + 2].group().casefold() == "rate"
         ):
             anchor = True
