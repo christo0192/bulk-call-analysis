@@ -268,6 +268,7 @@ export class MockBridge implements EngineBridge {
     if (method === 'job/rebuildRules') {
       const result: RebuildResult = {
         job: (params as { job: string }).job,
+        name: 'results.v2.rebuild1.xlsx',
         path: 'output/results.v2.rebuild1.xlsx',
         rebuild: 1,
       };

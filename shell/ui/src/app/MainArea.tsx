@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { phase, projects, selectedJob, selectedProject } from '../state/store';
 import { bridge } from '../engine/bridge';
+import { EngineError } from '../engine/client';
 import { openProjectFolder } from '../engine/shellCommands';
 import { ChatDrawer } from './ChatDrawer';
 import { EmptyState } from './EmptyState';
@@ -23,6 +24,7 @@ export function MainArea() {
   const rebuildButton = useRef<HTMLButtonElement>(null);
   const [rebuildOpen, setRebuildOpen] = useState(false);
   const [shellError, setShellError] = useState<string | null>(null);
+  const [actionPending, setActionPending] = useState(false);
   const [chat, setChat] = useState(
     () => phase.value !== 'done' && localStorage.getItem(`chat:${currentProject}`) !== 'hidden',
   );
@@ -48,20 +50,33 @@ export function MainArea() {
       return next;
     });
   const pause = () => {
-    if (current)
-      void bridge.call(current.state === 'paused' ? 'job/resume' : 'job/pause', {
-        job: current.job,
-      });
+    if (!current || actionPending || current.state === 'stalled') return;
+    const method = current.state === 'paused' ? 'job/resume' : 'job/pause';
+    setShellError(null);
+    setActionPending(true);
+    void bridge
+      .call(method, { job: current.job })
+      .catch((error) => {
+        const parsed = EngineError.from(error);
+        setShellError(
+          parsed.reason === 'job_running' && method === 'job/resume'
+            ? 'Still finishing the leads in progress. Try again in a moment.'
+            : parsed.message,
+        );
+      })
+      .finally(() => setActionPending(false));
   };
   const openFolder = () => {
     setShellError(null);
     void openProjectFolder(currentProject).catch((error) => {
-      const message = String(error);
-      setShellError(
-        message.includes('type_not_allowed')
-          ? "The app can't open that file type"
-          : 'That folder is no longer there',
-      );
+      const parsed = EngineError.from(error);
+      const messages: Record<string, string> = {
+        file_not_found: 'That folder is no longer there',
+        outside_project: 'That folder is outside the project',
+        open_failed: 'The folder could not be opened',
+        engine_unavailable: 'The engine is unavailable',
+      };
+      setShellError(messages[parsed.reason ?? ''] ?? 'Available in the desktop app');
     });
   };
   const runAgain = () => {
@@ -98,7 +113,7 @@ export function MainArea() {
           {phase.value === 'run' && current && (
             <>
               {(current.state === 'running' || current.state === 'paused') && (
-                <button type="button" onClick={pause}>
+                <button type="button" disabled={actionPending} onClick={pause}>
                   {current.state === 'paused' ? 'Resume' : 'Pause'}
                 </button>
               )}
@@ -117,13 +132,13 @@ export function MainArea() {
               </button>
             </>
           )}
+          {shellError && (
+            <span class="view-error" role="alert">
+              {shellError}
+            </span>
+          )}
         </div>
       </header>
-      {shellError && (
-        <div class="view-error" role="alert">
-          {shellError}
-        </div>
-      )}
       <div class="body">
         <ErrorBoundary resetKey={`${currentProject}:${current?.job ?? ''}`}>
           {view}

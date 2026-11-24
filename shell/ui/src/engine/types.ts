@@ -31,7 +31,7 @@ export type JobSummary = {
   remaining?: number | string;
   approvedAt?: number;
 };
-export type FileInfo = { name: string; size: number };
+export type FileInfo = { name: string; size: number; modified?: number; kind?: string };
 export type SetupStatus = 'pending' | 'ok' | 'failed' | 'manual_pending' | 'manual_done';
 export type SetupItem = {
   name: string;
@@ -122,6 +122,20 @@ export type JobSnapshot = {
   failure: { text: string; [key: string]: unknown } | null;
   approvedAt?: number;
 };
+export type RuleDefinition = Rule;
+export type PlanRule = {
+  kind: string;
+  name?: string;
+  summary: string;
+  definition?: RuleDefinition;
+};
+export type OutputColumn = {
+  name: string;
+  type: string;
+  description?: string;
+  nullable?: boolean;
+  values?: string[] | null;
+};
 export type PlanCard = {
   job: string;
   project: string;
@@ -142,8 +156,8 @@ export type PlanCard = {
     malformed?: number;
   };
   scanBytes: number;
-  outputColumns: { name: string; type: string; description?: string }[];
-  rules: { kind: string; name?: string; summary: string }[];
+  outputColumns: OutputColumn[];
+  rules: PlanRule[];
   sampleSize: number;
   estimate: {
     sampleSeconds: { low: number; high: number } | null;
@@ -184,7 +198,13 @@ export type SampleCard = {
   passed?: number;
   flagged?: number;
 };
-export type OutputFile = { name: string; kind: string };
+export type OutputFile = {
+  name: string;
+  path: string;
+  kind: string;
+  specVersion: number | null;
+  rebuild: number | null;
+};
 export type Reconciliation = {
   selected: number;
   read: number;
@@ -202,11 +222,11 @@ export type JobOutputs = {
   job: string;
   specVersion: number;
   state: string;
-  finishedAt: number;
+  finishedAt: number | null;
   durationSeconds: number | null;
   asleepSeconds: number | null;
   files: OutputFile[];
-  reconciliation: Reconciliation;
+  reconciliation: Reconciliation | null;
   issues: OutputIssue[];
   headline: string | null;
 };
@@ -219,7 +239,7 @@ export type Rule =
   | { kind: 'in_scope'; match: 'all' | 'any'; conditions: RuleCondition[] }
   | { kind: 'threshold_group'; name: string; field: string; edges: number[]; labels: string[] }
   | { kind: 'review_flag'; name: string; match: 'all' | 'any'; conditions: RuleCondition[] };
-export type RebuildResult = { job: string; path: string; rebuild: number };
+export type RebuildResult = { job: string; name: string; path: string; rebuild: number };
 export type AllowanceWindow = {
   name: string;
   usedPercent: number;
@@ -313,7 +333,6 @@ export type MethodMap = {
   };
   'job/outputs': { params: { job: string }; result: JobOutputs };
   'allowance/status': { params: {}; result: AllowanceStatus };
-  open_project_folder: { params: { project: string }; result: null };
   'files/path': { params: { project: string; name: string }; result: { path: string } };
 };
 export type ParamsOf<M extends Method> = MethodMap[M]['params'];
