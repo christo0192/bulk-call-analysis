@@ -52,10 +52,74 @@ export type ChatEntry = {
   status?: 'started' | 'done' | 'failed';
   summary?: string;
 };
-export type JobSnapshot = JobStatus & {
-  selected?: number;
-  eta?: string;
-  steps?: { id?: string; ts?: number }[];
+export type SnapshotProgress = {
+  job: string;
+  project: string;
+  phase: string;
+  done: number;
+  inFlight: number;
+  retrying: number;
+  failed: number;
+  heldBack: number;
+  remaining: number;
+  total: number;
+};
+export type SnapshotCounts = {
+  selected: number;
+  usable: number;
+  noTranscript: number;
+  transcriptionFailed: number;
+  tooShort: number;
+  notFound: number;
+  capped: number;
+  failedByReason: Record<string, number>;
+};
+export type SnapshotEta = {
+  low: number | null;
+  high: number | null;
+  seeded: boolean;
+  known: boolean;
+};
+export type JobSnapshot = {
+  job: string;
+  project: string;
+  title: string;
+  state: JobState | string;
+  step: string;
+  specVersion: number;
+  pauseReason: string | null;
+  resumeAt: number | null;
+  planApprovedAt: number | null;
+  sampleApprovedAt: number | null;
+  progress: SnapshotProgress;
+  counts: SnapshotCounts;
+  eta: SnapshotEta | null;
+  activity: {
+    lastActivityTs: number | null;
+    inFlight: number;
+    workers: number;
+    throughputPerMin: number | null;
+  };
+  quota: {
+    codex: {
+      primary: { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
+      stopAtPercent?: number;
+      projectedEndPercent?: number | null;
+      [key: string]: unknown;
+    } | null;
+    claude: Record<string, unknown> | null;
+    projectedEndPercent: number | null;
+  };
+  steps: {
+    id: string;
+    label: string;
+    status: 'done' | 'active' | 'todo' | string;
+    ts?: number;
+    detail: string | null;
+  }[];
+  recent: { ts: number; kind: string; text: string }[];
+  reconciliation: { addsUp: boolean; [key: string]: unknown } | null;
+  approvedAt?: number;
 };
 export type PlanCard = {
   job: string;
@@ -208,6 +272,7 @@ export type MethodMap = {
   };
   'job/outputs': { params: { job: string }; result: DoneView };
   'allowance/status': { params: {}; result: AllowanceStatus };
+  open_project_folder: { params: { project: string }; result: { opened: boolean } };
   'files/path': { params: { project: string; name: string }; result: { path: string } };
 };
 export type ParamsOf<M extends Method> = MethodMap[M]['params'];

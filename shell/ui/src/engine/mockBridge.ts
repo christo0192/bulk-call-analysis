@@ -1,6 +1,9 @@
 import type { EngineBridge, Unsubscribe } from './client';
 import { EngineError } from './client';
 import type { Method, ParamsOf, ResultOf, Notification, ChatEntry } from './types';
+import runningSnapshot from '../mock/fixtures/engine/job-snapshot-running.json';
+import pausedSnapshot from '../mock/fixtures/engine/job-snapshot-paused.json';
+import allowanceFixture from '../mock/fixtures/engine/allowance-status.json';
 import {
   projects,
   jobs,
@@ -17,6 +20,8 @@ import {
 } from '../mock/fixtures/data';
 const firstRun = typeof window !== 'undefined' && window.location.search.includes('mock=firstrun');
 const noAuth = typeof window !== 'undefined' && window.location.search.includes('mock=noauth');
+const quotaPause =
+  typeof window !== 'undefined' && window.location.search.includes('mock=quota-pause');
 let firstRunActive = firstRun;
 const checklistState = (firstRun ? newComputerChecklist : checklist).map((item) => ({
   ...item,
@@ -41,6 +46,8 @@ export class MockBridge implements EngineBridge {
   private statuses = new Set<(s: { status: string; reason?: string }) => void>();
   private checkCount = 0;
   private signInStarted = !firstRun;
+  private runProgressTimer: ReturnType<typeof setTimeout> | undefined;
+  private runDone = 2;
   private chatEntries: ChatEntry[] = [
     {
       id: 1,
@@ -87,7 +94,7 @@ export class MockBridge implements EngineBridge {
       });
       return project as ResultOf<M>;
     }
-    if (method === 'allowance/status') return allowances as ResultOf<M>;
+    if (method === 'allowance/status') return allowanceFixture as ResultOf<M>;
     if (method === 'chat/history') return { entries: this.chatEntries, more: false } as ResultOf<M>;
     if (method === 'ids/attach') {
       const value = String((params as { text: string }).text);
@@ -289,8 +296,45 @@ export class MockBridge implements EngineBridge {
       return job as ResultOf<M>;
     }
     if (method === 'job/snapshot') {
-      const job = jobs.find((item) => item.job === (params as { job: string }).job);
-      return { ...(job ?? jobs[0]), approvedAt: job?.approvedAt } as ResultOf<M>;
+      const requested = (params as { job: string }).job;
+      const job = jobs.find((item) => item.job === requested);
+      const isPaused = job?.state === 'paused';
+      if (!isPaused && job?.state === 'running' && !this.runProgressTimer) {
+        const advance = () => {
+          this.runProgressTimer = undefined;
+          const current = jobs.find((item) => item.job === requested);
+          if (!current || current.state !== 'running') return;
+          this.runDone = Math.min(8, this.runDone + 1);
+          this.emit({
+            jsonrpc: '2.0',
+            method: 'job/progress',
+            params: {
+              job: requested,
+              project: current.project,
+              phase: 'full',
+              done: this.runDone,
+              inFlight: 4,
+              retrying: 0,
+              failed: 0,
+              heldBack: 0,
+              remaining: Math.max(0, 8 - this.runDone - 4),
+              total: 8,
+            },
+          });
+          if (this.runDone < 8) this.runProgressTimer = setTimeout(advance, 2000);
+        };
+        this.runProgressTimer = setTimeout(advance, 2000);
+      }
+      return {
+        ...(isPaused || quotaPause ? pausedSnapshot : runningSnapshot),
+        ...(quotaPause
+          ? { state: 'paused', pauseReason: 'usage_limit', resumeAt: 1700000000 }
+          : {}),
+        job: requested,
+        project: job?.project ?? runningSnapshot.project,
+        title:
+          projects.find((item) => item.project === job?.project)?.title ?? runningSnapshot.title,
+      } as ResultOf<M>;
     }
     if (method === 'job/startFull') {
       const job = jobs.find((item) => item.job === (params as { job: string }).job);
@@ -304,17 +348,45 @@ export class MockBridge implements EngineBridge {
       }
       return job as ResultOf<M>;
     }
+    if (method === 'job/pause' || method === 'job/resume') {
+      const requested = (params as { job: string }).job;
+      const job = jobs.find((item) => item.job === requested);
+      if (job) {
+        job.state = method === 'job/pause' ? 'paused' : 'running';
+        if (job.state === 'paused' && this.runProgressTimer) {
+          clearTimeout(this.runProgressTimer);
+          this.runProgressTimer = undefined;
+        }
+        this.emit({
+          jsonrpc: '2.0',
+          method: 'job/state',
+          params: { job: requested, project: job.project, state: job.state, step: job.state },
+        });
+      }
+      return job as ResultOf<M>;
+    }
     if (method === 'health/ping') return { status: 'ok' } as ResultOf<M>;
+    if (method === 'open_project_folder') return { opened: true } as ResultOf<M>;
     return {} as ResultOf<M>;
   }
   setResponse<M extends Method>(
     method: M,
-    fn: (params: ParamsOf<M>) => ResultOf<M> | Promise<ResultOf<M>>,
+    fn: (
+      params: ParamsOf<M>,
+    ) => ResultOf<M> | Partial<ResultOf<M>> | Promise<ResultOf<M> | Partial<ResultOf<M>>>,
   ): void {
     this.responses.set(method, fn as ResponseFn);
   }
   /** Test helper: forget every response set with setResponse, so tests stay isolated. */
   clearResponses(): void {
+    this.responses.clear();
+  }
+  /** Test helper: stop the run-progress simulation and forget recorded calls and responses. */
+  resetForTest(): void {
+    if (this.runProgressTimer !== undefined) clearTimeout(this.runProgressTimer);
+    this.runProgressTimer = undefined;
+    this.runDone = 2;
+    this.calls = [];
     this.responses.clear();
   }
   emit(notification: Notification): void {

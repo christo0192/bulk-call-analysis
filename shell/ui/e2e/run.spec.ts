@@ -1,0 +1,19 @@
+import { expect, test } from '@playwright/test';
+
+test('run view shows live progress and pause and resume work', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: /Webinar objections/ }).click();
+  await expect(page.getByTestId('run-view')).toBeVisible();
+  await expect(page.getByText(/2 of 8 leads read/)).toBeVisible();
+  await page.getByRole('button', { name: 'Pause' }).click();
+  await expect(page.getByRole('button', { name: 'Resume' })).toBeVisible();
+  await page.getByRole('button', { name: 'Resume' }).click();
+  await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible();
+});
+
+test('quota pause banner shows the reset time', async ({ page }) => {
+  await page.goto('/?mock=quota-pause');
+  await page.getByRole('button', { name: /Webinar objections/ }).click();
+  await expect(page.getByText(/Paused: ChatGPT allowance/)).toBeVisible();
+  await expect(page.getByText(/allowance resets/)).toBeVisible();
+});

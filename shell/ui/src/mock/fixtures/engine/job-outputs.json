@@ -1,0 +1,27 @@
+{
+  "job": "job-one",
+  "specVersion": 1,
+  "state": "done",
+  "finishedAt": 1700000000,
+  "durationSeconds": null,
+  "asleepSeconds": null,
+  "files": [
+    { "name": "output/reconciliation.v1.json", "kind": "other" },
+    { "name": "output/results.v1.xlsx", "kind": "results" },
+    { "name": "output/verify-report.v1.md", "kind": "report" }
+  ],
+  "reconciliation": {
+    "selected": 8,
+    "read": 8,
+    "noTranscript": 0,
+    "transcriptionFailed": 0,
+    "tooShort": 0,
+    "notFound": 0,
+    "heldBack": 0,
+    "failed": 0,
+    "notStarted": 0,
+    "addsUp": true
+  },
+  "issues": [],
+  "headline": null
+}
