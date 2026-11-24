@@ -9,6 +9,7 @@ pub enum OpenError {
     OutsideProject,
     #[error("file type is not allowed")]
     TypeNotAllowed,
+    #[error("invalid path")]
     InvalidPath,
 }
 

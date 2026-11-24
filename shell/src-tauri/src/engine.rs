@@ -306,9 +306,17 @@ impl<R: Runtime> Engine<R> {
                                 0,
                                 0,
                                 None,
-                                self.inner.notifications.lock().ok().and_then(|ctx| {
-                                    ctx.pause_reason.as_deref().map(pause_reason_label)
-                                }),
+                                self.inner
+                                    .notifications
+                                    .lock()
+                                    .ok()
+                                    .and_then(|ctx| {
+                                        ctx.pause_reason
+                                            .as_deref()
+                                            .map(pause_reason_label)
+                                            .map(str::to_owned)
+                                    })
+                                    .as_deref(),
                             ),
                             Some("done")
                             | Some("done_with_issues")
@@ -326,7 +334,7 @@ impl<R: Runtime> Engine<R> {
                     }
                 }
             }
-            self.spawn_notification_refresh(notification);
+            self.spawn_notification_refresh(notification.clone());
             self.emit("engine-event", notification);
         }
         ping_task.abort();

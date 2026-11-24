@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct NotifyCtx {
     pub project_titles: HashMap<String, String>,
     pub progress: HashMap<String, (u64, u64)>,
@@ -13,6 +13,20 @@ pub struct NotifyCtx {
     pub previous_power: Option<crate::power::PowerStatus>,
     pub now: SystemTime,
     seen: HashMap<(String, String), SystemTime>,
+}
+
+impl Default for NotifyCtx {
+    fn default() -> Self {
+        Self {
+            project_titles: HashMap::new(),
+            progress: HashMap::new(),
+            active_job: None,
+            pause_reason: None,
+            previous_power: None,
+            now: SystemTime::UNIX_EPOCH,
+            seen: HashMap::new(),
+        }
+    }
 }
 
 fn params(event: &Value) -> &Value {
@@ -196,8 +210,10 @@ mod tests {
     }
     #[test]
     fn real_pause_payload_uses_relative_resume_time() {
-        let mut c = NotifyCtx::default();
-        c.now = SystemTime::UNIX_EPOCH + Duration::from_secs(1795000000 - 3 * 3600 - 15 * 60);
+        let c = NotifyCtx {
+            now: SystemTime::UNIX_EPOCH + Duration::from_secs(1795000000 - 3 * 3600 - 15 * 60),
+            ..Default::default()
+        };
         let n = notification_for(&json!({"method":"engine/event","params":{"kind":"pause","job":"j","reason":"quota","resume_at":1795000000}}), &c).unwrap();
         assert_eq!(n.1, "Resumes on its own in about 3 h 15 min");
     }
