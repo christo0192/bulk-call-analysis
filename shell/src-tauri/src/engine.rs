@@ -1109,151 +1109,63 @@ pub fn minimal_environment() -> std::collections::HashMap<String, String> {
         ])
         .collect()
 }
-#[allow(dead_code)]
-pub fn format_tooltip(done: u64, total: u64, _unused: String) -> String {
-    format!("{} / {}", format_number(done), format_number(total))
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[allow(dead_code)]
-pub struct JobTrayState {
-    pub job: Option<String>,
-    pub project: Option<String>,
-    pub state: Option<String>,
-    pub pause_reason: Option<String>,
-    pub done: u64,
-    pub total: u64,
-    pub eta: Option<String>,
-}
-
-#[allow(dead_code)]
-pub fn update_tray_state(state: &mut JobTrayState, event: &Value) {
-    let p = event.get("params").unwrap_or(event);
-    match event.get("method").and_then(Value::as_str) {
-        Some("job/state") => {
-            let job = p.get("job").and_then(Value::as_str).map(str::to_owned);
-            if job.is_some() && state.job.is_some() && job != state.job {
-                *state = JobTrayState {
-                    job: job.clone(),
-                    ..Default::default()
-                };
-            }
-            state.project = p.get("project").and_then(Value::as_str).map(str::to_owned);
-            state.state = p
-                .get("state")
-                .or_else(|| p.get("status"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            if matches!(
-                state.state.as_deref(),
-                Some("running" | "starting" | "active" | "in_progress")
-            ) {
-                state.pause_reason = None;
-            }
-        }
-        Some("job/progress") => {
-            state.job = p
-                .get("job")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or(state.job.take());
-            state.done = p.get("done").and_then(Value::as_u64).unwrap_or(0);
-            state.total = p.get("total").and_then(Value::as_u64).unwrap_or(0);
-        }
-        Some("engine/event") => match p.get("kind").and_then(Value::as_str) {
-            Some("pause") => {
-                state.pause_reason = p
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .and_then(crate::notifications::pause_reason_label)
-                    .map(str::to_owned)
-            }
-            Some("eta") => {
-                state.eta = if p.get("known").and_then(Value::as_bool) == Some(false) {
-                    None
-                } else {
-                    format_eta(
-                        p.get("low").and_then(Value::as_f64),
-                        p.get("high").and_then(Value::as_f64),
-                    )
-                }
-            }
-            _ => {}
-        },
-        _ => {}
-    }
-}
-
-#[allow(dead_code)]
-pub fn render_job_tray_state(state: &JobTrayState) -> String {
-    match state.state.as_deref() {
-        Some("running") | Some("starting") | Some("active") | Some("in_progress") => format!(
-            "Bulk Call Analysis — Reading {} of {}{}",
-            format_number(state.done),
-            format_number(state.total),
-            state
-                .eta
-                .as_deref()
-                .map(|v| format!(" · {v}"))
-                .unwrap_or_default()
-        ),
-        Some("paused") => state
-            .pause_reason
-            .as_deref()
-            .map_or_else(|| "Paused".into(), |r| format!("Paused ({r})")),
-        Some("sample_ready") => "Sample ready to check".into(),
-        Some("done") => "Done".into(),
-        Some("done_with_issues") => "Done, with issues to check".into(),
-        Some("failed") => "Stopped: the job failed".into(),
-        Some("cancelled") | Some("idle") | None => "Bulk Call Analysis".into(),
-        _ => "Bulk Call Analysis".into(),
-    }
-}
-
-#[allow(dead_code)]
-pub fn format_eta(low_seconds: Option<f64>, high_seconds: Option<f64>) -> Option<String> {
-    let seconds = high_seconds.or(low_seconds)?;
-    if !seconds.is_finite() || seconds <= 0.0 {
-        return None;
-    }
-    let minutes = (seconds.ceil() as u64).div_ceil(60);
-    if minutes < 60 {
-        Some(format!("about {minutes} m left"))
-    } else if minutes % 60 == 0 {
-        Some(format!("about {} h left", minutes / 60))
-    } else {
-        Some(format!(
-            "about {} h {} min left",
-            minutes / 60,
-            minutes % 60
-        ))
-    }
-}
-
-#[allow(dead_code)]
-fn format_number(value: u64) -> String {
-    let digits = value.to_string();
-    let first = if digits.len() % 3 == 0 {
-        3
-    } else {
-        digits.len() % 3
-    };
-    if first == 0 {
-        return digits;
-    }
-    let mut result = String::with_capacity(digits.len() + (digits.len() - first) / 3);
-    result.push_str(&digits[..first]);
-    for chunk in digits.as_bytes()[first..].chunks(3) {
-        result.push(',');
-        result.push_str(std::str::from_utf8(chunk).expect("numeric string is UTF-8"));
-    }
-    result
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct RecordingPower {
+        holds: AtomicUsize,
+        releases: AtomicUsize,
+    }
+
+    impl power::PowerOs for RecordingPower {
+        fn hold(&self) -> Result<(), power::PowerError> {
+            self.holds.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn release(&self) -> Result<(), power::PowerError> {
+            self.releases.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn status(&self) -> PowerStatus {
+            PowerStatus {
+                on_ac: Some(true),
+                percent: Some(100),
+            }
+        }
+    }
+
+    impl power::PowerOs for Arc<RecordingPower> {
+        fn hold(&self) -> Result<(), power::PowerError> {
+            self.as_ref().hold()
+        }
+
+        fn release(&self) -> Result<(), power::PowerError> {
+            self.as_ref().release()
+        }
+
+        fn status(&self) -> PowerStatus {
+            self.as_ref().status()
+        }
+    }
+
+    fn test_engine() -> (Engine<tauri::Wry>, Arc<RecordingPower>) {
+        let power = Arc::new(RecordingPower {
+            holds: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+        });
+        let mut engine = Engine::<tauri::Wry>::new_without_app();
+        Arc::get_mut(&mut engine.inner).unwrap().power = KeepAwake::new(Box::new(power.clone()));
+        (engine, power)
+    }
 
     #[test]
     fn chat_send_has_two_hour_backstop() {
@@ -1267,120 +1179,115 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_omits_missing_eta() {
-        let state = JobTrayState {
-            state: Some("running".into()),
-            done: 4312,
-            total: 10727,
-            ..Default::default()
-        };
-        assert_eq!(
-            render_job_tray_state(&state),
-            "Bulk Call Analysis — Reading 4,312 of 10,727"
-        );
+    fn keep_awake_stays_while_any_job_runs() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (engine, power) = test_engine();
+            engine
+                .apply_model_change(&json!({"method":"job/state","params":{"job":"job-a","project":"project-a","state":"running","step":"verifying"}}))
+                .await;
+            assert!(engine.inner.power.is_held());
+            assert_eq!(power.holds.load(Ordering::Relaxed), 1);
+
+            engine
+                .apply_model_change(&json!({"method":"job/state","params":{"job":"job-b","project":"project-b","state":"plan_approved","step":"plan_approved"}}))
+                .await;
+            assert!(engine.inner.power.is_held());
+
+            engine
+                .apply_model_change(&json!({"method":"job/state","params":{"job":"job-b","project":"project-b","state":"done","step":"done"}}))
+                .await;
+            assert!(engine.inner.power.is_held());
+            assert_eq!(power.releases.load(Ordering::Relaxed), 0);
+
+            engine
+                .apply_model_change(&json!({"method":"job/state","params":{"job":"job-a","project":"project-a","state":"done","step":"done"}}))
+                .await;
+            assert!(!engine.inner.power.is_held());
+            assert_eq!(power.releases.load(Ordering::Relaxed), 1);
+        });
     }
 
     #[test]
-    fn paused_tooltip_includes_reason() {
-        let state = JobTrayState {
-            state: Some("paused".into()),
-            pause_reason: Some("allowance limit".into()),
-            ..Default::default()
-        };
-        assert_eq!(render_job_tray_state(&state), "Paused (allowance limit)");
+    fn recovered_run_progress_takes_the_hold() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (engine, power) = test_engine();
+            engine
+                .apply_model_change(&json!({"method":"job/progress","params":{"job":"job-recovered","project":"project-recovered","phase":"full","done":0,"inFlight":3,"retrying":0,"failed":0,"heldBack":0,"remaining":3,"total":6}}))
+                .await;
+            assert!(engine.inner.power.is_held());
+            assert_eq!(power.holds.load(Ordering::Relaxed), 1);
+        });
     }
 
     #[test]
-    fn idle_tooltip_is_short() {
-        assert_eq!(
-            render_job_tray_state(&JobTrayState::default()),
-            "Bulk Call Analysis"
-        );
+    fn recovered_run_seeded_as_verifying_takes_the_hold() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (engine, power) = test_engine();
+            let (client_io, mut server_io) = tokio::io::duplex(4096);
+            let client = Client::new(client_io);
+            let response_client = client.clone();
+            let (notifications, _) = mpsc::channel(1);
+            let server = tokio::spawn(async move {
+                let mut line = Vec::new();
+                tokio::io::AsyncBufReadExt::read_until(
+                    &mut tokio::io::BufReader::new(&mut server_io),
+                    b'\n',
+                    &mut line,
+                )
+                .await
+                .unwrap();
+                let request: Value = serde_json::from_slice(&line).unwrap();
+                let response = json!({
+                    "id": request["id"],
+                    "result": [{
+                        "activeJob": {
+                            "job": "job-seeded",
+                            "project": "project-seeded",
+                            "state": "running",
+                            "step": "verifying"
+                        }
+                    }]
+                });
+                response_client.dispatch(response, &notifications).await;
+            });
+            engine.seed_active_jobs(client, 0).await;
+            server.await.unwrap();
+            assert!(engine.inner.power.is_held());
+            assert_eq!(power.holds.load(Ordering::Relaxed), 1);
+        });
     }
 
     #[test]
-    fn eta_formats_hours_and_minutes() {
-        assert_eq!(
-            format_eta(Some(60.0), Some(300.0)),
-            Some("about 5 m left".into())
-        );
-        assert_eq!(
-            format_eta(Some(14_000.0), Some(18_000.0)),
-            Some("about 5 h left".into())
-        );
-        assert_eq!(format_eta(None, None), None);
-    }
-
-    #[test]
-    fn tooltip_is_right_for_either_order_of_state_and_pause() {
-        for events in [
-            vec![
-                json!({"method":"job/state","params":{"job":"j","state":"paused"}}),
-                json!({"method":"engine/event","params":{"kind":"pause","reason":"quota"}}),
-            ],
-            vec![
-                json!({"method":"engine/event","params":{"kind":"pause","reason":"quota"}}),
-                json!({"method":"job/state","params":{"job":"j","state":"paused"}}),
-            ],
-        ] {
-            let mut state = JobTrayState::default();
-            for event in events {
-                update_tray_state(&mut state, &event);
+    fn pause_stall_failure_and_engine_death_release_the_hold() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            for event in [
+                json!({"method":"engine/event","params":{"job":"job","project":"project","kind":"pause","reason":"quota","resume_at":1795517946}}),
+                json!({"method":"job/state","params":{"job":"job","project":"project","state":"stalled","step":"stalled"}}),
+                json!({"method":"job/state","params":{"job":"job","project":"project","state":"failed","step":"failed"}}),
+            ] {
+                let (engine, power) = test_engine();
+                engine
+                    .apply_model_change(&json!({"method":"job/state","params":{"job":"job","project":"project","state":"running","step":"full_running"}}))
+                    .await;
+                assert!(engine.inner.power.is_held());
+                engine.apply_model_change(&event).await;
+                assert!(!engine.inner.power.is_held());
+                assert_eq!(power.releases.load(Ordering::Relaxed), 1);
             }
-            assert_eq!(render_job_tray_state(&state), "Paused (allowance limit)");
-        }
-    }
 
-    #[test]
-    fn progress_while_paused_keeps_the_paused_tooltip() {
-        let mut state = JobTrayState::default();
-        update_tray_state(
-            &mut state,
-            &json!({"method":"job/state","params":{"job":"j","state":"paused"}}),
-        );
-        update_tray_state(
-            &mut state,
-            &json!({"method":"engine/event","params":{"kind":"pause","reason":"user"}}),
-        );
-        update_tray_state(
-            &mut state,
-            &json!({"method":"job/progress","params":{"job":"j","done":4312,"total":10727}}),
-        );
-        assert_eq!(render_job_tray_state(&state), "Paused (you)");
-    }
-
-    #[test]
-    fn tooltip_texts_for_every_state() {
-        for (state, expected) in [
-            ("sample_ready", "Sample ready to check"),
-            ("done", "Done"),
-            ("done_with_issues", "Done, with issues to check"),
-            ("failed", "Stopped: the job failed"),
-            ("cancelled", "Bulk Call Analysis"),
-            ("idle", "Bulk Call Analysis"),
-        ] {
-            assert_eq!(
-                render_job_tray_state(&JobTrayState {
-                    state: Some(state.into()),
-                    ..Default::default()
-                }),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn six_digit_counts_have_separators() {
-        let state = JobTrayState {
-            state: Some("running".into()),
-            done: 107270,
-            total: 1_000_000,
-            ..Default::default()
-        };
-        assert_eq!(
-            render_job_tray_state(&state),
-            "Bulk Call Analysis — Reading 107,270 of 1,000,000"
-        );
+            let (engine, power) = test_engine();
+            engine
+                .apply_model_change(&json!({"method":"job/state","params":{"job":"job","project":"project","state":"running","step":"full_running"}}))
+                .await;
+            assert!(engine.inner.power.is_held());
+            engine.clear_tray();
+            assert!(!engine.inner.power.is_held());
+            assert_eq!(power.releases.load(Ordering::Relaxed), 1);
+        });
     }
 
     #[test]
@@ -1388,13 +1295,6 @@ mod tests {
         std::env::set_var("OPENAI_API_KEY", "secret");
         assert!(!minimal_environment().keys().any(|k| k.contains("API_KEY")));
         std::env::remove_var("OPENAI_API_KEY");
-    }
-    #[test]
-    fn tooltip() {
-        assert_eq!(
-            format_tooltip(4312, 10727, "~9 h 40 m".into()),
-            "4,312 / 10,727"
-        );
     }
     #[test]
     fn backoff_and_storm() {
@@ -1440,10 +1340,5 @@ mod tests {
         assert!(!environment.contains_key("ANTHROPIC_API_KEY"));
         std::env::remove_var("BCA_TEST_ALLOWED");
         std::env::remove_var("ANTHROPIC_API_KEY");
-    }
-
-    #[test]
-    fn tooltip_handles_zero_and_large_numbers() {
-        assert_eq!(format_tooltip(0, 1_000_000, "done".into()), "0 / 1,000,000");
     }
 }

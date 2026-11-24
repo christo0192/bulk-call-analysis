@@ -208,7 +208,6 @@ impl<W: AsyncWrite + Unpin + Send + 'static> Client<W> {
         }
     }
 
-    #[allow(dead_code)]
     pub async fn notify(
         self: &Arc<Self>,
         method: &str,
