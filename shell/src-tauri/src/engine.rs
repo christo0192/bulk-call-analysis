@@ -5,6 +5,7 @@ use crate::rpc::{self, Client, RpcError};
 use log::{error, warn};
 use serde_json::{json, Value};
 use std::{
+    collections::HashSet,
     collections::VecDeque,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
     sync::{Arc, Mutex as StdMutex},
@@ -50,6 +51,7 @@ struct Inner<R: Runtime> {
     guard: Mutex<Option<Arc<procguard::Guard>>>,
     power: KeepAwake<Box<dyn power::PowerOs>>,
     notifications: StdMutex<NotifyCtx>,
+    pending_title_lookups: StdMutex<HashSet<String>>,
 }
 
 #[derive(Debug)]
@@ -105,6 +107,7 @@ impl<R: Runtime> Engine<R> {
                 guard: Mutex::new(None),
                 power: power::platform(),
                 notifications: StdMutex::new(NotifyCtx::default()),
+                pending_title_lookups: StdMutex::new(HashSet::new()),
             }),
         }
     }
@@ -121,6 +124,7 @@ impl<R: Runtime> Engine<R> {
                 guard: Mutex::new(None),
                 power: power::platform(),
                 notifications: StdMutex::new(NotifyCtx::default()),
+                pending_title_lookups: StdMutex::new(HashSet::new()),
             }),
         }
     }
@@ -135,6 +139,14 @@ impl<R: Runtime> Engine<R> {
             this.power_status_loop().await;
         });
     }
+
+    pub fn active_job_id(&self) -> Option<String> {
+        self.inner
+            .notifications
+            .lock()
+            .ok()
+            .and_then(|ctx| ctx.active_job.clone())
+    }
     async fn supervise(&self) {
         loop {
             if self.inner.shutting_down.load(Ordering::Acquire) {
@@ -143,6 +155,7 @@ impl<R: Runtime> Engine<R> {
             match self.spawn_once().await {
                 Ok(()) => {}
                 Err(e) => {
+                    self.render_tray(&JobTrayState::default());
                     if self.inner.shutting_down.load(Ordering::Acquire) {
                         break;
                     }
@@ -243,11 +256,8 @@ impl<R: Runtime> Engine<R> {
                     }
                 }
             }));
-        let mut latest_eta: Option<String> = None;
-        let mut latest_progress = (0_u64, 0_u64);
-        let mut latest_job: Option<String> = None;
+        let mut tray_state = JobTrayState::default();
         while let Some(notification) = rx.recv().await {
-            self.update_power_for_notification(&notification).await;
             {
                 let mut ctx = self
                     .inner
@@ -256,84 +266,9 @@ impl<R: Runtime> Engine<R> {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 crate::notifications::observe(&notification, &mut ctx);
             }
-            let method = notification.get("method").and_then(Value::as_str);
-            if method == Some("engine/event") {
-                let params = notification.get("params").cloned().unwrap_or_default();
-                if params.get("kind").and_then(Value::as_str) == Some("eta") {
-                    latest_eta = if params.get("known").and_then(Value::as_bool) == Some(false) {
-                        None
-                    } else {
-                        format_eta(
-                            params.get("low").and_then(Value::as_f64),
-                            params.get("high").and_then(Value::as_f64),
-                        )
-                    };
-                }
-            }
-            if method == Some("job/progress") && !self.inner.shutting_down.load(Ordering::Acquire) {
-                if let Some(app) = &self.inner.app {
-                    if let Some(tray) = app.tray_by_id("main") {
-                        let params = notification.get("params").cloned().unwrap_or_default();
-                        let done = params.get("done").and_then(Value::as_u64).unwrap_or(0);
-                        let total = params.get("total").and_then(Value::as_u64).unwrap_or(0);
-                        latest_progress = (done, total);
-                        let _ = tray.set_tooltip(Some(format_tray_tooltip(
-                            done,
-                            total,
-                            latest_eta.as_deref(),
-                        )));
-                    }
-                }
-            }
-            if method == Some("job/state") {
-                let params = notification.get("params").cloned().unwrap_or_default();
-                let state = params
-                    .get("state")
-                    .or_else(|| params.get("status"))
-                    .and_then(Value::as_str);
-                let job = params.get("job").and_then(Value::as_str).map(str::to_owned);
-                if job != latest_job {
-                    latest_job = job;
-                    latest_eta = None;
-                    latest_progress = (0, 0);
-                }
-                if let Some(app) = &self.inner.app {
-                    if let Some(tray) = app.tray_by_id("main") {
-                        let tooltip = match state {
-                            Some("paused") => format_tray_status(
-                                false,
-                                true,
-                                0,
-                                0,
-                                None,
-                                self.inner
-                                    .notifications
-                                    .lock()
-                                    .ok()
-                                    .and_then(|ctx| {
-                                        ctx.pause_reason
-                                            .as_deref()
-                                            .map(pause_reason_label)
-                                            .map(str::to_owned)
-                                    })
-                                    .as_deref(),
-                            ),
-                            Some("done")
-                            | Some("done_with_issues")
-                            | Some("failed")
-                            | Some("cancelled") => "Done".into(),
-                            Some("running") | Some("starting") | Some("active")
-                            | Some("in_progress") => format_tray_tooltip(
-                                latest_progress.0,
-                                latest_progress.1,
-                                latest_eta.as_deref(),
-                            ),
-                            _ => "Bulk Call Analysis".into(),
-                        };
-                        let _ = tray.set_tooltip(Some(tooltip));
-                    }
-                }
-            }
+            self.update_power_for_notification(&notification).await;
+            update_tray_state(&mut tray_state, &notification);
+            self.render_tray(&tray_state);
             self.spawn_notification_refresh(notification.clone());
             self.emit("engine-event", notification);
         }
@@ -344,6 +279,7 @@ impl<R: Runtime> Engine<R> {
         procguard::terminate_group(child.id().unwrap_or_default());
         #[cfg(windows)]
         let _ = child.kill().await;
+        self.render_tray(&JobTrayState::default());
         let _ = child.wait().await;
         self.inner.active_pid.store(0, Ordering::Release);
         *self.inner.guard.lock().await = None;
@@ -455,6 +391,17 @@ impl<R: Runtime> Engine<R> {
         }
         self.emit("engine/status", payload);
     }
+
+    fn render_tray(&self, state: &JobTrayState) {
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(app) = &self.inner.app {
+            if let Some(tray) = app.tray_by_id("main") {
+                let _ = tray.set_tooltip(Some(render_job_tray_state(state)));
+            }
+        }
+    }
     async fn power_status_loop(&self) {
         loop {
             if self.inner.shutting_down.load(Ordering::Acquire) {
@@ -487,7 +434,28 @@ impl<R: Runtime> Engine<R> {
         }
     }
     async fn update_power_for_notification(&self, notification: &Value) {
-        match job_event_requires_keep_awake(notification) {
+        let keep_awake =
+            if notification.get("method").and_then(Value::as_str) == Some("job/progress") {
+                let job = notification
+                    .get("params")
+                    .and_then(|p| p.get("job"))
+                    .and_then(Value::as_str);
+                let paused = self
+                    .inner
+                    .notifications
+                    .lock()
+                    .ok()
+                    .and_then(|ctx| job.and_then(|id| ctx.states.get(id).map(|s| s == "paused")))
+                    .unwrap_or(false);
+                if paused {
+                    None
+                } else {
+                    Some(true)
+                }
+            } else {
+                job_event_requires_keep_awake(notification)
+            };
+        match keep_awake {
             Some(true) => {
                 if let Err(error) = self.inner.power.hold() {
                     log::warn!("failed to hold system awake: {error}");
@@ -528,9 +496,20 @@ impl<R: Runtime> Engine<R> {
                 .inner
                 .notifications
                 .lock()
-                .map(|c| !c.project_titles.contains_key(&project))
-                .unwrap_or(false);
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .project_titles
+                .contains_key(&project);
+            let unknown = !unknown;
             if unknown {
+                let should_lookup = self
+                    .inner
+                    .pending_title_lookups
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(project.clone());
+                if !should_lookup {
+                    return self.dispatch_notification(event).await;
+                }
                 if let Ok(Ok(Value::Array(items))) = tokio::time::timeout(
                     Duration::from_secs(10),
                     self.call("projects/list", json!({})),
@@ -548,18 +527,30 @@ impl<R: Runtime> Engine<R> {
                         }
                     }
                 }
+                self.inner
+                    .pending_title_lookups
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&project);
             }
         }
+        self.dispatch_notification(event).await;
+    }
+
+    async fn dispatch_notification(&self, event: Value) {
         if let Some(app) = &self.inner.app {
-            if let Ok(mut ctx) = self.inner.notifications.lock() {
-                if let Err(error) = crate::notifications::dispatch_notification(
-                    &mut ctx,
-                    &event,
-                    SystemTime::now(),
-                    |title, body| app.notification().builder().title(title).body(body).show(),
-                ) {
-                    log::debug!("could not show notification: {error}");
-                }
+            let mut ctx = self
+                .inner
+                .notifications
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Err(error) = crate::notifications::dispatch_notification(
+                &mut ctx,
+                &event,
+                SystemTime::now(),
+                |title, body| app.notification().builder().title(title).body(body).show(),
+            ) {
+                log::debug!("could not show notification: {error}");
             }
         }
     }
@@ -967,39 +958,97 @@ pub fn format_tooltip(done: u64, total: u64, _unused: String) -> String {
     format!("{} / {}", format_number(done), format_number(total))
 }
 
-pub fn format_tray_tooltip(done: u64, total: u64, eta: Option<&str>) -> String {
-    let eta = eta
-        .filter(|value| !value.is_empty())
-        .map(|value| format!(" · {value}"))
-        .unwrap_or_default();
-    format!(
-        "Bulk Call Analysis — Reading {} of {}{}",
-        format_number(done),
-        format_number(total),
-        eta
-    )
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JobTrayState {
+    pub job: Option<String>,
+    pub project: Option<String>,
+    pub state: Option<String>,
+    pub pause_reason: Option<String>,
+    pub done: u64,
+    pub total: u64,
+    pub eta: Option<String>,
 }
 
-pub fn format_tray_status(
-    running: bool,
-    paused: bool,
-    done: u64,
-    total: u64,
-    eta: Option<&str>,
-    pause_reason: Option<&str>,
-) -> String {
-    if paused {
-        return format!(
-            "Bulk Call Analysis — Paused{}",
-            pause_reason
-                .map(|reason| format!(" ({reason})"))
+pub fn update_tray_state(state: &mut JobTrayState, event: &Value) {
+    let p = event.get("params").unwrap_or(event);
+    match event.get("method").and_then(Value::as_str) {
+        Some("job/state") => {
+            let job = p.get("job").and_then(Value::as_str).map(str::to_owned);
+            if job.is_some() && state.job.is_some() && job != state.job {
+                *state = JobTrayState {
+                    job: job.clone(),
+                    ..Default::default()
+                };
+            }
+            state.project = p.get("project").and_then(Value::as_str).map(str::to_owned);
+            state.state = p
+                .get("state")
+                .or_else(|| p.get("status"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if matches!(
+                state.state.as_deref(),
+                Some("running" | "starting" | "active" | "in_progress")
+            ) {
+                state.pause_reason = None;
+            }
+        }
+        Some("job/progress") => {
+            state.job = p
+                .get("job")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or(state.job.take());
+            state.done = p.get("done").and_then(Value::as_u64).unwrap_or(0);
+            state.total = p.get("total").and_then(Value::as_u64).unwrap_or(0);
+        }
+        Some("engine/event") => match p.get("kind").and_then(Value::as_str) {
+            Some("pause") => {
+                state.pause_reason = p
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .and_then(crate::notifications::pause_reason_label)
+                    .map(str::to_owned)
+            }
+            Some("eta") => {
+                state.eta = if p.get("known").and_then(Value::as_bool) == Some(false) {
+                    None
+                } else {
+                    format_eta(
+                        p.get("low").and_then(Value::as_f64),
+                        p.get("high").and_then(Value::as_f64),
+                    )
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+pub fn render_job_tray_state(state: &JobTrayState) -> String {
+    match state.state.as_deref() {
+        Some("running") | Some("starting") | Some("active") | Some("in_progress") => format!(
+            "Bulk Call Analysis — Reading {} of {}{}",
+            format_number(state.done),
+            format_number(state.total),
+            state
+                .eta
+                .as_deref()
+                .map(|v| format!(" · {v}"))
                 .unwrap_or_default()
-        );
+        ),
+        Some("paused") => state
+            .pause_reason
+            .as_deref()
+            .map_or_else(|| "Paused".into(), |r| format!("Paused ({r})")),
+        Some("sample_ready") => "Sample ready to check".into(),
+        Some("done") => "Done".into(),
+        Some("done_with_issues") => "Done, with issues to check".into(),
+        Some("failed") => "Stopped: the job failed".into(),
+        Some("cancelled") | Some("idle") | None => "Bulk Call Analysis".into(),
+        _ => "Bulk Call Analysis".into(),
     }
-    if running {
-        return format_tray_tooltip(done, total, eta);
-    }
-    "Bulk Call Analysis".into()
 }
 
 pub fn format_eta(low_seconds: Option<f64>, high_seconds: Option<f64>) -> Option<String> {
@@ -1007,30 +1056,28 @@ pub fn format_eta(low_seconds: Option<f64>, high_seconds: Option<f64>) -> Option
     if !seconds.is_finite() || seconds <= 0.0 {
         return None;
     }
-    let seconds = seconds.ceil() as u64;
-    if seconds >= 3600 {
-        Some(format!("about {} h left", seconds.div_ceil(3600)))
+    let minutes = (seconds.ceil() as u64).div_ceil(60);
+    if minutes < 60 {
+        Some(format!("about {minutes} m left"))
+    } else if minutes % 60 == 0 {
+        Some(format!("about {} h left", minutes / 60))
     } else {
-        Some(format!("about {} m left", seconds.div_ceil(60)))
-    }
-}
-
-fn pause_reason_label(reason: &str) -> &str {
-    match reason {
-        "quota" | "usage_limit" => "usage limit",
-        "sleep" => "computer asleep",
-        "operator" => "paused by you",
-        "battery" => "on battery",
-        "credit" | "credits" | "spend" | "spend_control" => "avoid paid credits",
-        "model_unavailable" => "model unavailable",
-        _ => "paused",
+        Some(format!(
+            "about {} h {} min left",
+            minutes / 60,
+            minutes % 60
+        ))
     }
 }
 
 #[allow(dead_code)]
 fn format_number(value: u64) -> String {
     let digits = value.to_string();
-    let first = digits.len() % 3;
+    let first = if digits.len() % 3 == 0 {
+        3
+    } else {
+        digits.len() % 3
+    };
     if first == 0 {
         return digits;
     }
@@ -1046,6 +1093,7 @@ fn format_number(value: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn chat_send_has_two_hour_backstop() {
@@ -1060,24 +1108,32 @@ mod tests {
 
     #[test]
     fn tooltip_omits_missing_eta() {
+        let state = JobTrayState {
+            state: Some("running".into()),
+            done: 4312,
+            total: 10727,
+            ..Default::default()
+        };
         assert_eq!(
-            format_tray_tooltip(4312, 10727, None),
+            render_job_tray_state(&state),
             "Bulk Call Analysis — Reading 4,312 of 10,727"
         );
     }
 
     #[test]
     fn paused_tooltip_includes_reason() {
-        assert_eq!(
-            format_tray_status(false, true, 0, 0, None, Some("usage limit")),
-            "Bulk Call Analysis — Paused (usage limit)"
-        );
+        let state = JobTrayState {
+            state: Some("paused".into()),
+            pause_reason: Some("allowance limit".into()),
+            ..Default::default()
+        };
+        assert_eq!(render_job_tray_state(&state), "Paused (allowance limit)");
     }
 
     #[test]
     fn idle_tooltip_is_short() {
         assert_eq!(
-            format_tray_status(false, false, 0, 0, None, None),
+            render_job_tray_state(&JobTrayState::default()),
             "Bulk Call Analysis"
         );
     }
@@ -1093,6 +1149,78 @@ mod tests {
             Some("about 5 h left".into())
         );
         assert_eq!(format_eta(None, None), None);
+    }
+
+    #[test]
+    fn tooltip_is_right_for_either_order_of_state_and_pause() {
+        for events in [
+            vec![
+                json!({"method":"job/state","params":{"job":"j","state":"paused"}}),
+                json!({"method":"engine/event","params":{"kind":"pause","reason":"quota"}}),
+            ],
+            vec![
+                json!({"method":"engine/event","params":{"kind":"pause","reason":"quota"}}),
+                json!({"method":"job/state","params":{"job":"j","state":"paused"}}),
+            ],
+        ] {
+            let mut state = JobTrayState::default();
+            for event in events {
+                update_tray_state(&mut state, &event);
+            }
+            assert_eq!(render_job_tray_state(&state), "Paused (allowance limit)");
+        }
+    }
+
+    #[test]
+    fn progress_while_paused_keeps_the_paused_tooltip() {
+        let mut state = JobTrayState::default();
+        update_tray_state(
+            &mut state,
+            &json!({"method":"job/state","params":{"job":"j","state":"paused"}}),
+        );
+        update_tray_state(
+            &mut state,
+            &json!({"method":"engine/event","params":{"kind":"pause","reason":"user"}}),
+        );
+        update_tray_state(
+            &mut state,
+            &json!({"method":"job/progress","params":{"job":"j","done":4312,"total":10727}}),
+        );
+        assert_eq!(render_job_tray_state(&state), "Paused (you)");
+    }
+
+    #[test]
+    fn tooltip_texts_for_every_state() {
+        for (state, expected) in [
+            ("sample_ready", "Sample ready to check"),
+            ("done", "Done"),
+            ("done_with_issues", "Done, with issues to check"),
+            ("failed", "Stopped: the job failed"),
+            ("cancelled", "Bulk Call Analysis"),
+            ("idle", "Bulk Call Analysis"),
+        ] {
+            assert_eq!(
+                render_job_tray_state(&JobTrayState {
+                    state: Some(state.into()),
+                    ..Default::default()
+                }),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn six_digit_counts_have_separators() {
+        let state = JobTrayState {
+            state: Some("running".into()),
+            done: 107270,
+            total: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            render_job_tray_state(&state),
+            "Bulk Call Analysis — Reading 107,270 of 1,000,000"
+        );
     }
 
     #[test]

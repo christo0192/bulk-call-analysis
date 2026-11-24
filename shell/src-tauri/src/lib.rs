@@ -174,7 +174,7 @@ async fn engine_status(engine: State<'_, Engine>) -> Result<String, String> {
     Ok(engine.status().await)
 }
 
-const PROJECT_EXTENSIONS: &[&str] = &["xlsx", "md", "csv", "txt", "json"];
+const PROJECT_EXTENSIONS: &[&str] = &["xlsx", "md", "csv", "html"];
 
 fn valid_project_slug(project: &str) -> bool {
     let bytes = project.as_bytes();
@@ -192,6 +192,34 @@ fn malformed_engine_reply() -> CommandError {
         message: "The engine is unavailable".into(),
         data: Some(json!({"reason":"engine_unavailable"})),
     }
+}
+
+fn is_allowed_project_file(project_dir: &std::path::Path, path: &std::path::Path) -> bool {
+    let Ok(relative) = path.strip_prefix(project_dir) else {
+        return false;
+    };
+    let parts: Vec<_> = relative.components().collect();
+    let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+    if name.eq_ignore_ascii_case("summary.md") && parts.len() == 1 {
+        return true;
+    }
+    parts.len() == 4
+        && parts[0]
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("jobs")
+        && parts[2]
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("output")
+        && matches!(
+            path.extension()
+                .and_then(|v| v.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str(),
+            "xlsx" | "md" | "csv" | "html"
+        )
 }
 
 async fn projects_root<R: tauri::Runtime>(
@@ -246,6 +274,11 @@ async fn open_project_file(
         PROJECT_EXTENSIONS,
     )
     .map_err(path_error)?;
+    if !is_allowed_project_file(&project_dir, &path) {
+        return Err(path_error(paths::OpenError::TypeNotAllowed));
+    }
+    // The canonical path was checked immediately before this call; a same-user
+    // process can still replace a directory in the remaining opener window.
     tauri_plugin_opener::OpenerExt::opener(&app)
         .open_path(path.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|error| CommandError {
@@ -451,6 +484,15 @@ mod tests {
     fn allowlist_is_case_sensitive() {
         assert!(!ui_method_allowed("Chat/send"));
         assert!(!ui_method_allowed("APP/status"));
+    }
+
+    #[test]
+    fn open_project_folder_rejects_bad_slugs_unc_and_device_paths() {
+        assert!(!super::valid_project_slug("Bad Project"));
+        assert!(!super::valid_project_slug("bad"));
+        for value in ["//host/share", r"\\?\C:\projects", r"\\.\C:\projects"] {
+            assert!(crate::paths::is_unsafe_path(std::path::Path::new(value)));
+        }
     }
 
     #[test]

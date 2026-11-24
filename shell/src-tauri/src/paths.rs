@@ -14,8 +14,7 @@ pub enum OpenError {
 }
 
 pub fn is_unsafe_path(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    text.starts_with(r"\\") || text.starts_with(r"\\?\UNC\") || text.starts_with(r"\\.\")
+    path.to_string_lossy().replace('\\', "/").starts_with("//")
 }
 
 pub fn validate_project_path(
@@ -120,6 +119,21 @@ mod tests {
         let file = root.path().join("data.JSON");
         fs::write(&file, "{}").unwrap();
         assert!(validate_project_path(root.path(), &file, &["json"]).is_ok());
+    }
+
+    #[test]
+    fn rejects_unc_and_device_paths_before_filesystem_access() {
+        for value in [
+            "//host/share/file.md",
+            r"\\host\share\file.md",
+            "/\\host\\share\\file.md",
+            r"\\?\C:\file.md",
+            "//?/C:/file.md",
+            r"\\.\C:\file.md",
+            "//./C:/file.md",
+        ] {
+            assert!(is_unsafe_path(Path::new(value)), "{value}");
+        }
     }
 
     #[cfg(unix)]

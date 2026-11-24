@@ -48,6 +48,13 @@ commands invoked directly with `invoke`; they are not sent through
 `{code, message, data: {reason}}`. The shell derives the project directory from
 `app/status.dataDir`, validates the project slug and containment, and reports
 `open_failed` when the desktop opener cannot open the validated path.
+Files are limited to `summary.md` or `xlsx`, `md`, `csv`, and `html` files
+under `jobs/<job>/output/`; internal chat, raw, masked, and state files are
+never opened. The shell opens the canonical path it checked, but a same-user
+process can still replace a directory in the remaining window before the OS
+opener. Shell command rejection reasons are `file_not_found`,
+`outside_project`, `type_not_allowed`, `open_failed`, `engine_unavailable`,
+`timeout`, `invalid_name`, and `project_not_found`.
 
 `chat/send` starts one masked, subscription-backed Claude turn for a project.
 It is exempt from the generic 30-second request timeout, but it can be
@@ -93,6 +100,8 @@ Notifications have JSON-RPC method names and a `params` object:
 * `job/progress`: `{job, done, total, remaining}`.
 * `chat/event`: `{project, event}` for safe, masked Claude events.
 * `engine/event`: the engine event, including `kind` and, for job events, `job`.
+  Pause reasons are `quota`, `user`, `sleep`, `credit`, `auth`,
+  `model_unavailable`, `error_storm`, `network`, `spend_control`, and `power`.
 
 Notifications contain application data only. Credentials, tokens, API keys,
 and credential-file contents are never returned.
