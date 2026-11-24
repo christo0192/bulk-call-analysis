@@ -4,7 +4,8 @@ test('run view shows live progress and pause and resume work', async ({ page }) 
   await page.goto('/');
   await page.getByRole('button', { name: /Webinar objections/ }).click();
   await expect(page.getByTestId('run-view')).toBeVisible();
-  await expect(page.getByText(/2 of 8 leads read/)).toBeVisible();
+  // The hero shows the big number and "of 8 leads read" as separate elements (as in the mockup).
+  await expect(page.locator('.run-hero')).toContainText(/2\s*of 8 leads read/);
   await page.getByRole('button', { name: 'Pause' }).click();
   await expect(page.getByRole('button', { name: 'Resume' })).toBeVisible();
   await page.getByRole('button', { name: 'Resume' }).click();

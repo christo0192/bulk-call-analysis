@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { JobSnapshot } from '../../engine/types';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
@@ -116,15 +116,48 @@ function AllowanceTile({ snapshot }: { snapshot: JobSnapshot }) {
 
 export function RunView({ id }: { id: string }) {
   const [snapshot, setSnapshot] = useState<JobSnapshot | null>(null);
+  const snapshotRef = useRef<JobSnapshot | null>(null);
+  const pendingProgress = useRef<Partial<JobSnapshot['progress']>>({});
+  const pendingEngineEvents = useRef(new Map<string, Record<string, unknown>>());
   const [now, setNow] = useState(Date.now());
   const [reasonsOpen, setReasonsOpen] = useState(false);
   const [folderAvailable, setFolderAvailable] = useState(true);
   const [onBattery, setOnBattery] = useState(false);
   const [event, setEvent] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const applyEngineEvent = (current: JobSnapshot, next: Record<string, unknown>) => {
+    const result = { ...current };
+    if (next.kind === 'eta') result.eta = next as JobSnapshot['eta'];
+    if (next.kind === 'activity')
+      result.activity = {
+        ...current.activity,
+        ...(typeof next.last_activity_ts === 'number' || next.last_activity_ts === null
+          ? { lastActivityTs: next.last_activity_ts as number | null }
+          : {}),
+        ...(typeof next.in_flight === 'number' ? { inFlight: next.in_flight } : {}),
+        ...(typeof next.workers === 'number' ? { workers: next.workers } : {}),
+        ...(typeof next.throughput_per_min === 'number'
+          ? { throughputPerMin: next.throughput_per_min }
+          : {}),
+      };
+    if (next.kind === 'pause') {
+      result.pauseReason = typeof next.reason === 'string' ? next.reason : current.pauseReason;
+      result.resumeAt = typeof next.resume_at === 'number' ? next.resume_at : current.resumeAt;
+    }
+    return result;
+  };
   const loadSnapshot = async () => {
     try {
-      setSnapshot(await bridge.call('job/snapshot', { job: id }));
+      const loaded = await bridge.call('job/snapshot', { job: id });
+      let next = {
+        ...loaded,
+        progress: { ...loaded.progress, ...pendingProgress.current },
+      } as JobSnapshot;
+      pendingEngineEvents.current.forEach((pending) => {
+        next = applyEngineEvent(next, pending);
+      });
+      snapshotRef.current = next;
+      setSnapshot(next);
       setError(null);
     } catch (e) {
       setError(EngineError.from(e).message);
@@ -135,18 +168,23 @@ export function RunView({ id }: { id: string }) {
     const tick = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(tick);
   }, [id]);
-  useEffect(() => {
-    if (!snapshot) return;
+  useLayoutEffect(() => {
     const off = bridge.onNotification((notification) => {
       const p = notification.params as Record<string, unknown>;
       if (p.job !== id) return;
       if (notification.method === 'job/state') void loadSnapshot();
-      if (notification.method === 'job/progress')
-        setSnapshot((current) =>
-          current
-            ? { ...current, progress: { ...current.progress, ...p } as JobSnapshot['progress'] }
-            : current,
-        );
+      if (notification.method === 'job/progress') {
+        pendingProgress.current = { ...pendingProgress.current, ...p };
+        setSnapshot((current) => {
+          if (!current) return current;
+          const next = {
+            ...current,
+            progress: { ...current.progress, ...p } as JobSnapshot['progress'],
+          };
+          snapshotRef.current = next;
+          return next;
+        });
+      }
       if (notification.method === 'engine/event') {
         const next = (p.event ?? p) as Record<string, unknown>;
         setEvent(next);
@@ -154,34 +192,17 @@ export function RunView({ id }: { id: string }) {
           if (next.on_ac === false) setOnBattery(true);
           if (next.on_ac === true) setOnBattery(false);
         }
+        pendingEngineEvents.current.set(String(next.kind), next);
         setSnapshot((current) => {
           if (!current) return current;
-          const result = { ...current };
-          if (next.kind === 'eta') result.eta = next as JobSnapshot['eta'];
-          if (next.kind === 'activity')
-            result.activity = {
-              ...current.activity,
-              ...(typeof next.last_activity_ts === 'number' || next.last_activity_ts === null
-                ? { lastActivityTs: next.last_activity_ts as number | null }
-                : {}),
-              ...(typeof next.in_flight === 'number' ? { inFlight: next.in_flight } : {}),
-              ...(typeof next.workers === 'number' ? { workers: next.workers } : {}),
-              ...(typeof next.throughput_per_min === 'number'
-                ? { throughputPerMin: next.throughput_per_min }
-                : {}),
-            };
-          if (next.kind === 'pause') {
-            result.pauseReason =
-              typeof next.reason === 'string' ? next.reason : current.pauseReason;
-            result.resumeAt =
-              typeof next.resume_at === 'number' ? next.resume_at : current.resumeAt;
-          }
+          const result = applyEngineEvent(current, next);
+          snapshotRef.current = result;
           return result;
         });
       }
     });
     return off;
-  }, [id, Boolean(snapshot)]);
+  }, [id]);
   useEffect(() => {
     if (!snapshot || snapshot.state !== 'running') return;
     const timer = window.setInterval(() => void loadSnapshot(), 30000);

@@ -54,6 +54,8 @@ test('primary buttons are visible', async ({ page }) => {
 
 test('sidebar survives a claude allowance without windows', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText('Claude 5-hour')).toBeVisible();
-  await expect(page.getByText('unknown')).toBeVisible();
+  // With the recorded engine shapes both allowance lines read "unknown"; check the Claude row.
+  const claudeRow = page.getByText('Claude 5-hour').locator('..');
+  await expect(claudeRow).toBeVisible();
+  await expect(claudeRow.getByText('unknown')).toBeVisible();
 });

@@ -71,6 +71,45 @@ it('progress notification updates counts in place', async () => {
     expect(within(hero as HTMLElement).getByText('5')).toBeInTheDocument();
   });
 });
+it('events arriving before the first snapshot are applied once it loads', async () => {
+  let resolveSnapshot!: (value: JobSnapshot) => void;
+  mockBridge.setResponse(
+    'job/snapshot',
+    () => new Promise<JobSnapshot>((resolve) => (resolveSnapshot = resolve)),
+  );
+  render(<RunView id="job-one" />);
+  await waitFor(() =>
+    expect(mockBridge.calls.filter((call) => call.method === 'job/snapshot')).toHaveLength(1),
+  );
+  mockBridge.emit({
+    jsonrpc: '2.0',
+    method: 'job/progress',
+    params: {
+      job: 'job-one',
+      done: 5,
+      inFlight: 1,
+      remaining: 2,
+      total: 8,
+      failed: 0,
+      heldBack: 0,
+      retrying: 0,
+    },
+  });
+  mockBridge.emit({
+    jsonrpc: '2.0',
+    method: 'engine/event',
+    params: {
+      job: 'job-one',
+      event: { kind: 'activity', workers: 3, last_activity_ts: 1700000000 },
+    },
+  });
+  resolveSnapshot!(snapshot());
+  await waitFor(() => expect(screen.getByText(/of 8 leads read/)).toBeInTheDocument());
+  // "5" appears in the hero and in the counts grid; check the hero.
+  const hero = screen.getByText(/of 8 leads read/).closest('.run-hero') as HTMLElement;
+  expect(within(hero).getByText('5')).toBeInTheDocument();
+  expect(screen.getByText(/3 readers working/)).toBeInTheDocument();
+});
 it('the accounted-for equation uses only real fields and adds up', async () => {
   render(<RunView id="job-one" />);
   await waitFor(() =>
