@@ -58,11 +58,14 @@ def test_plain_gmail_mention_survives() -> None:
     assert "gmail" in mask_text("Please check Gmail", MaskingContext()).text.lower()
 
 
+def test_glued_email_without_ending_is_masked() -> None:
+    assert mask_text("email name@example", MaskingContext()).text == "email [EMAIL]"
+
+
 @pytest.mark.parametrize(
     "source",
     [
         "phone 12345",
-        "email name@example",
         "PAN ABCDE1234",
         "digits nine eight seven six five",
         "site example.test",

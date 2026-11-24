@@ -23,7 +23,15 @@ from .patterns import (
     _upi,
     _url,
 )
-from .spoken_email import DOMAIN_STOPS, FILE_ENDINGS, KNOWN_TLDS, PROVIDERS, SPLIT_PROVIDERS, UPI_HANDLES
+from .spoken_email import (
+    DOMAIN_STOPS,
+    FILE_ENDINGS,
+    KNOWN_TLDS,
+    PROVIDERS,
+    SPLIT_PROVIDERS,
+    UPI_HANDLES,
+    find_spoken_emails,
+)
 
 
 @dataclass(frozen=True)
@@ -57,7 +65,7 @@ _detectors: dict[str, tuple[re.Pattern[str], str]] = {
 _placeholder = re.compile(r"\[[A-Z_]+\]")
 
 
-def _scan_spoken_email_tokens(text: str) -> list[Hit]:
+def _scan_spoken_email_tokens_legacy(text: str) -> list[Hit]:
     scrubbed = _placeholder.sub(lambda match: " " * len(match.group()), text)
     tokens = list(re.finditer(r"\S+", scrubbed))
     hits: list[Hit] = []
@@ -196,6 +204,10 @@ def _scan_spoken_email_tokens(text: str) -> list[Hit]:
             if local:
                 hits.append(Hit("EMAIL_LIKE", tokens[i - 1].start(), tokens[end].end()))
     return hits
+
+
+def _scan_spoken_email_tokens(text: str) -> list[Hit]:
+    return [Hit("EMAIL_LIKE", start, end) for start, end in find_spoken_emails(text)]
 
 
 def scan_text(

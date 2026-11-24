@@ -35,7 +35,7 @@ KNOWN_TLDS = frozenset(
         "tech",
     }
 )
-PROVIDERS = frozenset({"gmail", "yahoo", "rediff", "outlook", "zoho", "msn", "aol", "live"})
+PROVIDERS = frozenset({"gmail", "yahoo", "rediff", "outlook"})
 SPLIT_PROVIDERS = {
     ("g", "mail"),
     ("hot", "mail"),
@@ -179,6 +179,95 @@ LOCAL_STOPS = frozenset(
         "at",
     ]
 )
+EMPLOYER_WORDS = frozenset(
+    [
+        "working",
+        "work",
+        "worked",
+        "works",
+        "job",
+        "jobs",
+        "join",
+        "joined",
+        "employed",
+        "placed",
+        "engineer",
+        "developer",
+        "analyst",
+        "manager",
+        "intern",
+        "tester",
+        "lead",
+        "consultant",
+        "role",
+        "offer",
+        "interview",
+        "interviewed",
+        "interviewing",
+        "team",
+        "people",
+        "friend",
+        "brother",
+        "sister",
+        "husband",
+        "wife",
+        "colleague",
+        "am",
+        "is",
+        "was",
+        "were",
+        "are",
+        "be",
+        "been",
+        "he",
+        "she",
+        "they",
+        "we",
+        "i",
+        "now",
+        "currently",
+        "previously",
+        "earlier",
+        "from",
+        "with",
+        "use",
+        "using",
+        "years",
+        "experience",
+        "career",
+        "good",
+        "look",
+        "looking",
+        "live",
+        "mentors",
+        "selected",
+        "rejected",
+    ]
+)
+ENDING_STOPS = frozenset(
+    [
+        "it",
+        "is",
+        "was",
+        "were",
+        "that",
+        "this",
+        "the",
+        "so",
+        "we",
+        "he",
+        "she",
+        "they",
+        "you",
+        "if",
+        "then",
+        "also",
+        "because",
+        "but",
+        "and",
+        "i",
+    ]
+)
 FILE_ENDINGS = frozenset(
     {
         "js",
@@ -241,6 +330,18 @@ def _tld(value: str) -> bool:
     return value.casefold() in KNOWN_TLDS
 
 
+def _glued_ending(value: str, token: Token, tokens: list[Token], index: int) -> bool:
+    labels = value.split(".")
+    if len(labels) < 2 or (labels[0] and not _label(labels[0])) or not _tld(labels[-1]):
+        return False
+    tld = labels[-1]
+    if tld.casefold() == "com":
+        return True
+    return tld.islower() and (
+        token.raw_end > token.core_end or index + 1 == len(tokens) or tokens[index + 1].value[:1].islower()
+    )
+
+
 def _provider(tokens: list[Token], index: int) -> int | None:
     if index >= len(tokens):
         return None
@@ -260,25 +361,11 @@ def _ending(tokens: list[Token], index: int, domain_end: int, strong: bool) -> i
     # A complete label in one token, including acme.com and dotcom.
     if lower.startswith("dot") and _tld(lower[3:]):
         return index
-    if "." in value:
-        labels = value.split(".")
-        if len(labels) >= 2 and _tld(labels[-1]):
-            tld = labels[-1]
-            if tld == "com" or (tld.islower() and index + 1 == len(tokens)):
-                return index
-    if index + 1 < len(tokens) and tokens[index + 1].value.casefold() in KNOWN_TLDS:
+    if "." in value and _glued_ending(value, tokens[index], tokens, index):
+        return index
+    if index + 1 < len(tokens) and tokens[index + 1].value in KNOWN_TLDS:
         tld = tokens[index + 1].value
-        if tld == "com" or (
-            tld.islower()
-            and (
-                index + 2 == len(tokens)
-                or (
-                    index + 3 < len(tokens)
-                    and tokens[index + 2].value.casefold() == "dot"
-                    and tokens[index + 3].value.islower()
-                )
-            )
-        ):
+        if tld.islower():
             return index + 1
     if lower in {"dot", "period", "point", "full", "full-stop"}:
         next_index = index + 1
@@ -287,40 +374,38 @@ def _ending(tokens: list[Token], index: int, domain_end: int, strong: bool) -> i
         if next_index >= len(tokens):
             return None
         tld = tokens[next_index].value
-        if _tld(tld) and (
-            tld.casefold() == "com"
-            or (
-                tld.islower()
-                and (
-                    next_index + 1 == len(tokens)
-                    or (
-                        next_index + 2 < len(tokens)
-                        and tokens[next_index + 1].value.casefold() == "dot"
-                        and tokens[next_index + 2].value.islower()
-                    )
-                )
-            )
-        ):
+        if _tld(tld):
             return next_index
         if (
             lower == "dot"
             and 2 <= len(tld) <= 24
             and tld.casefold() not in NUMBER_WORDS
             and tld.casefold() not in DOMAIN_STOPS
+            and tld.casefold() not in ENDING_STOPS
         ):
             if not strong and tld.casefold() in FILE_ENDINGS:
                 return None
             if tld.isalpha():
                 return next_index
-            if next_index + 9 >= len(tokens):
-                return next_index
-        if lower == "dot" and next_index + 2 < len(tokens):
-            letters = "".join(tokens[pos].value for pos in range(next_index, next_index + 3))
-            if letters.casefold() in KNOWN_TLDS and all(
-                len(tokens[pos].value) == 1 and tokens[pos].value.isalpha()
-                for pos in range(next_index, next_index + 3)
-            ):
-                return next_index + 2
+        if lower == "dot":
+            position = next_index
+            found = False
+            while position < len(tokens):
+                group_start = position
+                while (
+                    position < len(tokens)
+                    and len(tokens[position].value) == 1
+                    and tokens[position].value.isalpha()
+                ):
+                    position += 1
+                if position == group_start:
+                    break
+                found = True
+                if position >= len(tokens) or tokens[position].value.casefold() != "dot":
+                    return position - 1
+                position += 1
+            if found:
+                return position - 1
     return None
 
 
@@ -332,6 +417,13 @@ def _walk_local(tokens: list[Token], before: int, text: str) -> int | None:
         token = tokens[index]
         value = token.value
         lower = value.casefold()
+        if (
+            token.raw_end > token.core_end
+            and text[token.raw_end - 1] in ".!?;:"
+            and len(value) != 1
+            and not value.isdigit()
+        ):
+            break
         if not value or (lower in SPEAKING_LABELS and index + 1 < len(tokens)):
             break
         if lower in LOCAL_STOPS and not (
@@ -357,10 +449,12 @@ def _walk_local(tokens: list[Token], before: int, text: str) -> int | None:
 def _domain_start(tokens: list[Token], index: int, strong: bool) -> int | None:
     limit = 4 if strong else 2
     count = 0
-    if index < len(tokens) and "." in tokens[index].value:
-        labels = tokens[index].value.casefold().split(".")
-        if len(labels) > 1 and _tld(labels[-1]):
-            return index + 1
+    if (
+        index < len(tokens)
+        and "." in tokens[index].value
+        and _glued_ending(tokens[index].value, tokens[index], tokens, index)
+    ):
+        return index + 1
     while index + count < len(tokens) and count < limit and _label(tokens[index + count].value):
         value = tokens[index + count].value.casefold()
         if value in {"dot", "period", "point", "full", "stop"} or (
@@ -373,6 +467,28 @@ def _domain_start(tokens: list[Token], index: int, strong: bool) -> int | None:
     return index + count if count else None
 
 
+def _bare_provider_local_ok(tokens: list[Token], anchor: int) -> bool:
+    if anchor == 0:
+        return False
+    value = tokens[anchor - 1].value
+    lower = value.casefold()
+    if lower in EMPLOYER_WORDS:
+        return False
+    if anchor > 1 and tokens[anchor - 2].value.casefold() in {"a", "an", "the"} and lower == "offer":
+        return False
+    return (
+        any(char.isdigit() or char in "._-" for char in value)
+        or value.isalpha()
+        or lower not in EMPLOYER_WORDS
+    )
+
+
+def _provider_has_email_context(tokens: list[Token], index: int) -> bool:
+    return any(
+        tokens[pos].value.casefold() in {"email", "mail", "id"} for pos in range(max(0, index - 8), index)
+    )
+
+
 def find_spoken_emails(text: str) -> list[tuple[int, int]]:
     if not re.search(r"(?i)(?:@|\bat\b|\b(?:gmail|yahoo|rediff|outlook|zoho|hot|out|proton|i|y|g)\b)", text):
         return []
@@ -383,26 +499,33 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
         if "@" in core:
             left, right = core.split("@", 1)
             if left and right and any(c.isalpha() for c in left) and any(c.isalpha() for c in right):
-                if right.casefold() not in UPI_HANDLES and (
-                    "." in right
-                    or right.casefold() in PROVIDERS
-                    or (
-                        token.raw_end > token.core_end
-                        and text[token.core_end : token.raw_end].startswith(".")
-                    )
-                ):
+                if right.casefold() not in UPI_HANDLES:
                     end = token.core_end
                     if token.raw_end > token.core_end and i + 1 < len(tokens) and _tld(tokens[i + 1].value):
                         end = tokens[i + 1].core_end
                     spans.append((token.core_start, end))
                 continue
+            if left and not right and i + 1 < len(tokens):
+                domain = tokens[i + 1].value
+                if (
+                    _label(domain) or _glued_ending(domain, tokens[i + 1], tokens, i + 1)
+                ) and domain.casefold() not in UPI_HANDLES:
+                    local = _walk_local(tokens, i, text) or token.core_start
+                    if local is not None:
+                        end = i + 1
+                        if end + 1 < len(tokens) and _glued_ending(
+                            tokens[end].value, tokens[end], tokens, end
+                        ):
+                            pass
+                        spans.append((local, tokens[end].core_end))
+                continue
             if not left and right and ("." in right or _label(right)):
                 end = token.core_end
                 if token.raw_end > token.core_end and i + 1 < len(tokens) and _tld(tokens[i + 1].value):
                     end = tokens[i + 1].core_end
-                local = _walk_local(tokens, i, text)
-                if local is not None and right.casefold() not in UPI_HANDLES:
-                    spans.append((local, end))
+                local_candidate = _walk_local(tokens, i, text)
+                if local_candidate is not None and right.casefold() not in UPI_HANDLES:
+                    spans.append((local_candidate, end))
                 continue
         anchor_end = i
         strong = False
@@ -451,9 +574,13 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
                 and text[tokens[end].core_end : tokens[end].raw_end].startswith(".")
             ):
                 end += 1
-            local = _walk_local(tokens, i, text)
-            if local is not None:
-                spans.append((local, tokens[end].core_end))
+            local_candidate = _walk_local(tokens, i, text)
+            bare = end == provider_end
+            provider_name = tokens[domain_at].value.casefold() in {"yahoo", "rediff", "outlook", "zoho"}
+            if local_candidate is not None and (
+                not bare or not provider_name or end > domain_at or _bare_provider_local_ok(tokens, i)
+            ):
+                spans.append((local_candidate, tokens[end].core_end))
             continue
         domain_end = _domain_start(tokens, domain_at, strong)
         if domain_end is None:
@@ -495,9 +622,9 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
             }
         ):
             continue
-        local = _walk_local(tokens, i, text)
-        if local is not None:
-            spans.append((local, tokens[ending].core_end))
+        local_candidate = _walk_local(tokens, i, text)
+        if local_candidate is not None:
+            spans.append((local_candidate, tokens[ending].core_end))
     return sorted(set(spans))
 
 
@@ -522,7 +649,14 @@ def provider_replacements(text: str) -> list[tuple[int, int]]:
                 tokens[end].raw_end > tokens[end].core_end and tokens[end + 1].value.casefold() in KNOWN_TLDS
             ):
                 end += 1
-            elif tokens[i].value.casefold() not in {"gmail", "yahoo", "rediff", "outlook", "zoho"}:
+            elif tokens[i].value.casefold() not in {"gmail", "yahoo", "rediff", "outlook", "zoho"} or (
+                tokens[i].value.casefold() in {"yahoo", "outlook", "zoho"}
+                and not _provider_has_email_context(tokens, i)
+            ):
                 continue
+        elif tokens[i].value.casefold() in {"yahoo", "outlook", "zoho"} and not _provider_has_email_context(
+            tokens, i
+        ):
+            continue
         result.append((local, tokens[end].core_end))
     return result

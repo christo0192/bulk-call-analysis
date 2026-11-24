@@ -1,150 +1,912 @@
 {
-  "must_mask": [
-    {"text": "my email is ravi kumar at acme dot com", "gone": ["ravi", "kumar", "acme"], "keeps": ["my email is"]},
-    {"text": "my email is ravi kumar at the rate acme dot info", "gone": ["ravi", "kumar", "acme"], "keeps": ["my email is"]},
-    {"text": "my email is ravi dot kumar dot sharma dot 1992 at gmail dot com", "gone": ["ravi", "kumar", "sharma", "1992"], "keeps": ["my email is"]},
-    {"text": "my email is ravikumar at acme dot international and I live in Pune", "gone": ["ravikumar", "acme"], "keeps": ["and I live in Pune"]},
-    {"text": "my email is ravi dot kumar at gmail dot co dot in and I am from Pune", "gone": ["ravi", "kumar"], "keeps": ["and I am from Pune"]},
-    {"text": "ravi at acme dotcom", "gone": ["ravi", "acme"], "keeps": []},
-    {"text": "ravi at acme dot c o m", "gone": ["ravi", "acme"], "keeps": []},
-    {"text": "ravi at acme .com", "gone": ["ravi", "acme"], "keeps": []},
-    {"text": "ravi@acme. com", "gone": ["ravi", "acme"], "keeps": []},
-    {"text": "ravi at acme period com", "gone": ["ravi", "acme"], "keeps": []},
-    {"text": "ravi at acme point com", "gone": ["ravi", "acme"], "keeps": []},
-    {"text": "ravi at acme.com", "gone": ["ravi", "acme"], "keeps": []},
-    {"text": "ravi at acme.co.in is my id", "gone": ["ravi", "acme"], "keeps": ["is my id"]},
-    {"text": "ravi kumar, at the rate, acme dot com", "gone": ["ravi", "kumar", "acme"], "keeps": []},
-    {"text": "my email is ravi @ acme dot com", "gone": ["ravi", "acme"], "keeps": ["my email is"]},
-    {"text": "my email is ravi kumar @ acme dot com", "gone": ["ravi", "kumar", "acme"], "keeps": ["my email is"]},
-    {"text": "my email is ravi.kumar @acme.com", "gone": ["ravi", "kumar", "acme"], "keeps": ["my email is"]},
-    {"text": "my email is ravikumar1992 @ infosys.com", "gone": ["ravikumar1992", "infosys"], "keeps": ["my email is"]},
-    {"text": "my email is ravikumar @ acme.co.in", "gone": ["ravikumar", "acme"], "keeps": ["my email is"]},
-    {"text": "my email is ravikumar @ acme dot co dot in", "gone": ["ravikumar", "acme"], "keeps": ["my email is"]},
-    {"text": "my email is ravikumar at rediff", "gone": ["ravikumar"], "keeps": ["my email is"]},
-    {"text": "my email is ravikumar1992 at the rate rediff only", "gone": ["ravikumar1992"], "keeps": ["my email is", "only"]},
-    {"text": "send it to ravi kumar rediff dot com", "gone": ["ravi", "kumar"], "keeps": ["send it to"]},
-    {"text": "ravikumar@rediff", "gone": ["ravikumar"], "keeps": []},
-    {"text": "my email is ravi kumar at hot mail", "gone": ["ravi", "kumar"], "keeps": ["my email is"]},
-    {"text": "my email is ravi kumar at out look dot com", "gone": ["ravi", "kumar"], "keeps": ["my email is"]},
-    {"text": "my email is ravi kumar at proton mail", "gone": ["ravi", "kumar"], "keeps": ["my email is"]},
-    {"text": "my email is ravi kumar at i cloud dot com", "gone": ["ravi", "kumar"], "keeps": ["my email is"]},
-    {"text": "my email is ravi kumar at g-mail", "gone": ["ravi", "kumar"], "keeps": ["my email is"]},
-    {"text": "my email id is ravikumar1992 at gmail and my number you have", "gone": ["ravikumar1992"], "keeps": ["and my number you have"]},
-    {"text": "send it to ravikumar at yahoo", "gone": ["ravikumar"], "keeps": ["send it to"]},
-    {"text": "ravi kumar gmail dot com", "gone": ["ravi", "kumar"], "keeps": []},
-    {"text": "ravi at gmail. com", "gone": ["ravi"], "keeps": []},
-    {"text": "R. A. V. I. at gmail dot com", "gone": ["R. A. V. I"], "keeps": []},
-    {"text": "r a v i k u m a r s h a r m a at gmail dot com", "gone": ["r a v i"], "keeps": []},
-    {"text": "ravi kumar zero five one nine nine two at gmail dot com", "gone": ["ravi", "kumar", "zero five"], "keeps": []},
-    {"text": "ravi one two three at acme dot com", "gone": ["ravi", "one two three", "acme"], "keeps": []},
-    {"text": "r dot kumar underscore two at acme dot com", "gone": ["kumar", "acme"], "keeps": []},
-    {"text": "ravi at my-company dot co", "gone": ["ravi", "my-company"], "keeps": []},
-    {"text": "Lead: you can mail me, it is ravi dot kumar at the rate tcs dot com. Advisor: thanks", "gone": ["ravi", "kumar"], "keeps": ["Advisor: thanks", "Lead: you can mail"]},
-    {"text": "ravi at gmail dot co dot in. Advisor: thanks", "gone": ["ravi"], "keeps": ["Advisor: thanks"]},
-    {"text": "the recruiter mailed from hr@infosys.com last week", "gone": ["hr@infosys"], "keeps": ["the recruiter mailed from", "last week"]}
-  ],
-  "must_not_change": [
-    "Lead: I am currently working at Infosys. My salary is twelve lakhs.",
-    "Lead: they laid off people at Amazon. That is why I am worried.",
-    "Lead: I am not at all interested. Please do not call.",
-    "Lead: I am good at coding. But system design is weak.",
-    "Lead: I was stuck at level two. The interview was hard.",
-    "Lead: I have eight years of experience and I am at a point where I want to switch.",
-    "Lead: at this point of time I cannot commit.",
-    "Lead: so at this point of time I cannot commit.",
-    "Advisor: at this point we are offering the program.",
-    "Advisor: okay so at that point of time you can decide.",
-    "Advisor: at any point you can pause the course.",
-    "Lead: at my company the notice period is sixty days.",
-    "Lead: I stayed at home for a period of six months",
-    "Lead: at that point in time I was jobless.",
-    "Lead: at one point in my career I led a team of ten.",
-    "Lead: at some point in life everyone has to switch.",
-    "Lead: at what point in the course do we do projects?",
-    "Lead: there was no growth at that point. In fact I was stuck.",
-    "Lead: I work at Infosys. In my team we have five people.",
-    "Lead: I work at Wipro. AI is coming everywhere.",
-    "Lead: I was at TCS. Net salary was eight lakhs.",
-    "Lead: look at this. Info was not clear.",
-    "Lead: we met at office. Org structure changed after that.",
-    "Lead: I am at work. Me and my friend will join.",
-    "Lead: call me at night. Us timing is fine.",
-    "Lead: I joined at ten thousand. Co workers were good.",
-    "Lead: look at the portal. It is not opening.",
-    "Lead: I looked at the syllabus. It is good.",
-    "Lead: I was at the airport. So I could not talk.",
-    "Lead: we are at home. No one is disturbing.",
-    "Lead: I reached at five. To be frank I forgot.",
-    "Lead: they pay at par. Is it fine?",
-    "Lead: I am good at Java. Am I eligible?",
-    "Lead: I am at Deloitte. My manager is supportive.",
-    "Lead: he was at Google. Be practical he said.",
-    "Lead: I am at stage two.But it is hard.",
-    "Lead: I am working at Infosys.My notice period is ninety days.",
-    "Advisor: look at the last point. Company tie ups are there.",
-    "Advisor: let us look at point number three.",
-    "Advisor: look at this dot",
-    "Advisor: meet at the office",
-    "Advisor: the class is at 5 dot 30",
-    "Advisor: the session starts at 9.30 pm.",
-    "Advisor: we start at nine point thirty.",
-    "Advisor: interest is at the rate of ten point five percent.",
-    "Advisor: the loan is at the rate of 10 point 5 percent per annum. So it is fine.",
-    "Advisor: they grow at the rate of twelve percent. In two years it doubles.",
-    "Lead: I am good at node dot js and react.",
-    "Lead: I am not good at react dot js",
-    "Lead: I am a developer at Infosys in dot net",
-    "Lead: I work at TCS as a dot net developer.",
-    "Lead: I worked at Wipro dot net team for two years.",
-    "Lead: I am better at asp dot net than java.",
-    "Lead: looking at dot net jobs only.",
-    "Lead: I got stuck at version two dot zero.",
-    "Advisor: what is your gmail id?",
-    "Advisor: I have sent the details to your gmail.",
-    "Advisor: send it on gmail",
-    "Advisor: my yahoo is very old",
-    "Advisor: please check your gmail",
-    "Lead: I will check my mail at night. Thanks.",
-    "Lead: five @ 200 rupees each",
-    "Lead: let us meet @ 5 pm today.",
-    "Lead: I am @ Infosys. My role is tester.",
-    "Lead: first of all I am at a product company. Second I want growth.",
-    "Lead: at least one offer. Common sense is needed.",
-    "Lead: at present no calls. Company wise I am open.",
-    "Lead: I got rejected at Amazon. Come what may I will try again.",
-    "Lead: I was rejected at Microsoft at the last round. Communication was the reason.",
-    "Lead: at the end of the day. Computer science basics matter.",
-    "Lead: I cracked the test at Flipkart. Compensation was low.",
-    "Lead: I am at thirty lakhs. Compared to market it is low.",
-    "Lead: I am at thirty lakhs period. I will not take less.",
-    "Lead: at my age the point is stability.",
-    "Lead: people at my level point out that AI will replace us.",
-    "Lead: my manager at Cognizant pointed out that I need upskilling.",
-    "Lead: the team at Accenture period of notice is three months.",
-    "Lead: at night I study. Infosys is hectic.",
-    "Advisor: we look at data structures. Online classes are on weekends.",
-    "Advisor: at the same time. Live classes are there.",
-    "Advisor: at your pace. App access is for a year.",
-    "Advisor: have a look at the site. Tech domains are listed.",
-    "Advisor: join at eight. Online only.",
-    "Advisor: at what salary. Biz or tech role?",
-    "Lead: I am interested at the moment but not at this price point in the year end."
-  ],
-  "net_must_hold_unmasked": [
-    "ravi at acme dot com",
-    "ravi at gmail dot com",
-    "ravi at acme dot info",
-    "ravi at acme dot international",
-    "ravi @ acme dot com",
-    "ravi.kumar @acme.com",
-    "ravikumar@rediff",
-    "ravikumar at rediff",
-    "contact ravi at the rate acme dot info",
-    "my email is ravi kumar at the rate tata consultancy services dot com",
-    "ravi+jobs at acme dot com",
-    "O'Brien at acme dot com",
-    "someone at example dot com",
-    "ravi at acme period com",
-    "ravi at acme dotcom"
-  ]
+ "must_mask": [
+  {
+   "text": "my email is ravi kumar at acme dot com",
+   "gone": [
+    "ravi",
+    "kumar",
+    "acme"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravi kumar at the rate acme dot info",
+   "gone": [
+    "ravi",
+    "kumar",
+    "acme"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravi dot kumar dot sharma dot 1992 at gmail dot com",
+   "gone": [
+    "ravi",
+    "kumar",
+    "sharma",
+    "1992"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravikumar at acme dot international and I live in Pune",
+   "gone": [
+    "ravikumar",
+    "acme"
+   ],
+   "keeps": [
+    "and I live in Pune"
+   ]
+  },
+  {
+   "text": "my email is ravi dot kumar at gmail dot co dot in and I am from Pune",
+   "gone": [
+    "ravi",
+    "kumar"
+   ],
+   "keeps": [
+    "and I am from Pune"
+   ]
+  },
+  {
+   "text": "ravi at acme dotcom",
+   "gone": [
+    "ravi",
+    "acme"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "ravi at acme dot c o m",
+   "gone": [
+    "ravi",
+    "acme"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "ravi at acme .com",
+   "gone": [
+    "ravi",
+    "acme"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "ravi@acme. com",
+   "gone": [
+    "ravi",
+    "acme"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "ravi at acme period com",
+   "gone": [
+    "ravi",
+    "acme"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "ravi at acme point com",
+   "gone": [
+    "ravi",
+    "acme"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "ravi at acme.com",
+   "gone": [
+    "ravi",
+    "acme"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "ravi at acme.co.in is my id",
+   "gone": [
+    "ravi",
+    "acme"
+   ],
+   "keeps": [
+    "is my id"
+   ]
+  },
+  {
+   "text": "ravi kumar, at the rate, acme dot com",
+   "gone": [
+    "ravi",
+    "kumar",
+    "acme"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "my email is ravi @ acme dot com",
+   "gone": [
+    "ravi",
+    "acme"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravi kumar @ acme dot com",
+   "gone": [
+    "ravi",
+    "kumar",
+    "acme"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravi.kumar @acme.com",
+   "gone": [
+    "ravi",
+    "kumar",
+    "acme"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravikumar1992 @ infosys.com",
+   "gone": [
+    "ravikumar1992",
+    "infosys"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravikumar @ acme.co.in",
+   "gone": [
+    "ravikumar",
+    "acme"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravikumar @ acme dot co dot in",
+   "gone": [
+    "ravikumar",
+    "acme"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravikumar at rediff",
+   "gone": [
+    "ravikumar"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravikumar1992 at the rate rediff only",
+   "gone": [
+    "ravikumar1992"
+   ],
+   "keeps": [
+    "my email is",
+    "only"
+   ]
+  },
+  {
+   "text": "send it to ravi kumar rediff dot com",
+   "gone": [
+    "ravi",
+    "kumar"
+   ],
+   "keeps": [
+    "send it to"
+   ]
+  },
+  {
+   "text": "ravikumar@rediff",
+   "gone": [
+    "ravikumar"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "my email is ravi kumar at hot mail",
+   "gone": [
+    "ravi",
+    "kumar"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravi kumar at out look dot com",
+   "gone": [
+    "ravi",
+    "kumar"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravi kumar at proton mail",
+   "gone": [
+    "ravi",
+    "kumar"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravi kumar at i cloud dot com",
+   "gone": [
+    "ravi",
+    "kumar"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email is ravi kumar at g-mail",
+   "gone": [
+    "ravi",
+    "kumar"
+   ],
+   "keeps": [
+    "my email is"
+   ]
+  },
+  {
+   "text": "my email id is ravikumar1992 at gmail and my number you have",
+   "gone": [
+    "ravikumar1992"
+   ],
+   "keeps": [
+    "and my number you have"
+   ]
+  },
+  {
+   "text": "send it to ravikumar at yahoo",
+   "gone": [
+    "ravikumar"
+   ],
+   "keeps": [
+    "send it to"
+   ]
+  },
+  {
+   "text": "ravi kumar gmail dot com",
+   "gone": [
+    "ravi",
+    "kumar"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "ravi at gmail. com",
+   "gone": [
+    "ravi"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "R. A. V. I. at gmail dot com",
+   "gone": [
+    "R. A. V. I"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "r a v i k u m a r s h a r m a at gmail dot com",
+   "gone": [
+    "r a v i"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "ravi kumar zero five one nine nine two at gmail dot com",
+   "gone": [
+    "ravi",
+    "kumar",
+    "zero five"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "ravi one two three at acme dot com",
+   "gone": [
+    "ravi",
+    "one two three",
+    "acme"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "r dot kumar underscore two at acme dot com",
+   "gone": [
+    "kumar",
+    "acme"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "ravi at my-company dot co",
+   "gone": [
+    "ravi",
+    "my-company"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "Lead: you can mail me, it is ravi dot kumar at the rate tcs dot com. Advisor: thanks",
+   "gone": [
+    "ravi",
+    "kumar"
+   ],
+   "keeps": [
+    "Advisor: thanks",
+    "Lead: you can mail"
+   ]
+  },
+  {
+   "text": "ravi at gmail dot co dot in. Advisor: thanks",
+   "gone": [
+    "ravi"
+   ],
+   "keeps": [
+    "Advisor: thanks"
+   ]
+  },
+  {
+   "text": "the recruiter mailed from hr@infosys.com last week",
+   "gone": [
+    "hr@infosys"
+   ],
+   "keeps": [
+    "the recruiter mailed from",
+    "last week"
+   ]
+  },
+  {
+   "text": "my mail id is sunita at acme.in, and my number is the same",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "number is the same"
+   ]
+  },
+  {
+   "text": "write to sunita at acme.org. Thank you",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "Thank you"
+   ]
+  },
+  {
+   "text": "sunita dot rao at the rate wipro dot com is fine",
+   "gone": [
+    "sunita",
+    "rao"
+   ],
+   "keeps": [
+    "is fine"
+   ]
+  },
+  {
+   "text": "id is sunita underscore rao 88 at gmail dot com okay",
+   "gone": [
+    "sunita",
+    "rao",
+    "88"
+   ],
+   "keeps": [
+    "okay"
+   ]
+  },
+  {
+   "text": "it is s u n i t a at the rate of yahoo dot co dot in",
+   "gone": [
+    "s u n i t a"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita hyphen rao at zoho mail dot com",
+   "gone": [
+    "sunita",
+    "rao"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "please note sunita.rao at acme dot co dot in and call me",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "call me"
+   ]
+  },
+  {
+   "text": "Lead: sunita at acme dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "Lead:"
+   ]
+  },
+  {
+   "text": "Lead: yes it's sunita two three at hotmail dot com. Advisor: got it",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "Advisor: got it"
+   ]
+  },
+  {
+   "text": "email sunita@acme.com and sunita at acme dot com both",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "both"
+   ]
+  },
+  {
+   "text": "sunita@gmail.com.",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "SUNITA AT ACME DOT COM",
+   "gone": [
+    "SUNITA"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at acme dot i n",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at acme dot c o dot i n",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "my id is sunita at sign acme dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "my id is"
+   ]
+  },
+  {
+   "text": "sunita at the rate gmail",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at gmail",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "it is sunita rao at tech mahindra dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita rao@acme.com",
+   "gone": [
+    "rao@"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita@ acme.com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita @acme dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "my email: sunita at acme dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "my email"
+   ]
+  },
+  {
+   "text": "my email - sunita at acme dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at acme dot com or sunita at gmail dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita, at, acme, dot, com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at acme, dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at acme dot, com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "Sunita at Acme Dot Com",
+   "gone": [
+    "Sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at yahoo dot co",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita 1990 at gmail.com",
+   "gone": [
+    "sunita",
+    "1990"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "my email is sunita at acme dot com.",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at acme dot ai",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at acme.ai",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at acme dot com? yes",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "yes"
+   ]
+  },
+  {
+   "text": "that is sunita at the rate acme dot in and I joined in May",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "and I joined in May"
+   ]
+  },
+  {
+   "text": "sunita at the rate outlook dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at rediffmail dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at proton mail dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at icloud dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at protonmail dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at ymail dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita@acme",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita@acme.co.in",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "sunita at acme period co period in",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": []
+  },
+  {
+   "text": "I said okay. sunita at acme dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "I said okay."
+   ]
+  },
+  {
+   "text": "Lead: I am done with it! sunita rao at acme dot com",
+   "gone": [
+    "sunita"
+   ],
+   "keeps": [
+    "I am done with it!"
+   ]
+  },
+  {
+   "text": "my yahoo id is sunita88 at yahoo",
+   "gone": [
+    "sunita88"
+   ],
+   "keeps": [
+    "my yahoo id is"
+   ]
+  },
+  {
+   "text": "send it to sunitarao at yahoo",
+   "gone": [
+    "sunitarao"
+   ],
+   "keeps": [
+    "send it to"
+   ]
+  }
+ ],
+ "must_not_change": [
+  "Lead: I am currently working at Infosys. My salary is twelve lakhs.",
+  "Lead: they laid off people at Amazon. That is why I am worried.",
+  "Lead: I am not at all interested. Please do not call.",
+  "Lead: I am good at coding. But system design is weak.",
+  "Lead: I was stuck at level two. The interview was hard.",
+  "Lead: I have eight years of experience and I am at a point where I want to switch.",
+  "Lead: at this point of time I cannot commit.",
+  "Lead: so at this point of time I cannot commit.",
+  "Advisor: at this point we are offering the program.",
+  "Advisor: okay so at that point of time you can decide.",
+  "Advisor: at any point you can pause the course.",
+  "Lead: at my company the notice period is sixty days.",
+  "Lead: I stayed at home for a period of six months",
+  "Lead: at that point in time I was jobless.",
+  "Lead: at one point in my career I led a team of ten.",
+  "Lead: at some point in life everyone has to switch.",
+  "Lead: at what point in the course do we do projects?",
+  "Lead: there was no growth at that point. In fact I was stuck.",
+  "Lead: I work at Infosys. In my team we have five people.",
+  "Lead: I work at Wipro. AI is coming everywhere.",
+  "Lead: I was at TCS. Net salary was eight lakhs.",
+  "Lead: look at this. Info was not clear.",
+  "Lead: we met at office. Org structure changed after that.",
+  "Lead: I am at work. Me and my friend will join.",
+  "Lead: call me at night. Us timing is fine.",
+  "Lead: I joined at ten thousand. Co workers were good.",
+  "Lead: look at the portal. It is not opening.",
+  "Lead: I looked at the syllabus. It is good.",
+  "Lead: I was at the airport. So I could not talk.",
+  "Lead: we are at home. No one is disturbing.",
+  "Lead: I reached at five. To be frank I forgot.",
+  "Lead: they pay at par. Is it fine?",
+  "Lead: I am good at Java. Am I eligible?",
+  "Lead: I am at Deloitte. My manager is supportive.",
+  "Lead: he was at Google. Be practical he said.",
+  "Lead: I am at stage two.But it is hard.",
+  "Lead: I am working at Infosys.My notice period is ninety days.",
+  "Advisor: look at the last point. Company tie ups are there.",
+  "Advisor: let us look at point number three.",
+  "Advisor: look at this dot",
+  "Advisor: meet at the office",
+  "Advisor: the class is at 5 dot 30",
+  "Advisor: the session starts at 9.30 pm.",
+  "Advisor: we start at nine point thirty.",
+  "Advisor: interest is at the rate of ten point five percent.",
+  "Advisor: the loan is at the rate of 10 point 5 percent per annum. So it is fine.",
+  "Advisor: they grow at the rate of twelve percent. In two years it doubles.",
+  "Lead: I am good at node dot js and react.",
+  "Lead: I am not good at react dot js",
+  "Lead: I am a developer at Infosys in dot net",
+  "Lead: I work at TCS as a dot net developer.",
+  "Lead: I worked at Wipro dot net team for two years.",
+  "Lead: I am better at asp dot net than java.",
+  "Lead: looking at dot net jobs only.",
+  "Lead: I got stuck at version two dot zero.",
+  "Advisor: what is your gmail id?",
+  "Advisor: I have sent the details to your gmail.",
+  "Advisor: send it on gmail",
+  "Advisor: my yahoo is very old",
+  "Advisor: please check your gmail",
+  "Lead: I will check my mail at night. Thanks.",
+  "Lead: five @ 200 rupees each",
+  "Lead: let us meet @ 5 pm today.",
+  "Lead: I am @ Infosys. My role is tester.",
+  "Lead: first of all I am at a product company. Second I want growth.",
+  "Lead: at least one offer. Common sense is needed.",
+  "Lead: at present no calls. Company wise I am open.",
+  "Lead: I got rejected at Amazon. Come what may I will try again.",
+  "Lead: I was rejected at Microsoft at the last round. Communication was the reason.",
+  "Lead: at the end of the day. Computer science basics matter.",
+  "Lead: I cracked the test at Flipkart. Compensation was low.",
+  "Lead: I am at thirty lakhs. Compared to market it is low.",
+  "Lead: I am at thirty lakhs period. I will not take less.",
+  "Lead: at my age the point is stability.",
+  "Lead: people at my level point out that AI will replace us.",
+  "Lead: my manager at Cognizant pointed out that I need upskilling.",
+  "Lead: the team at Accenture period of notice is three months.",
+  "Lead: at night I study. Infosys is hectic.",
+  "Advisor: we look at data structures. Online classes are on weekends.",
+  "Advisor: at the same time. Live classes are there.",
+  "Advisor: at your pace. App access is for a year.",
+  "Advisor: have a look at the site. Tech domains are listed.",
+  "Advisor: join at eight. Online only.",
+  "Advisor: at what salary. Biz or tech role?",
+  "Lead: I am interested at the moment but not at this price point in the year end.",
+  "Lead: I am at Capgemini. It is a service company.",
+  "Lead: I spent two years at Oracle. In between I took a break.",
+  "Lead: I have a friend at Meta. He said the course is good.",
+  "Lead: good at sequel and python dot that is all",
+  "Advisor: look at slide ten. In short you get projects.",
+  "Advisor: have a look at interview prep dot it helps",
+  "Lead: my CTC is at twenty point five lakhs.",
+  "Lead: at around ten point two lakhs.",
+  "Lead: I will be available at seven. Me and my wife discuss and tell.",
+  "Lead: I work at EY. US clients mostly.",
+  "Lead: at Swiggy. I am a lead.",
+  "Lead: people at that company are good. App is also good.",
+  "Advisor: the fee is at the rate of ten percent. In total one lakh.",
+  "Lead: at first glance it was costly.",
+  "Lead: my outlook on life changed",
+  "Lead: I got mail at work from HR.",
+  "Lead: the outlook for IT is bad.",
+  "Lead: I live at Pune. Live classes suit me.",
+  "Lead: I check LinkedIn at night. Live sessions are hard.",
+  "Lead: he is working at Yahoo.",
+  "Lead: I worked at Yahoo for two years.",
+  "Lead: my brother is at Zoho in Chennai.",
+  "Lead: I have an offer from Zoho at thirty lakhs.",
+  "Lead: I joined Zoho.",
+  "Lead: I look at live coding rounds.",
+  "Lead: not good at live coding.",
+  "Advisor: we have mentors at AOL and MSN.",
+  "Advisor: join us at live dot it is on Sunday",
+  "Lead: I am at 3.5 lakhs. Company is small.",
+  "Lead: looking at dot net or java.",
+  "Lead: I was at Amazon dot it was good.",
+  "Lead: I will call at 5.In the evening.",
+  "Lead: I got stuck at leetcode. Com sci is not my background.",
+  "Lead: at this company dot I mean here",
+  "Lead: I worked at Rediff for a year.",
+  "Lead: I was a developer at Zoho.",
+  "Lead: I got an offer at Yahoo. It was good.",
+  "Lead: the job market outlook is not good.",
+  "Lead: my friend is at Outlook team in Microsoft.",
+  "Lead: we use live at Hotstar.",
+  "Lead: the server was at version dot 5",
+  "Lead: I am stuck at round dot 2 now",
+  "Lead: I work at Infosys. Com lab was good."
+ ],
+ "net_must_hold_unmasked": [
+  "ravi at acme dot com",
+  "ravi at gmail dot com",
+  "ravi at acme dot info",
+  "ravi at acme dot international",
+  "ravi @ acme dot com",
+  "ravi.kumar @acme.com",
+  "ravikumar@rediff",
+  "ravikumar at rediff",
+  "contact ravi at the rate acme dot info",
+  "my email is ravi kumar at the rate tata consultancy services dot com",
+  "ravi+jobs at acme dot com",
+  "O'Brien at acme dot com",
+  "someone at example dot com",
+  "ravi at acme period com",
+  "ravi at acme dotcom"
+ ]
 }
