@@ -206,6 +206,7 @@ ORDINARY_BEFORE_AT = LOCAL_STOPS | frozenset(
         "working",
         "worked",
         "job",
+        "offer",
         "joined",
         "join",
         "visit",
@@ -486,7 +487,7 @@ def _ending(tokens: list[Token], index: int, domain_end: int, strong: bool) -> i
             return next_index
         if (
             lower == "dot"
-            and 2 <= len(tld) <= 10
+            and 2 <= len(tld) <= 24
             and tld.casefold() not in NUMBER_WORDS
             and tld.casefold() not in DOMAIN_STOPS
             and tld.casefold() not in ENDING_STOPS
@@ -517,7 +518,7 @@ def _ending(tokens: list[Token], index: int, domain_end: int, strong: bool) -> i
     return None
 
 
-def _walk_local(tokens: list[Token], before: int, text: str) -> int | None:
+def _walk_local(tokens: list[Token], before: int, text: str, glued: bool = False) -> int | None:
     accepted = 0
     words = singles = 0
     start = before
@@ -540,6 +541,8 @@ def _walk_local(tokens: list[Token], before: int, text: str) -> int | None:
             index > 0 and tokens[index - 1].value.casefold() in {"dot", "underscore", "hyphen", "dash"}
         ):
             break
+        if glued and lower in ORDINARY_BEFORE_AT:
+            break
         if not _LOCAL_WORD.fullmatch(value):
             break
         is_single = len(value) == 1 or lower in NUMBER_WORDS or value.isdigit()
@@ -554,6 +557,19 @@ def _walk_local(tokens: list[Token], before: int, text: str) -> int | None:
         accepted += 1
         start = token.core_start
     return start if accepted else None
+
+
+def _glued_local_can_walk_back(value: str, tokens: list[Token], before: int) -> bool:
+    if any(
+        token.value.casefold() in {"email", "mail", "id"} for token in tokens[max(0, before - 8) : before]
+    ):
+        return True
+    if value.isdigit():
+        return True
+    if not value or not value[-1].isdigit() or before == 0:
+        return False
+    previous = tokens[before - 1].value.casefold()
+    return (len(previous) == 1 and previous.isalnum()) or previous in NUMBER_WORDS
 
 
 def _domain_start(tokens: list[Token], index: int, strong: bool) -> int | None:
@@ -599,10 +615,15 @@ def _provider_has_email_context(tokens: list[Token], index: int) -> bool:
     )
 
 
-def _speaker_start(text: str, start: int) -> int:
-    prefix = text[:start]
-    match = re.search(r"(?i)(?:^|\s)(?:lead|advisor):\s*$", prefix)
-    return match.start() if match else start
+def _speaker_start(text: str, start: int, end: int) -> int:
+    prefix_start = max(0, start - 10)
+    match = re.search(r"(?i)(?:^|\s)(?:lead|advisor):\s*$", text[prefix_start:start])
+    if not match:
+        return start
+    provider_words = PROVIDERS | {part for pair in SPLIT_PROVIDERS for part in pair}
+    if re.search(rf"(?i)\b(?:{'|'.join(re.escape(word) for word in provider_words)})\b", text[start:end]):
+        return start - (start - prefix_start - match.start())
+    return start
 
 
 def find_spoken_emails(text: str) -> list[tuple[int, int]]:
@@ -627,7 +648,11 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
                     end = token.core_end
                     if token.raw_end > token.core_end and i + 1 < len(tokens) and _tld(tokens[i + 1].value):
                         end = tokens[i + 1].core_end
-                    local_candidate = _walk_local(tokens, i, text)
+                    local_candidate = (
+                        _walk_local(tokens, i, text, glued=True)
+                        if _glued_local_can_walk_back(left, tokens, i)
+                        else None
+                    )
                     local = token.core_start if local_candidate is None else local_candidate
                     if (
                         end == token.core_end
@@ -731,12 +756,6 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
             if local_candidate is not None and (
                 not bare or not provider_name or end > domain_at or _bare_provider_local_ok(tokens, i)
             ):
-                if (
-                    i > 0
-                    and tokens[i - 1].value.casefold() in SPEAKING_LABELS
-                    and tokens[i - 1].raw_value.endswith(":")
-                ):
-                    local_candidate = tokens[i - 1].core_start
                 spans.append((local_candidate, tokens[end].core_end))
             continue
         domain_end = _domain_start(tokens, domain_at, strong)
@@ -781,14 +800,8 @@ def find_spoken_emails(text: str) -> list[tuple[int, int]]:
             continue
         local_candidate = _walk_local(tokens, i, text)
         if local_candidate is not None:
-            if (
-                i > 0
-                and tokens[i - 1].value.casefold() in SPEAKING_LABELS
-                and tokens[i - 1].raw_value.endswith(":")
-            ):
-                local_candidate = tokens[i - 1].core_start
             spans.append((local_candidate, tokens[ending].core_end))
-    return sorted({(_speaker_start(text, start), end) for start, end in set(spans)})
+    return sorted({(_speaker_start(text, start, end), end) for start, end in set(spans)})
 
 
 def provider_replacements(text: str) -> list[tuple[int, int]]:
@@ -873,4 +886,4 @@ def provider_replacements(text: str) -> list[tuple[int, int]]:
         text,
     ):
         result.append((match.start(1), match.end()))
-    return [(_speaker_start(text, start), end) for start, end in result]
+    return [(_speaker_start(text, start, end), end) for start, end in result]
