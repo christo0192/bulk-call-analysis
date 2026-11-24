@@ -56,16 +56,16 @@ _detectors: dict[str, tuple[re.Pattern[str], str]] = {
 }
 _placeholder = re.compile(r"\[[A-Z_]+\]")
 _spoken_email_net = re.compile(
-    r"(?ix)(?:[a-z0-9][\w.-]*@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*[,]*\s*"
-    r"(?:[a-z0-9_-]+\s+){0,6}[,]*\s*(?:(?:dot\.?|period|point)\s*|\.\s*)"
+    r"(?ix)(?:(?<![\w.-])[a-z0-9][\w.-]{0,63}@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*[,]*\s*"
+    r"(?:[a-z0-9][a-z0-9_-]{0,63}\s+){0,6}[,]*\s*(?:(?:dot\.?|period|point)\s*|\.\s*)"
     r"(?:[a-z]{2,10}|[a-z](?:\s+[a-z]){1,9})\b"
 )
 _spoken_webmail_net = re.compile(
-    r"(?ix)(?<!\w)(?P<local>(?:[a-z0-9][\w.-]*\s+){1,8})"
+    r"(?ix)(?<!\w)(?P<local>(?:[a-z0-9][\w.-]{0,63}\s+){1,8})"
     r"(?:@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*[,]*\s*"
     r"(?:g[\s-]?mail|y\s?mail|yahoo|hot\s?mail|out\s?look|rediff\s?mail|"
     r"i\s?cloud|proton\s?mail|zoho\s?mail)\b"
-    r"|(?<!\w)(?P<tld_local>(?:[a-z0-9][\w.-]*\s+){1,8})"
+    r"|(?<!\w)(?P<tld_local>(?:[a-z0-9][\w.-]{0,63}\s+){1,8})"
     r"(?:g[\s-]?mail|y\s?mail|yahoo|hot\s?mail|out\s?look|rediff\s?mail|"
     r"i\s?cloud|proton\s?mail|zoho\s?mail)\b\s*[,]*\s*"
     r"(?:(?:dot\.?|period|point)\s*|\.\s*)"

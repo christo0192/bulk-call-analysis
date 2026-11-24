@@ -37,11 +37,11 @@ _spoken_domain = re.compile(
 )
 _spoken_email = re.compile(
     r"(?ix)(?<![\w@])"
-    r"(?:[a-z0-9]+(?:[._-][a-z0-9]+)*@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*[,]*\s*"
-    r"[a-z0-9]+(?:-[a-z0-9]+)*(?:\s+[a-z0-9]+(?:-[a-z0-9]+)*)?"
+    r"(?:[a-z0-9](?:[._-]?[a-z0-9]){0,63}@|\bat(?:\s+the\s+rate(?:\s+of)?|\s+sign)?)\s*[,]*\s*"
+    r"[a-z0-9](?:-?[a-z0-9]){0,63}(?:\s+[a-z0-9](?:-?[a-z0-9]){0,63})?"
     r"[,]*\s*(?:(?:dot\.?|period|point)\s*|\.\s*)"
     r"(?:[a-z]{2,10}|[a-z](?:\s+[a-z]){1,9})"
-    r"(?:\s*(?:(?:dot\.?|period|point)\s*|\.\s*)[a-z0-9]+(?:-[a-z0-9]+)*(?!\s*:))*(?=\b)"
+    r"(?:\s*(?:(?:dot\.?|period|point)\s*|\.\s*)[a-z0-9](?:-?[a-z0-9]){0,63}(?!\s*:))*(?=\b)"
 )
 _number_word = re.compile(
     r"\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
