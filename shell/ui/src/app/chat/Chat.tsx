@@ -55,10 +55,14 @@ function isAlreadyRunning(error: ChatError): boolean {
 export function Chat({
   project,
   composer,
+  composerRequest,
+  onComposerRequestHandled,
   children,
 }: {
   project: string;
   composer?: { current: ((prefix?: string) => void) | null };
+  composerRequest?: { prefix: string; id: number } | null;
+  onComposerRequestHandled?: () => void;
   children?: ComponentChildren;
 }) {
   const [entries, setEntries] = useState<ChatEntry[]>([]);
@@ -90,6 +94,14 @@ export function Chat({
       setText((current) => (current.startsWith(prefix) ? current : `${prefix}${current}`));
       textarea.current?.focus();
     };
+  useEffect(() => {
+    if (!composerRequest) return;
+    setText((current) =>
+      current.startsWith(composerRequest.prefix) ? current : `${composerRequest.prefix}${current}`,
+    );
+    textarea.current?.focus();
+    onComposerRequestHandled?.();
+  }, [composerRequest, onComposerRequestHandled]);
   const publish = () => setEntries([...persisted.current, ...allLive()]);
   const scrollLatest = () => end.current?.scrollIntoView({ block: 'end' });
   const loadHistory = async (before?: number): Promise<boolean> => {

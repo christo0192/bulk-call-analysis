@@ -4,10 +4,14 @@ export function ChatDrawer({
   visible,
   toggle,
   composer,
+  composerRequest,
+  onComposerRequestHandled,
 }: {
   visible: boolean;
   toggle: () => void;
   composer?: { current: ((prefix?: string) => void) | null };
+  composerRequest?: { prefix: string; id: number } | null;
+  onComposerRequestHandled?: () => void;
 }) {
   return visible ? (
     <aside class="drawer">
@@ -19,6 +23,8 @@ export function ChatDrawer({
         key={selectedProject.value ?? ''}
         project={selectedProject.value ?? ''}
         composer={composer}
+        composerRequest={composerRequest}
+        onComposerRequestHandled={onComposerRequestHandled}
       />
     </aside>
   ) : (

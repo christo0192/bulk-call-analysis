@@ -16,6 +16,10 @@ export function MainArea() {
   const currentProject = selectedProject.value;
   const project = projects.value.find((item) => item.project === currentProject);
   const composer = useRef<((prefix?: string) => void) | null>(null);
+  const [composerRequest, setComposerRequest] = useState<{
+    prefix: string;
+    id: number;
+  } | null>(null);
   const rebuildButton = useRef<HTMLButtonElement>(null);
   const [rebuildOpen, setRebuildOpen] = useState(false);
   const [shellError, setShellError] = useState<string | null>(null);
@@ -60,13 +64,18 @@ export function MainArea() {
       );
     });
   };
+  const runAgain = () => {
+    localStorage.setItem(`chat:${currentProject}`, 'shown');
+    setChat(true);
+    setComposerRequest({ prefix: 'Run again for new dates: ', id: Date.now() });
+  };
   const view =
     phase.value === 'setup' ? (
       <SetupView id={current?.job} state={state} />
     ) : phase.value === 'sample' ? (
       <SampleView id={current!.job} state={state} />
     ) : phase.value === 'run' ? (
-      <RunView id={current!.job} showActions={false} />
+      <RunView id={current!.job} />
     ) : (
       <DoneView
         id={current!.job}
@@ -101,7 +110,7 @@ export function MainArea() {
               <button ref={rebuildButton} type="button" onClick={() => setRebuildOpen(true)}>
                 Rebuild with new rules
               </button>
-              <button type="button" onClick={() => composer.current?.('Run again for new dates: ')}>
+              <button type="button" onClick={runAgain}>
                 Run again with new dates
               </button>
             </>
@@ -120,7 +129,13 @@ export function MainArea() {
             <Rail project={currentProject} state={state} />
           )}
           {(phase.value === 'run' || phase.value === 'done') && (
-            <ChatDrawer visible={chat} toggle={toggle} composer={composer} />
+            <ChatDrawer
+              visible={chat}
+              toggle={toggle}
+              composer={composer}
+              composerRequest={composerRequest}
+              onComposerRequestHandled={() => setComposerRequest(null)}
+            />
           )}
         </ErrorBoundary>
       </div>

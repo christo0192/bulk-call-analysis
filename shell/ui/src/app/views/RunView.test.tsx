@@ -131,10 +131,12 @@ it('failed opens the reasons', async () => {
   await waitFor(() => fireEvent.click(screen.getByRole('button', { name: /see why/ })));
   expect(screen.getByText('timeout: 1')).toBeInTheDocument();
 });
-it('pause calls job/pause and resume calls job/resume', async () => {
+it('run view leaves job actions to the main header', async () => {
   render(<RunView id="job-one" />);
-  await waitFor(() => fireEvent.click(screen.getByRole('button', { name: 'Pause' })));
-  expect(mockBridge.calls.some((call) => call.method === 'job/pause')).toBe(true);
+  await waitFor(() => expect(screen.getByTestId('run-view')).toBeInTheDocument());
+  expect(screen.queryByRole('button', { name: 'Pause' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Open folder' })).toBeNull();
 });
 it('snapshot refetch happens on job/state and at most every 30 seconds', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });

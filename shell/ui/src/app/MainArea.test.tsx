@@ -8,6 +8,7 @@ import {
   newProjectOpen,
   addProject,
 } from '../state/store';
+import { mockBridge } from '../engine/bridge';
 beforeEach(() => {
   projects.value = [{ project: 'p', title: 'Project one', status: 'planned' }];
   selectedProject.value = 'p';
@@ -33,6 +34,13 @@ it('drawer hides and restores', () => {
   fireEvent.click(screen.getByRole('button', { name: /Hide/ }));
   expect(screen.getByRole('button', { name: /Chat/ })).toBeInTheDocument();
   expect(localStorage.getItem('chat:p')).toBe('hidden');
+});
+it('header pause calls the job action once', async () => {
+  jobsByProject.value = { p: [{ job: 'j', project: 'p', state: 'running' }] };
+  render(<MainArea />);
+  await waitFor(() => expect(screen.getByTestId('run-view')).toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+  expect(mockBridge.calls.filter((call) => call.method === 'job/pause')).toHaveLength(1);
 });
 it('after creating a project the setup view shows instead of No projects yet', async () => {
   projects.value = [];
