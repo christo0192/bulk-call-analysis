@@ -259,6 +259,9 @@ impl<P: PowerOs> KeepAwake<P> {
     pub fn status(&self) -> PowerStatus {
         self.power.status()
     }
+    pub fn is_held(&self) -> bool {
+        *self.held.lock().unwrap()
+    }
 }
 impl<P: PowerOs> Drop for KeepAwake<P> {
     fn drop(&mut self) {

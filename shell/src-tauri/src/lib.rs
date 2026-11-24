@@ -1,10 +1,14 @@
 mod engine;
+mod notifications;
+mod paths;
 mod power;
 mod procguard;
 pub mod rpc;
 mod sleepwatch;
 mod tray;
-use serde_json::Value;
+mod tray_model;
+use serde::Serialize;
+use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use std::{
     path::PathBuf,
@@ -49,7 +53,7 @@ fn run_event_action(is_exit: bool, code: Option<i32>) -> RunEventAction {
 }
 
 #[doc(hidden)]
-pub use engine::{is_running_job_state, job_event_requires_keep_awake, Engine};
+pub use engine::Engine;
 
 static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_DONE: OnceLock<std::sync::Arc<Notify>> = OnceLock::new();
@@ -76,20 +80,249 @@ impl log::Log for AppLogger {
     fn flush(&self) {}
 }
 
+#[derive(Debug, Serialize)]
+struct CommandError {
+    code: Option<i64>,
+    message: String,
+    data: Option<Value>,
+}
+
+impl From<rpc::RpcError> for CommandError {
+    fn from(error: rpc::RpcError) -> Self {
+        let code = match &error {
+            rpc::RpcError::Remote { code, .. } => Some(*code),
+            _ => None,
+        };
+        let (message, data) = match error {
+            rpc::RpcError::Timeout => ("RPC timed out".into(), Some(json!({"reason":"timeout"}))),
+            rpc::RpcError::Closed
+            | rpc::RpcError::Io(_)
+            | rpc::RpcError::Malformed(_)
+            | rpc::RpcError::WriteTimeout => (
+                "The engine is unavailable".into(),
+                Some(json!({"reason":"engine_unavailable"})),
+            ),
+            rpc::RpcError::Remote { message, data, .. } => (message, data),
+        };
+        Self {
+            code,
+            message,
+            data,
+        }
+    }
+}
+
+const UI_METHODS: &[&str] = &[
+    "app/status",
+    "setup/checklist",
+    "setup/runChecks",
+    "setup/markManual",
+    "settings/get",
+    "settings/set",
+    "projects/list",
+    "projects/create",
+    "projects/jobs",
+    "files/list",
+    "ids/attach",
+    "chat/send",
+    "chat/stop",
+    "chat/history",
+    "job/status",
+    "job/snapshot",
+    "job/plan",
+    "job/sample",
+    "job/outputs",
+    "job/approvePlan",
+    "job/approveSample",
+    "job/startFull",
+    "job/pause",
+    "job/resume",
+    "job/rebuildRules",
+    "auth/claudeLogin",
+    "auth/codexLogin",
+    "auth/status",
+    "allowance/status",
+];
+
+fn ui_method_allowed(method: &str) -> bool {
+    UI_METHODS.contains(&method)
+}
+
+fn method_not_allowed_error() -> CommandError {
+    CommandError {
+        code: Some(-32601),
+        message: "Method not found".into(),
+        data: Some(json!({"reason":"method_not_allowed"})),
+    }
+}
+
 #[tauri::command]
 async fn engine_call(
     engine: State<'_, Engine>,
     method: String,
     params: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
+    if !ui_method_allowed(&method) {
+        return Err(method_not_allowed_error());
+    }
     engine
         .call(&method, params)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 #[tauri::command]
 async fn engine_status(engine: State<'_, Engine>) -> Result<String, String> {
     Ok(engine.status().await)
+}
+
+const PROJECT_EXTENSIONS: &[&str] = &["xlsx", "md", "csv", "html"];
+
+fn valid_project_slug(project: &str) -> bool {
+    let bytes = project.as_bytes();
+    (4..=64).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && (bytes[bytes.len() - 1].is_ascii_lowercase() || bytes[bytes.len() - 1].is_ascii_digit())
+        && bytes[1..bytes.len() - 1]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+fn malformed_engine_reply() -> CommandError {
+    CommandError {
+        code: None,
+        message: "The engine is unavailable".into(),
+        data: Some(json!({"reason":"engine_unavailable"})),
+    }
+}
+
+fn is_allowed_project_file(project_dir: &std::path::Path, path: &std::path::Path) -> bool {
+    let Ok(relative) = path.strip_prefix(project_dir) else {
+        return false;
+    };
+    let parts: Vec<_> = relative.components().collect();
+    let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+    if name.eq_ignore_ascii_case("summary.md") && parts.len() == 1 {
+        return true;
+    }
+    parts.len() == 4
+        && parts[0]
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("jobs")
+        && parts[2]
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("output")
+        && matches!(
+            path.extension()
+                .and_then(|v| v.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str(),
+            "xlsx" | "md" | "csv" | "html"
+        )
+}
+
+async fn projects_root<R: tauri::Runtime>(
+    engine: &Engine<R>,
+    project: &str,
+) -> Result<PathBuf, CommandError> {
+    let status = engine
+        .call("app/status", json!({}))
+        .await
+        .map_err(CommandError::from)?;
+    let data_dir = status
+        .get("dataDir")
+        .and_then(Value::as_str)
+        .ok_or_else(malformed_engine_reply)?;
+    let data_dir = validate_project_request(project, PathBuf::from(data_dir))?;
+    let projects = data_dir.join("projects");
+    let root =
+        dunce::canonicalize(&projects).map_err(|_| path_error(paths::OpenError::FileNotFound))?;
+    let project_dir = dunce::canonicalize(root.join(project))
+        .map_err(|_| path_error(paths::OpenError::FileNotFound))?;
+    if project_dir.parent() != Some(root.as_path()) || !project_dir.is_dir() {
+        return Err(path_error(paths::OpenError::OutsideProject));
+    }
+    Ok(project_dir)
+}
+
+fn validate_project_request(project: &str, data_dir: PathBuf) -> Result<PathBuf, CommandError> {
+    if !valid_project_slug(project) {
+        return Err(path_error(paths::OpenError::InvalidSlug));
+    }
+    if data_dir.as_os_str().is_empty() || paths::is_unsafe_path(&data_dir) {
+        return Err(path_error(paths::OpenError::InvalidPath));
+    }
+    Ok(data_dir)
+}
+
+#[tauri::command]
+async fn open_project_file(
+    app: tauri::AppHandle,
+    engine: State<'_, Engine>,
+    project: String,
+    name: String,
+) -> Result<(), CommandError> {
+    let result = engine
+        .call("files/path", json!({"project": project, "name": name}))
+        .await
+        .map_err(CommandError::from)?;
+    let project_dir = projects_root(&engine, &project).await?;
+    let candidate = result
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(malformed_engine_reply)?;
+    let path = paths::validate_project_path(
+        &project_dir,
+        std::path::Path::new(candidate),
+        PROJECT_EXTENSIONS,
+    )
+    .map_err(path_error)?;
+    if !is_allowed_project_file(&project_dir, &path) {
+        return Err(path_error(paths::OpenError::TypeNotAllowed));
+    }
+    // The canonical path was checked immediately before this call; a same-user
+    // process can still replace a directory in the remaining opener window.
+    tauri_plugin_opener::OpenerExt::opener(&app)
+        .open_path(path.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|error| CommandError {
+            code: None,
+            message: error.to_string(),
+            data: Some(json!({"reason":"open_failed"})),
+        })
+}
+
+#[tauri::command]
+async fn open_project_folder(
+    app: tauri::AppHandle,
+    engine: State<'_, Engine>,
+    project: String,
+) -> Result<(), CommandError> {
+    let path = projects_root(&engine, &project).await?;
+    let path = paths::validate_project_folder(&path).map_err(path_error)?;
+    tauri_plugin_opener::OpenerExt::opener(&app)
+        .open_path(path.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|error| CommandError {
+            code: None,
+            message: error.to_string(),
+            data: Some(json!({"reason":"open_failed"})),
+        })
+}
+
+fn path_error(error: paths::OpenError) -> CommandError {
+    let reason = match error {
+        paths::OpenError::FileNotFound => "file_not_found",
+        paths::OpenError::OutsideProject => "outside_project",
+        paths::OpenError::TypeNotAllowed => "type_not_allowed",
+        paths::OpenError::InvalidPath => "outside_project",
+        paths::OpenError::InvalidSlug => "invalid_slug",
+    };
+    CommandError {
+        code: None,
+        message: error.to_string(),
+        data: Some(json!({"reason": reason})),
+    }
 }
 
 pub fn run() {
@@ -97,6 +330,8 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             let _ = crate::tray::show_main_window(app);
         }))
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .args(["--autostart"])
@@ -121,7 +356,12 @@ pub fn run() {
             sleepwatch::start(engine.clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![engine_call, engine_status])
+        .invoke_handler(tauri::generate_handler![
+            engine_call,
+            engine_status,
+            open_project_file,
+            open_project_folder
+        ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let _ = window.destroy();
@@ -224,11 +464,115 @@ fn start_shutdown(app: tauri::AppHandle) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        exit_action, handle_exit, handle_tray_quit, run_event_action, Engine, ExitAction,
-        RunEventAction, SHUTDOWN_STARTED,
+        exit_action, handle_exit, handle_tray_quit, is_allowed_project_file,
+        method_not_allowed_error, run_event_action, ui_method_allowed, validate_project_request,
+        CommandError, Engine, ExitAction, RunEventAction, SHUTDOWN_STARTED,
     };
+    use crate::rpc::RpcError;
+    use serde_json::json;
     use std::time::{Duration, Instant};
     use tokio::sync::Notify;
+
+    #[test]
+    fn allowlist_accepts_ui_methods() {
+        assert!(ui_method_allowed("chat/send"));
+        assert!(ui_method_allowed("allowance/status"));
+        assert!(ui_method_allowed("ids/attach"));
+    }
+
+    #[test]
+    fn allowlist_rejects_internal_methods() {
+        assert!(!ui_method_allowed("shutdown"));
+        assert!(!ui_method_allowed("files/path"));
+        assert!(!ui_method_allowed("health/ping"));
+    }
+
+    #[test]
+    fn allowlist_is_case_sensitive() {
+        assert!(!ui_method_allowed("Chat/send"));
+        assert!(!ui_method_allowed("APP/status"));
+    }
+
+    #[test]
+    fn open_project_folder_rejects_bad_slugs_unc_and_device_paths() {
+        let mut opener_called = false;
+        for project in ["Bad Project", "bad", "bad_project"] {
+            let error = validate_project_request(project, std::path::PathBuf::from("safe"))
+                .inspect(|_| opener_called = true)
+                .unwrap_err();
+            assert_eq!(error.data, Some(json!({"reason":"invalid_slug"})));
+        }
+        for value in [
+            "//host/share",
+            r"\\?\C:\projects",
+            r"\\.\C:\projects",
+            r"\??\C:\projects",
+            "//?/",
+        ] {
+            let error = validate_project_request("project", std::path::PathBuf::from(value))
+                .inspect(|_| opener_called = true)
+                .unwrap_err();
+            assert_eq!(error.data, Some(json!({"reason":"outside_project"})));
+        }
+        assert!(!opener_called);
+    }
+
+    #[test]
+    fn allowlist_accepts_every_listed_output_and_refuses_the_rest() {
+        let root = std::path::Path::new("project");
+        for path in [
+            "jobs/j1/output/results.v1.xlsx",
+            "jobs/j1/output/results.v1.rebuild2.xlsx",
+            "jobs/j1/output/verify.v1.md",
+            "summary.md",
+        ] {
+            assert!(is_allowed_project_file(root, &root.join(path)), "{path}");
+        }
+        for path in [
+            "jobs/j1/raw/call.json",
+            "jobs/j1/masked/call.json",
+            "jobs/j1/chat/chat.json",
+            "inputs/source.xlsx",
+            "jobs/j1/output/results.v1.rules.json",
+            "jobs/j1/output/reconciliation.v1.json",
+            "jobs/j1/output/state.sqlite3",
+            "jobs/j1/output/x.xlsx.exe",
+            "jobs/j1/output/X.XLSX:stream",
+            "JOBS/j1/RAW/call.json",
+            "Jobs/j1/Masked/call.json",
+            "jobs/j1/Chat/chat.json",
+        ] {
+            assert!(!is_allowed_project_file(root, &root.join(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn rejected_method_has_structured_error() {
+        let error = method_not_allowed_error();
+        assert_eq!(error.code, Some(-32601));
+        assert_eq!(error.data, Some(json!({"reason":"method_not_allowed"})));
+    }
+
+    #[test]
+    fn local_errors_have_structured_reasons() {
+        let timeout = CommandError::from(RpcError::Timeout);
+        assert_eq!(timeout.code, None);
+        assert_eq!(timeout.data, Some(json!({"reason":"timeout"})));
+        let closed = CommandError::from(RpcError::Closed);
+        assert_eq!(closed.data, Some(json!({"reason":"engine_unavailable"})));
+    }
+
+    #[test]
+    fn remote_error_preserves_code_message_and_data() {
+        let error = CommandError::from(RpcError::Remote {
+            code: -32001,
+            message: "failed".into(),
+            data: Some(json!({"reason":"safe"})),
+        });
+        assert_eq!(error.code, Some(-32001));
+        assert_eq!(error.message, "failed");
+        assert_eq!(error.data, Some(json!({"reason":"safe"})));
+    }
 
     #[test]
     fn closing_last_window_keeps_engine_running() {

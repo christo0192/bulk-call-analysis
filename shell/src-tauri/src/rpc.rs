@@ -26,7 +26,11 @@ pub enum RpcError {
     #[error("RPC connection closed")]
     Closed,
     #[error("RPC error {code}: {message}")]
-    Remote { code: i64, message: String },
+    Remote {
+        code: i64,
+        message: String,
+        data: Option<Value>,
+    },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -50,6 +54,20 @@ pub fn decode(line: &[u8]) -> Result<Value, RpcError> {
 pub type Notification = Value;
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
 
+struct PendingGuard {
+    pending: Pending,
+    id: u64,
+}
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        let pending = self.pending.clone();
+        let id = self.id;
+        tokio::spawn(async move {
+            pending.lock().await.remove(&id);
+        });
+    }
+}
+
 const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Frame {
@@ -68,6 +86,11 @@ pub struct Client<W> {
 }
 
 impl<W: AsyncWrite + Unpin + Send + 'static> Client<W> {
+    #[cfg(test)]
+    pub(crate) async fn pending_len(&self) -> usize {
+        self.pending.lock().await.len()
+    }
+
     pub fn new(writer: W) -> Arc<Self> {
         Self::with_write_timeout(writer, DEFAULT_WRITE_TIMEOUT)
     }
@@ -126,6 +149,10 @@ impl<W: AsyncWrite + Unpin + Send + 'static> Client<W> {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
+        let _pending_guard = PendingGuard {
+            pending: self.pending.clone(),
+            id,
+        };
         let message = json!({"jsonrpc":"2.0", "id": id, "method": method, "params": params});
         let bytes = encode(&message)?;
         if self.closed.load(Ordering::Acquire) {
@@ -186,7 +213,6 @@ impl<W: AsyncWrite + Unpin + Send + 'static> Client<W> {
         }
     }
 
-    #[allow(dead_code)]
     pub async fn notify(
         self: &Arc<Self>,
         method: &str,
@@ -251,6 +277,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> Client<W> {
                             .and_then(Value::as_str)
                             .unwrap_or("unknown error")
                             .to_owned(),
+                        data: error.get("data").cloned(),
                     })
                 } else {
                     Ok(object.get("result").cloned().unwrap_or(Value::Null))
@@ -334,6 +361,36 @@ mod tests {
     }
 
     #[test]
+    fn dropped_request_frees_its_pending_id() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, mut server_io) = tokio::io::duplex(1024);
+            let client = Client::new(client_io);
+            let server = tokio::spawn(async move {
+                let mut line = String::new();
+                BufReader::new(&mut server_io)
+                    .read_line(&mut line)
+                    .await
+                    .unwrap();
+            });
+            let _ = tokio::time::timeout(
+                Duration::from_millis(50),
+                client.request("slow", json!({}), Duration::from_secs(30)),
+            )
+            .await;
+            server.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while client.pending_len().await != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("dropped request remained pending");
+            assert_eq!(client.pending_len().await, 0);
+        });
+    }
+
+    #[test]
     fn slow_reply_timeout_does_not_close_the_client() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
@@ -380,14 +437,55 @@ mod tests {
             let (notifications, _) = mpsc::channel(1);
             client
                 .dispatch(
-                    json!({"id":sent["id"],"error":{"code":7,"message":"bad"}}),
+                    json!({"id":sent["id"],"error":{"code":7,"message":"bad","data":{"reason":"x"}}}),
                     &notifications,
                 )
                 .await;
             assert!(matches!(
                 request.await.unwrap(),
-                Err(RpcError::Remote { code: 7, .. })
+                Err(RpcError::Remote { code: 7, data: Some(data), .. }) if data == json!({"reason":"x"})
             ));
+        });
+    }
+
+    #[test]
+    fn overlapping_requests_can_complete_out_of_order() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (client_io, server_io) = tokio::io::duplex(4096);
+            let client = Client::new(client_io);
+            let first = {
+                let c = client.clone();
+                tokio::spawn(
+                    async move { c.request("slow", json!({}), Duration::from_secs(1)).await },
+                )
+            };
+            let second = {
+                let c = client.clone();
+                tokio::spawn(
+                    async move { c.request("fast", json!({}), Duration::from_secs(1)).await },
+                )
+            };
+            let mut server = BufReader::new(server_io);
+            let mut ids = HashMap::new();
+            for _ in 0..2 {
+                let mut line = String::new();
+                server.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                ids.insert(
+                    request["method"].as_str().unwrap().to_owned(),
+                    request["id"].clone(),
+                );
+            }
+            let (notifications, _) = mpsc::channel(1);
+            client
+                .dispatch(json!({"id": ids["fast"], "result": "fast"}), &notifications)
+                .await;
+            client
+                .dispatch(json!({"id": ids["slow"], "result": "slow"}), &notifications)
+                .await;
+            assert_eq!(second.await.unwrap().unwrap(), json!("fast"));
+            assert_eq!(first.await.unwrap().unwrap(), json!("slow"));
         });
     }
 
