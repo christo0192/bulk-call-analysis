@@ -12,6 +12,24 @@ const duration = (seconds: number) => {
   const hours = Math.floor(minutes / 60);
   return minutes % 60 ? `${hours} h ${minutes % 60} min` : `${hours} h`;
 };
+/** The engine's internal step names, in the words the screens use. */
+const STEP_WORDS: Record<string, string> = {
+  plan_proposed: 'plan proposed',
+  plan_approved: 'plan approved',
+  pulling: 'pulling transcripts',
+  masking_sample: 'masking the sample',
+  sample_running: 'reading the sample',
+  sample_ready: 'sample ready to check',
+  sample_approved: 'sample approved',
+  full_running: 'reading every lead',
+  quote_check: 'checking quotes',
+  building_output: 'building the workbook',
+  verifying: 'verifying',
+  done_with_issues: 'done with issues',
+};
+/** Activity lines come from the engine; replace its internal step names with plain words. */
+export const plainActivity = (text: string) =>
+  text.replace(/\b[a-z]+(?:_[a-z]+)+\b/g, (word) => STEP_WORDS[word] ?? word.replace(/_/g, ' '));
 const time = (ts: number) =>
   new Intl.DateTimeFormat(undefined, {
     weekday: 'short',
@@ -511,10 +529,11 @@ export function RunView({ id, onStalled }: { id: string; onStalled?: (text: stri
           {snapshot.recent
             .slice()
             .reverse()
-            .map((item) => (
-              <div class="recent-row" key={`${item.ts}-${item.text}`}>
+            .map((item, index) => (
+              // Two entries can share a time and text (a pause, a resume, a pause again).
+              <div class="recent-row" key={`${index}-${item.ts}`}>
                 <time>{time(item.ts)}</time>
-                <span>{item.text}</span>
+                <span>{plainActivity(item.text)}</span>
               </div>
             ))}
         </section>

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import running from '../../mock/fixtures/engine/job-snapshot-running.json';
-import { RunView } from './RunView';
+import { RunView, plainActivity } from './RunView';
 import { mockBridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import type { JobSnapshot } from '../../engine/types';
@@ -294,4 +294,16 @@ it('numbers are rounded', async () => {
   ) as HTMLElement;
   expect(within(hero).getAllByText(/2 h 5 min/).length).toBeGreaterThan(0);
   expect(screen.getByText(/1\.3 leads a minute/)).toBeInTheDocument();
+});
+
+it('activity lines use plain words for the engine step names', () => {
+  expect(plainActivity('State changed from sample_approved to full_running.')).toBe(
+    'State changed from sample approved to reading every lead.',
+  );
+  expect(plainActivity('State changed from full_running to paused.')).toBe(
+    'State changed from reading every lead to paused.',
+  );
+  expect(plainActivity('Lead 1002 failed: quota_interrupt')).toBe(
+    'Lead 1002 failed: quota interrupt',
+  );
 });
