@@ -135,7 +135,8 @@ export type OutputColumn = {
   type: string;
   description?: string;
   nullable?: boolean;
-  values?: string[] | null;
+  // The engine passes the schema's enum through as is: strings, numbers or booleans.
+  values?: (string | number | boolean | null)[] | null;
 };
 export type PlanCard = {
   job: string;

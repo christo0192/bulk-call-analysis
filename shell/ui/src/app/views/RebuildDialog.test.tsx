@@ -560,3 +560,34 @@ it('number values use a text box (a number box drops the commas of a list)', () 
     expect((within(dialog).getByLabelText('Value') as HTMLInputElement).type).toBe('text');
   }
 });
+
+it('number enum options are sent as numbers', async () => {
+  // The engine passes the schema's enum through as is, so an integer enum arrives as numbers.
+  const currentPlan: PlanCard = {
+    ...recordedPlan,
+    outputColumns: [{ name: 'rating', type: 'integer', values: [1, 2, 3] }],
+  };
+  const dialog = renderDialog(vi.fn(), currentPlan);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Review flag' }));
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.rating' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'eq' } });
+  fireEvent.change(within(dialog).getByLabelText('Value'), { target: { value: '2' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.rating' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'in' } });
+  const select = within(dialog).getByLabelText('Value') as HTMLSelectElement;
+  for (const option of Array.from(select.options))
+    option.selected = option.value === '1' || option.value === '3';
+  fireEvent.change(select);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  expect(within(dialog).queryByRole('alert')).toBeNull();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  await vi.waitFor(() => {
+    const call = mockBridge.calls.find((item) => item.method === 'job/rebuildRules');
+    const rules = (call?.params as { rules: { conditions: unknown[] }[] }).rules;
+    expect(rules.map((rule) => rule.conditions)).toEqual([
+      [{ field: 'answer.rating', op: 'eq', value: 2 }],
+      [{ field: 'answer.rating', op: 'in', value: [1, 3] }],
+    ]);
+  });
+});

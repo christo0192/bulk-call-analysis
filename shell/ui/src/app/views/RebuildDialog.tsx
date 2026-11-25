@@ -508,13 +508,17 @@ function ValueControl({
     );
   if (column?.values) {
     // A list operator picks several options; they travel joined by OPTION_SEPARATOR so an option
-    // with a comma or spaces stays exactly as the engine defines it.
+    // with a comma or spaces stays exactly as the engine defines it. Options can be numbers (an
+    // integer enum), so they are compared as text here and converted back by the column type.
     const list = isList(operator);
+    const options = enumOptions(column);
     const chosen = list ? value.split(OPTION_SEPARATOR).filter(Boolean) : [value];
     return (
       <select
         aria-label="Value"
         multiple={list}
+        size={list ? Math.min(Math.max(options.length, 2), 6) : undefined}
+        title={list ? 'Hold Ctrl (or ⌘ on a Mac) to pick several' : undefined}
         {...(list ? {} : { value })}
         onChange={(event) => {
           const target = event.currentTarget;
@@ -528,8 +532,13 @@ function ValueControl({
         }}
       >
         {!list && <option value="">Choose</option>}
-        {column.values.map((item) => (
-          <option value={item} key={item} {...(list ? { selected: chosen.includes(item) } : {})}>
+        {options.map((item) => (
+          <option
+            value={item}
+            key={item}
+            title={item}
+            {...(list ? { selected: chosen.includes(item) } : {})}
+          >
             {item}
           </option>
         ))}
@@ -571,6 +580,15 @@ const INTEGER = /^-?\d+$/;
 // Plain decimals only: no hex, no exponent, no thousands separators.
 const DECIMAL = /^-?(?:\d+(?:\.\d+)?|\.\d+)$/;
 const isList = (op: string) => op === 'in' || op === 'not_in';
+/**
+ * An enum column's options as text, in the engine's order. Empty and null options are left out:
+ * "is empty" covers them, and an empty option would look like "nothing chosen".
+ */
+function enumOptions(column: OutputColumn): string[] {
+  return (column.values ?? [])
+    .filter((option) => option !== null && option !== '')
+    .map((option) => String(option));
+}
 /** Joins the options chosen for an enum list; never part of an option the engine sends. */
 const OPTION_SEPARATOR = '\u001f';
 /**
@@ -594,7 +612,8 @@ function validateCondition(condition: RuleCondition, plan: PlanCard): string[] {
     return ['Choose Yes or No'];
   if (column?.values) {
     // Enum options are sent exactly as listed; only check that one was picked.
-    if (!values.length || values.some((value) => !column.values!.includes(value)))
+    const options = enumOptions(column);
+    if (!values.length || values.some((value) => !options.includes(value)))
       return ['Choose at least one option'];
     return [];
   }
