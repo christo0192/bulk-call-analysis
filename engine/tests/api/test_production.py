@@ -233,16 +233,23 @@ def test_spacy_probe_ok_when_model_installed_without_running_a_job(
     assert _spacy_check(cast(dict[str, object], result)) == {
         "name": "spacy",
         "status": "ok",
-        "detail": "installed",
+        "detail": "Name-masking model installed.",
         "action_id": "setup.spacy",
     }
 
 
 def test_spacy_probe_fails_when_model_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("bca.setup.spacy_model.importlib.util.find_spec", lambda name: None)
+    # spaCy itself is present; only the English name model is missing.
+    monkeypatch.setattr(
+        "bca.setup.spacy_model.importlib.util.find_spec",
+        lambda name: None if name == "en_core_web_sm" else object(),
+    )
     result = run(make_backend(tmp_path).call("setup/runChecks", {}))
     assert _spacy_check(cast(dict[str, object], result))["status"] == "failed"
-    assert _spacy_check(cast(dict[str, object], result))["detail"] == "not installed"
+    assert (
+        _spacy_check(cast(dict[str, object], result))["detail"]
+        == "The name-masking model is not installed. Run the app's start script again."
+    )
 
 
 def test_spacy_probe_result_survives_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,7 +261,7 @@ def test_spacy_probe_result_survives_restart(tmp_path: Path, monkeypatch: pytest
     restarted = make_backend(tmp_path)
     checklist = run(restarted.call("setup/checklist", {}))
     assert _spacy_check({"items": checklist})["status"] == "ok"
-    assert _spacy_check({"items": checklist})["detail"] == "installed"
+    assert _spacy_check({"items": checklist})["detail"] == "Name-masking model installed."
     assert _spacy_check(cast(dict[str, object], first))["status"] == "ok"
 
 
