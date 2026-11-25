@@ -220,6 +220,44 @@ def test_setup_run_checks_and_manual_mark_are_distinct(tmp_path: Path) -> None:
     assert marked == {"item": "training_off", "status": "manual_done"}
 
 
+def _spacy_check(result: dict[str, object]) -> dict[str, str]:
+    items = cast(list[dict[str, str]], result["items"])
+    return next(item for item in items if item["name"] == "spacy")
+
+
+def test_spacy_probe_ok_when_model_installed_without_running_a_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("bca.setup.spacy_model.importlib.util.find_spec", lambda name: object())
+    result = run(make_backend(tmp_path).call("setup/runChecks", {}))
+    assert _spacy_check(cast(dict[str, object], result)) == {
+        "name": "spacy",
+        "status": "ok",
+        "detail": "installed",
+        "action_id": "setup.spacy",
+    }
+
+
+def test_spacy_probe_fails_when_model_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bca.setup.spacy_model.importlib.util.find_spec", lambda name: None)
+    result = run(make_backend(tmp_path).call("setup/runChecks", {}))
+    assert _spacy_check(cast(dict[str, object], result))["status"] == "failed"
+    assert _spacy_check(cast(dict[str, object], result))["detail"] == "not installed"
+
+
+def test_spacy_probe_result_survives_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bca.setup.spacy_model.importlib.util.find_spec", lambda name: object())
+    backend = make_backend(tmp_path)
+    first = run(backend.call("setup/runChecks", {}))
+    run(backend.call("shutdown", {}))
+
+    restarted = make_backend(tmp_path)
+    checklist = run(restarted.call("setup/checklist", {}))
+    assert _spacy_check({"items": checklist})["status"] == "ok"
+    assert _spacy_check({"items": checklist})["detail"] == "installed"
+    assert _spacy_check(cast(dict[str, object], first))["status"] == "ok"
+
+
 def test_settings_get_only_reports_key_location(tmp_path: Path) -> None:
     key = tmp_path / "connector.json"
     key.write_text("synthetic-secret", encoding="utf-8")
@@ -284,7 +322,7 @@ def _write_job(
     if not backend.store.rows("SELECT 1 FROM projects WHERE id='project-one'"):
         backend.store.create_project("project-one", "Synthetic")
     backend.store.create_job(job_id, "project-one", 1, state)
-    job_dir = backend.app_data / "projects" / "project-one" / job_id
+    job_dir = backend.app_data / "projects" / "project-one" / "jobs" / job_id
     save_spec(
         JobSpec(
             1,
@@ -447,7 +485,7 @@ def _tiny_job(
     backend = ProductionBackend(tmp_path, store=open_store(tmp_path / "store.sqlite3"), bq=bq)
     backend.store.create_project("project-one", "Synthetic")
     backend.store.create_job("job-one", "project-one", 1, JobState.plan_proposed)
-    job_dir = backend.app_data / "projects" / "project-one" / "job-one"
+    job_dir = backend.app_data / "projects" / "project-one" / "jobs" / "job-one"
     save_spec(
         JobSpec(
             1,
@@ -477,7 +515,21 @@ async def _wait_state(backend: ProductionBackend, state: str, limit: float, poll
     deadline = asyncio.get_running_loop().time() + limit
     current: object = None
     while asyncio.get_running_loop().time() < deadline:
-        current = cast(dict[str, object], await backend.call("job/status", {"job": "job-one"})).get("state")
+        status = cast(dict[str, object], await backend.call("job/status", {"job": "job-one"}))
+        current = (
+            status.get("step")
+            if state
+            in {
+                "pulling",
+                "masking_sample",
+                "sample_running",
+                "full_running",
+                "quote_check",
+                "building_output",
+                "verifying",
+            }
+            else status.get("state")
+        )
         if current == state:
             return
         await asyncio.sleep(poll)
@@ -783,8 +835,10 @@ def test_each_transition_emits_job_state_exactly_once(
         "verifying",
     }
     expected = ["running" if state in running else state for state in store_states]
-    states = [cast(dict[str, object], item["params"])["state"] for item in notifications]
+    params = [cast(dict[str, object], item["params"]) for item in notifications]
+    states = [item["state"] for item in params]
     assert states == expected
+    assert [item["step"] for item in params] == store_states
 
 
 def test_stdio_pull_failure_stalls_job_and_engine_stays_usable(tmp_path: Path) -> None:
@@ -1119,10 +1173,13 @@ def test_every_state_change_emits_job_state(tmp_path: Path, monkeypatch: pytest.
             await service.publish_event(event)
 
     run(scenario())
-    states = [cast(dict[str, object], item["params"])["state"] for item in notifications]
+    params = [cast(dict[str, object], item["params"]) for item in notifications]
+    states = [item["state"] for item in params]
+    steps = [item["step"] for item in params]
     assert "paused" in states
     assert "stalled" in states
     assert any(state in {"running", "sample_ready"} for state in states)
+    assert "pulling" in steps
 
 
 def test_chat_send_during_shutdown_is_refused_and_no_claude_survives(
@@ -1176,6 +1233,7 @@ def test_stdio_shutdown_during_slow_pull_exits_quickly(
             process.communicate(timeout=5)
 
 
+@pytest.mark.timeout(240)  # about 35 s alone; slower under a full, loaded run
 def test_pause_mid_pull_never_stalls_and_resume_reaches_sample_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1192,7 +1250,7 @@ def test_pause_mid_pull_never_stalls_and_resume_reaches_sample_ready(
             state: object = None
             while time.monotonic() < deadline:
                 _send_stdio(process, request_id, "job/status", {"job": "job-one"})
-                state = cast(dict[str, object], _read_stdio(process, request_id)["result"])["state"]
+                state = cast(dict[str, object], _read_stdio(process, request_id)["result"])["step"]
                 if state == "pulling":
                     break
                 request_id += 1

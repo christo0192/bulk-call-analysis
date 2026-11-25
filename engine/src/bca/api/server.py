@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import TextIO, cast
 
 from bca.monitor.events import Event, EventBus
+from bca.store.lifecycle import public_state
 
 Json = dict[str, object]
 Notify = Callable[[Json], Awaitable[None]]
@@ -22,6 +24,17 @@ class RpcError(Exception):
     def __init__(self, code: int, message: str, data: object | None = None) -> None:
         super().__init__(message)
         self.code, self.message, self.data = code, message, data
+
+
+def strict_json_value(value: object, logger: logging.Logger) -> object:
+    if isinstance(value, float) and not math.isfinite(value):
+        logger.debug("replacing non-finite JSON number with null")
+        return None
+    if isinstance(value, dict):
+        return {key: strict_json_value(item, logger) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [strict_json_value(item, logger) for item in value]
+    return value
 
 
 def _object(value: object, name: str = "params") -> dict[str, object]:
@@ -321,24 +334,27 @@ class ApiService:
                 held_back = count_field("held_back")
                 progress = {
                     "job": event.job_id,
+                    "project": event.data.get("project"),
+                    "phase": event.data.get("phase", "full"),
                     "done": done,
-                    "total": done + remaining + failed + held_back - in_flight,
-                    "remaining": str(remaining),
+                    "inFlight": in_flight,
+                    "retrying": count_field("retrying"),
+                    "failed": failed,
+                    "heldBack": held_back,
+                    "remaining": remaining,
+                    "total": count_field("total"),
                 }
+                progress = {key: value for key, value in progress.items() if value is not None}
                 await self.notify({"jsonrpc": "2.0", "method": "job/progress", "params": progress})
             if event.job_id is not None and event.kind == "state" and event.data.get("source") == "store":
-                state = event.data.get("to", event.data.get("state"))
-                if state in {
-                    "pulling",
-                    "masking_sample",
-                    "sample_running",
-                    "full_running",
-                    "quote_check",
-                    "building_output",
-                    "verifying",
-                }:
-                    state = "running"
-                state_params = {"job": event.job_id, "state": state}
+                step = str(event.data.get("to", event.data.get("state", "")))
+                state_params = {
+                    "job": event.job_id,
+                    "project": event.data.get("project"),
+                    "state": public_state(step),
+                    "step": step,
+                }
+                state_params = {key: value for key, value in state_params.items() if value is not None}
                 await self.notify({"jsonrpc": "2.0", "method": "job/state", "params": state_params})
 
 
@@ -406,7 +422,15 @@ class JsonRpcServer:
     async def serve(self, reader: TextIO, writer: TextIO) -> None:
         async def send(message: Json) -> None:
             async with self._write_lock:
-                writer.write(json.dumps(message, separators=(",", ":"), ensure_ascii=False) + "\n")
+                writer.write(
+                    json.dumps(
+                        strict_json_value(message, self.logger),
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                    + "\n"
+                )
                 writer.flush()
 
         self.service.notify = send

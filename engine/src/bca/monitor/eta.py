@@ -30,6 +30,14 @@ class Eta:
     def seconds(self) -> float:
         return self.high
 
+    def public(self) -> dict[str, object]:
+        return {
+            "low": self.low if math.isfinite(self.low) else None,
+            "high": self.high if math.isfinite(self.high) else None,
+            "seeded": self.seeded,
+            "known": math.isfinite(self.low) and math.isfinite(self.high),
+        }
+
 
 class EtaEstimator:
     def __init__(self, window_s: float = 1200) -> None:

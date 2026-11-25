@@ -65,6 +65,11 @@ class TurnResult:
 class TurnGuardError(RuntimeError):
     """Raised before model output is exposed when Claude violates the contract."""
 
+    def __init__(self, message: str, reason: str | None = None, resets_at: object = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.resets_at = resets_at
+
 
 def build_turn_command(
     binary: Path,
@@ -232,7 +237,16 @@ async def run_turn(
                 decision = rate_guard.inspect(event)
                 if decision.blocked_reason is not None or isinstance(decision.status, Limited):
                     reason = decision.blocked_reason or "limited"
-                    raise TurnGuardError("Claude rate policy blocked turn: " + reason)
+                    if reason == "extra_usage_on":
+                        raise TurnGuardError("Claude rate policy blocked turn: extra_usage_on", reason)
+                    if reason not in {"rate_limit_rejected", "limited"}:
+                        raise TurnGuardError("Claude rate policy blocked turn: turn_failed", reason)
+                    resets_at = decision.status.resets_at if isinstance(decision.status, Limited) else None
+                    raise TurnGuardError(
+                        "Claude rate policy blocked turn: rate_limit_rejected",
+                        "rate_limit_rejected",
+                        resets_at,
+                    )
             yield event
         await process.wait()
         stderr_tail = await stderr_task

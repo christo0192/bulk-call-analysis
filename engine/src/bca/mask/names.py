@@ -128,34 +128,64 @@ def mask_names(
     text: str, roster: re.Pattern[str] | None, ner: NerBackend | None, harvested: Iterable[str]
 ) -> tuple[str, dict[str, int]]:
     counts: dict[str, int] = {}
-    if roster:
-        text, n = roster.subn("[ADVISOR]", text)
-        if n:
-            counts["ROSTER"] = n
+    original = text
+    roster_spans = [(match.start(), match.end()) for match in roster.finditer(original)] if roster else []
+    ner_spans = ner.persons(original) if ner else []
+    regex_spans: list[tuple[int, int]] = []
+    regex_count = 0
 
-    def slot(match: re.Match[str]) -> str:
-        return match.group(0) if match.group(2).casefold() in MORE_STOP else f"{match.group(1)} [NAME]"
+    def collect(pattern: re.Pattern[str], groups: tuple[int, ...]) -> None:
+        nonlocal regex_count
+        for match in pattern.finditer(original):
+            if any(
+                match.group(group) is not None and match.group(group).casefold() not in MORE_STOP
+                for group in groups
+            ):
+                regex_count += 1
+                regex_spans.extend(
+                    match.span(group)
+                    for group in groups
+                    if match.group(group) is not None and match.group(group).casefold() not in MORE_STOP
+                )
 
-    text, n = _cap_greet.subn(
-        lambda m: m.group(0) if m.group(3).casefold() in MORE_STOP else f"{m.group(1)}{m.group(2)}[NAME]",
-        text,
-    )
-    text, n_intro = _intro.subn(slot, text)
-    n += n_intro
-    text, n_slot = _cap_slot.subn(slot, text)
-    n += n_slot
-    text, n_call = _calling.subn(
-        lambda m: m.group(0) if m.group(1).casefold() in MORE_STOP else f"[NAME]{m.group(2)}", text
-    )
-    n += n_call
-    if n:
-        counts["INTRODUCTION"] = n
-    if ner:
-        spans = sorted(ner.persons(text), key=lambda span: span.start, reverse=True)
-        for span in spans:
-            if 0 <= span.start < span.end <= len(text):
-                text = text[: span.start] + "[NAME]" + text[span.end :]
-                counts["NER"] = counts.get("NER", 0) + 1
+    collect(_cap_greet, (3,))
+    collect(_intro, (2,))
+    collect(_cap_slot, (2, 3))
+    collect(_calling, (1,))
+    candidate_spans = regex_spans + [(span.start, span.end) for span in ner_spans]
+    spans: list[tuple[int, int, bool]] = []
+    for start, end in candidate_spans:
+        overlaps = [
+            (roster_start, roster_end)
+            for roster_start, roster_end in roster_spans
+            if start < roster_end and end > roster_start
+        ]
+        if overlaps and any(
+            start >= roster_start and end <= roster_end for roster_start, roster_end in overlaps
+        ):
+            continue
+        # A longer NER/rule span wins over a partial roster match: the full lead
+        # name must be masked, even when it shares an advisor's first or surname.
+        spans.append((start, end, False))
+    spans.extend((start, end, True) for start, end in roster_spans)
+    merged: list[tuple[int, int, bool]] = []
+    for start, end, is_roster in sorted(spans):
+        if start < 0 or end <= start or end > len(original):
+            continue
+        if merged and (
+            start <= merged[-1][1] or all(char in " \t" for char in original[merged[-1][1] : start])
+        ):
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end), merged[-1][2] and is_roster)
+        else:
+            merged.append((start, end, is_roster))
+    for start, end, is_roster in reversed(merged):
+        text = text[:start] + ("[ADVISOR]" if is_roster else "[NAME]") + text[end:]
+    if regex_count:
+        counts["INTRODUCTION"] = regex_count
+    if ner_spans:
+        counts["NER"] = sum(0 <= span.start < span.end <= len(original) for span in ner_spans)
+    if roster_spans:
+        counts["ROSTER"] = len(roster_spans)
     pattern = harvested_pattern(tuple(name for name in harvested if name.strip()))
     if pattern:
         text, n = pattern.subn("[NAME]", text)

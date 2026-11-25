@@ -29,6 +29,13 @@ class Liveness:
 
     def on_activity(self, ts: float) -> None:
         with self._lock:
+            if self._sleeping:
+                if self._sleep_started is not None:
+                    for lead in self._leads.values():
+                        lead.started = ts
+                    self._sleep_started = None
+                self._sleeping = False
+                self._last_check = ts
             self.last_activity = ts
 
     def lead_started(self, lead: str, ts: float) -> None:
