@@ -61,3 +61,13 @@ def test_mask_and_scan_are_linear_on_adversarial_inputs(unit: str, call: Callabl
     assert large < CEILING_SECONDS
     # The floor keeps timer noise on very fast cases from failing the ratio.
     assert large < MAX_GROWTH * max(small, 0.02)
+
+
+def test_long_token_does_not_disable_provider_masking() -> None:
+    prefix = "https://example.com/"
+    text = prefix + "a" * (1100 - len(prefix)) + " my id is ravi-gmail and ravi98 at-gmail dot com"
+
+    masked = mask_text(text, MaskingContext()).text
+
+    assert "ravi" not in masked
+    assert "ravi98" not in masked
