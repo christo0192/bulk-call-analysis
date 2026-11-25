@@ -56,7 +56,7 @@ export function adaptPlan(value: unknown): PlanCard {
       : [],
     rules: Array.isArray(raw.rules)
       ? raw.rules.filter(
-          (item): item is { kind: string; name?: string; summary: string } =>
+          (item): item is PlanCard['rules'][number] =>
             typeof item === 'object' &&
             item !== null &&
             typeof (item as { summary?: unknown }).summary === 'string',

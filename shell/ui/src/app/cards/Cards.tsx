@@ -5,6 +5,8 @@ import type { AllowanceStatus, PlanCard as Plan, SampleCard as Sample } from '..
 import { formatCount } from '../format';
 import { resetsAtMs, weeklyWindow } from '../allowance';
 import { adaptPlan } from '../../engine/adapters';
+import { openProjectFile } from '../../engine/shellCommands';
+import { selectedProject } from '../../state/store';
 
 const bytes = (value: number) =>
   value < 1024 ** 2
@@ -303,7 +305,17 @@ export function SampleCard({ job, onFocus }: { job: string; onFocus?: () => void
         <button class="primary" disabled={pending || locked} onClick={() => void approve()}>
           Approve sample
         </button>
-        <button disabled>Open {sample.file ?? 'sample file'} (available soon)</button>
+        {sample.file && (
+          <button
+            onClick={() =>
+              void openProjectFile(selectedProject.value ?? '', sample.file!).catch((value) =>
+                setError(value),
+              )
+            }
+          >
+            Open {sample.file.split(/[\\/]/).pop()}
+          </button>
+        )}
         <button onClick={() => onFocus?.()}>Change the plan</button>
         <small>{formatCount(Math.max(0, sample.total - 5))} more rows in the file</small>
       </footer>
