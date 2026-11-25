@@ -425,6 +425,8 @@ class ProductionBackend(ApiBackend):
         config = self.config
 
         def connector() -> tuple[bool, str]:
+            if config is None and self.config_error is not None:
+                return False, f"The settings file {self.config_path} could not be read: {self.config_error}"
             if config is None:
                 return False, f"BigQuery settings not found; put site.toml in {self.app_data}."
             if config.bigquery.key_path is None:
@@ -434,15 +436,23 @@ class ProductionBackend(ApiBackend):
         def key() -> tuple[bool, str]:
             if config is None or config.bigquery.key_path is None:
                 return False, "Waiting for the BigQuery settings."
+            if config.bigquery.key_path.is_dir():
+                return False, f"The BigQuery key path is a folder, not a file: {config.bigquery.key_path}"
             if not config.bigquery.key_path.is_file():
                 # The path may be shown; the key's contents never are (D-UI-KEYPATH).
                 return False, f"The BigQuery key file is missing: {config.bigquery.key_path}"
             return True, "BigQuery key file found."
 
         def spacy() -> tuple[bool, str]:
-            if self._test_fakes_allowed() or is_model_installed():
+            if self._test_fakes_allowed():
                 return True, "Name-masking model installed."
-            return False, "The name-masking model is not installed. Run the app's start script again."
+            # The model wheel does not depend on spaCy, so each must be checked: with the model
+            # alone, the first job would fail when the masker loads spaCy.
+            if importlib.util.find_spec("spacy") is None:
+                return False, "spaCy is not installed. Run the app's start script again."
+            if not is_model_installed():
+                return False, "The name-masking model is not installed. Run the app's start script again."
+            return True, "Name-masking model installed."
 
         def codex_copy() -> tuple[bool, str]:
             if shutil.which("codex") is not None:

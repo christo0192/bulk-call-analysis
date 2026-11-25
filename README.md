@@ -37,9 +37,12 @@ uv run pytest -q
 On Windows, install Python 3.12, `uv`, Node.js 20 or newer, npm and Rust, plus
 the linker your Rust toolchain needs: the Visual Studio C++ build tools for an
 MSVC toolchain, or a MinGW clang such as llvm-mingw on PATH for a GNU toolchain. On Mac, install Python 3.12, `uv`, Node.js
-20 or newer, npm, and Rust. Run `.\scripts\run-app.ps1` on Windows or
-`./scripts/run-app.sh` on Mac. Add `--check` (or `-Check` on Windows) to run
-the prerequisite and dependency checks without opening the app.
+20 or newer, npm, and Rust. On Windows run
+`powershell -ExecutionPolicy Bypass -File .\scripts\run-app.ps1` (Windows blocks
+unsigned scripts by default); on Mac run `./scripts/run-app.sh`. Add `-Check` on
+Windows (or `--check` on Mac) to run the prerequisite and dependency checks
+without opening the app. The first run installs the engine's dependencies,
+including spaCy and its English name model, and the app's npm packages.
 
 Copy `config/site.example.toml` to `site.toml`, fill in the site-specific
 values, and put it in the application data folder. The engine looks there for

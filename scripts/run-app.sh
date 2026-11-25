@@ -16,7 +16,8 @@ case "$node_major" in ''|*[!0-9]*) echo "Install Node.js 20 or newer." >&2; exit
 printf '%s\n' "uv: found" "node: $node_version" "npm: found" "cargo: found"
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-(cd "$repo/engine" && uv sync) || { echo "uv sync failed; install uv and check the engine dependencies." >&2; exit 1; }
+# spaCy is the optional nlp extra; --inexact keeps the name model, which is installed outside the lock.
+(cd "$repo/engine" && uv sync --extra nlp --inexact) || { echo "uv sync failed; install uv and check the engine dependencies." >&2; exit 1; }
 # Masking needs spaCy's small English model to find names; install the pinned wheel once.
 (cd "$repo/engine" && uv run python -c "from bca.setup.spacy_model import ensure_model; ensure_model()") || { echo "Installing the name-masking model failed; check the internet connection and run this again." >&2; exit 1; }
 if [ ! -d "$repo/shell/ui/node_modules" ] || [ "$repo/shell/ui/package-lock.json" -nt "$repo/shell/ui/node_modules" ]; then

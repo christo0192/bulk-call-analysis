@@ -40,7 +40,8 @@ Write-Output "rust host: $rustHost, linker: $linker"
 
 Push-Location (Join-Path $repo "engine")
 try {
-    & uv sync
+    # spaCy is the optional nlp extra; --inexact keeps the name model, which is installed outside the lock.
+    & uv sync --extra nlp --inexact
     if ($LASTEXITCODE -ne 0) { Stop-WithMessage "uv sync failed; install uv and check the engine dependencies." }
     # Masking needs spaCy's small English model to find names; install the pinned wheel once.
     & uv run python -c "from bca.setup.spacy_model import ensure_model; ensure_model()"

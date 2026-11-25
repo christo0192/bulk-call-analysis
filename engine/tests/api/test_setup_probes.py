@@ -54,24 +54,51 @@ def test_key_file_present(tmp_path: Path) -> None:
     assert items["key"] == {**items["key"], "status": "ok", "detail": "BigQuery key file found."}
 
 
-@pytest.mark.parametrize("installed", [True, False])
-def test_name_model_row_follows_the_installed_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: bool
+@pytest.mark.parametrize(
+    ("spacy_installed", "model_installed", "status", "detail"),
+    [
+        (True, True, "ok", "Name-masking model installed."),
+        # The model wheel does not depend on spaCy: the model alone must not read as ready.
+        (False, True, "failed", "spaCy is not installed. Run the app's start script again."),
+        (True, False, "failed", "The name-masking model is not installed. Run the app's start script again."),
+        (False, False, "failed", "spaCy is not installed. Run the app's start script again."),
+    ],
+)
+def test_name_model_row_needs_spacy_and_the_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spacy_installed: bool,
+    model_installed: bool,
+    status: str,
+    detail: str,
 ) -> None:
     real_find_spec = importlib.util.find_spec
+    present = {"spacy": spacy_installed, "en_core_web_sm": model_installed}
 
     def find_spec(name: str, *args: Any, **kwargs: Any) -> object:
-        if name == "en_core_web_sm":
-            return object() if installed else None
+        if name in present:
+            return object() if present[name] else None
         return real_find_spec(name, *args, **kwargs)
 
     monkeypatch.setattr(importlib.util, "find_spec", find_spec)
     item = _items(make_backend(tmp_path))["spacy"]
-    if installed:
-        assert item == {**item, "status": "ok", "detail": "Name-masking model installed."}
-    else:
-        assert item["status"] == "failed"
-        assert item["detail"] == "The name-masking model is not installed. Run the app's start script again."
+    assert (item["status"], item["detail"]) == (status, detail)
+
+
+def test_key_path_that_is_a_folder_says_so(tmp_path: Path) -> None:
+    (tmp_path / "connector.json").mkdir()
+    item = _items(make_backend(tmp_path))["key"]
+    assert item["status"] == "failed"
+    assert item["detail"].startswith("The BigQuery key path is a folder, not a file: ")
+
+
+def test_unreadable_settings_file_is_not_called_missing(tmp_path: Path) -> None:
+    backend = ProductionBackend(tmp_path, config=None, store=open_store(Path(":memory:")))
+    backend.config_path.parent.mkdir(parents=True, exist_ok=True)
+    backend.config_path.write_text("this is [not valid toml", encoding="utf-8")
+    item = _items(backend)["connector"]
+    assert item["status"] == "failed"
+    assert item["detail"].startswith(f"The settings file {backend.config_path} could not be read: ")
 
 
 @pytest.mark.parametrize("found", [True, False])
