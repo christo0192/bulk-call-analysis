@@ -122,3 +122,23 @@ it('a production build has no mock: outside Tauri it says the engine is unavaila
   const { openProjectFolder } = await import('./shellCommands');
   await expect(openProjectFolder('project-one')).rejects.toMatchObject({ code: -32601 });
 });
+
+it('the production desktop app uses the Tauri bridge, calls and shell commands included', async () => {
+  // The shipped app: a production build inside Tauri. Nothing may wait on the mock there.
+  const commands = tauriWindow();
+  vi.stubEnv('DEV', false);
+  vi.stubEnv('PROD', true);
+  vi.stubEnv('VITE_BRIDGE', '');
+  const { bridge, mockBridgeLoaded } = await freshBridge();
+  const { tauriBridge } = await import('./tauriBridge');
+  expect(mockBridgeLoaded).toBeNull();
+  expect(bridge).toBe(tauriBridge);
+  expect(await bridge.call('health/ping', {})).toEqual({ status: 'ok' });
+  expect(commands).toContainEqual(['engine_call', { method: 'health/ping', params: {} }]);
+  const { openProjectFile } = await import('./shellCommands');
+  await openProjectFile('project-one', 'results.xlsx');
+  expect(commands).toContainEqual([
+    'open_project_file',
+    { project: 'project-one', name: 'results.xlsx' },
+  ]);
+});

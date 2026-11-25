@@ -5,7 +5,7 @@ import { EngineError } from '../../engine/client';
 import recordedPlanFixture from '../../mock/fixtures/engine/job-plan.json';
 import { openProjectFile } from '../../engine/shellCommands';
 import { RebuildDialog } from './RebuildDialog';
-import type { PlanCard } from '../../engine/types';
+import type { RebuildResult, PlanCard } from '../../engine/types';
 
 // The shell command resolves to null on success, like the real Tauri command.
 vi.mock('../../engine/shellCommands', () => ({ openProjectFile: vi.fn(async () => null) }));
@@ -694,4 +694,59 @@ it('number enum options are sent as numbers', async () => {
       [{ field: 'answer.rating', op: 'in', value: [1, 3] }],
     ]);
   });
+});
+
+it('Keep editing after a rule error never pulls focus out of the field being typed in', async () => {
+  // Gate 1 of #34: the move back to Rebuild waited while Rebuild was disabled, then fired as soon
+  // as typing in Edges cleared the error, taking focus out of the field mid-word.
+  const dialog = renderDialog(vi.fn(), { ...planWithNumberColumn, rules: [] });
+  await opened(dialog);
+  const rebuild = within(dialog).getByRole('button', { name: 'Rebuild' });
+  rebuild.focus();
+  fireEvent.click(rebuild);
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(dialog).getByRole('button', { name: 'Rebuild without rules' }),
+    ),
+  );
+  fireEvent.input(within(dialog).getByLabelText('Edges'), { target: { value: '' } });
+  fireEvent.input(within(dialog).getByLabelText('Labels'), { target: { value: 'low' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  expect(within(dialog).getByText(/not a finite number/)).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Keep editing' }));
+  expect(rebuild).toBeDisabled();
+  const edges = within(dialog).getByLabelText('Edges');
+  edges.focus();
+  fireEvent.input(edges, { target: { value: '1' } });
+  await waitFor(() => expect(rebuild).toBeEnabled());
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(document.activeElement).toBe(edges);
+});
+
+it('a rebuild that finishes while the person types elsewhere leaves focus where they are', async () => {
+  let finish: (value: RebuildResult) => void = () => undefined;
+  mockBridge.setResponse(
+    'job/rebuildRules',
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const dialog = renderDialog(vi.fn(), planWithRules);
+  await opened(dialog);
+  const rebuild = within(dialog).getByRole('button', { name: 'Rebuild' });
+  rebuild.focus();
+  fireEvent.click(rebuild);
+  rebuild.blur();
+  const name = within(dialog).getAllByRole('textbox')[0]!;
+  name.focus();
+  finish({
+    job: 'job-one',
+    name: 'results.xlsx',
+    path: 'jobs/job-one/output/results.xlsx',
+    rebuild: 1,
+  });
+  await within(dialog).findByText(/Rebuilt:/);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(document.activeElement).toBe(name);
 });

@@ -4,7 +4,9 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const FORBIDDEN = ['synthetic-job', 'mock='];
+// The dev mock's data ('synthetic-job', the '?mock=' switches) and the engine recordings under
+// src/mock/fixtures/engine ('project-one', 'job-one'): none of it belongs in the shipped app.
+const FORBIDDEN = ['synthetic-job', 'mock=', 'project-one', 'job-one'];
 const dist = process.argv[2]
   ? resolve(process.argv[2])
   : fileURLToPath(new URL('../dist', import.meta.url));

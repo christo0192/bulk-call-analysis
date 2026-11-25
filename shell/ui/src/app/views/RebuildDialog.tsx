@@ -75,15 +75,46 @@ export function RebuildDialog({
   const rebuildButton = useRef<HTMLButtonElement>(null);
   const confirmButton = useRef<HTMLButtonElement>(null);
   const openButton = useRef<HTMLButtonElement>(null);
-  const focusNext = useRef<(() => HTMLElement | null) | null>(null);
+  // A pending move: where focus should go, and the control that had focus when it was asked for.
+  const focusNext = useRef<{ target: () => HTMLElement | null; from: Element | null } | null>(null);
+  // `from` is the control the person pressed: by default whatever has focus now. A rebuild names it
+  // explicitly, because it finishes later, when focus may already be somewhere else.
+  const moveFocusAfterRender = (
+    target: () => HTMLElement | null,
+    from: Element | null = document.activeElement,
+  ) => {
+    focusNext.current = { target, from };
+  };
   useEffect(() => {
+    const pending = focusNext.current;
+    if (!pending) return;
+    // Only replace focus that was lost: it fell to the page, or is still on the control that was
+    // pressed (now removed or disabled). Once the person puts focus anywhere else, the move is
+    // dropped, so it can never pull them out of a field they are typing in.
+    const active = document.activeElement;
+    const lost = !active || active === document.body || active === pending.from;
+    if (!lost) {
+      focusNext.current = null;
+      return;
+    }
     // An earlier render's effect can run first (before the target is drawn, or while it is still
     // disabled); keep waiting until the target can take focus.
-    const target = focusNext.current?.();
+    const target = pending.target();
     if (!target || (target as HTMLButtonElement).disabled) return;
     focusNext.current = null;
     target.focus();
   });
+  useEffect(() => {
+    // Focus the person moves inside the dialog cancels any pending move.
+    const box = dialog.current;
+    if (!box) return;
+    const onFocusIn = (event: FocusEvent) => {
+      const pending = focusNext.current;
+      if (pending && event.target !== pending.from) focusNext.current = null;
+    };
+    box.addEventListener('focusin', onFocusIn);
+    return () => box.removeEventListener('focusin', onFocusIn);
+  }, []);
   useEffect(() => {
     if (firstJob.current !== job) onCloseRef.current();
   }, [job]);
@@ -192,9 +223,11 @@ export function RebuildDialog({
     if (!rules.length && !confirmEmpty) {
       setConfirmEmpty(true);
       // Rebuild is disabled while the question shows; its answer takes focus.
-      focusNext.current = () => confirmButton.current;
+      moveFocusAfterRender(() => confirmButton.current);
       return;
     }
+    // Focus was on the button that started the rebuild; only that, or lost focus, may be moved.
+    const pressed = document.activeElement;
     setPending(true);
     setError(null);
     try {
@@ -205,7 +238,7 @@ export function RebuildDialog({
       setRebuilt(result);
       setConfirmEmpty(false);
       // The new workbook is the next thing to open.
-      focusNext.current = () => openButton.current;
+      moveFocusAfterRender(() => openButton.current, pressed);
       onRebuilt?.();
     } catch (reason) {
       const parsed = EngineError.from(reason);
@@ -216,7 +249,7 @@ export function RebuildDialog({
         client: false,
       });
       // Back to the button that was pressed, enabled again once the rebuild has stopped.
-      focusNext.current = () => confirmButton.current ?? rebuildButton.current;
+      moveFocusAfterRender(() => confirmButton.current ?? rebuildButton.current, pressed);
     } finally {
       setPending(false);
     }
@@ -256,13 +289,13 @@ export function RebuildDialog({
                 setError(null);
                 setRules((items) => items.filter((_, item) => item !== index));
                 // To the Remove button that takes this row's place, the one above, or the heading.
-                focusNext.current = () => {
+                moveFocusAfterRender(() => {
                   const removes = [
                     ...(dialog.current?.querySelectorAll<HTMLButtonElement>('.rule-row button') ??
                       []),
                   ];
                   return removes[Math.min(index, removes.length - 1)] ?? rulesHeading.current;
-                };
+                });
               }}
             >
               Remove
@@ -406,7 +439,7 @@ export function RebuildDialog({
             <button
               onClick={() => {
                 setConfirmEmpty(false);
-                focusNext.current = () => rebuildButton.current;
+                moveFocusAfterRender(() => rebuildButton.current);
               }}
             >
               Keep editing
