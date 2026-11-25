@@ -24,8 +24,9 @@ def _items(backend: ProductionBackend) -> dict[str, dict[str, Any]]:
 
 
 def test_setup_details_match_their_result_without_settings(tmp_path: Path) -> None:
+    # No site.toml anywhere this backend looks, so it starts without settings.
     backend = ProductionBackend(tmp_path, config=None, store=open_store(Path(":memory:")))
-    backend.config = None
+    assert backend.config is None
     items = _items(backend)
     assert items["connector"]["status"] == "failed"
     assert items["connector"]["detail"].startswith("BigQuery settings not found; put site.toml in ")
