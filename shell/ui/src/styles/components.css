@@ -177,17 +177,9 @@
   font-weight: 500;
   color: var(--mut);
 }
-.confirm-model {
-  background: var(--side);
-  padding: 12px;
-  margin-top: 12px;
-}
-.confirm-model input {
+.model-dialog input {
   display: block;
-  margin-bottom: 8px;
-}
-.confirm-model button + button {
-  margin-left: 6px;
+  width: 100%;
 }
 .mono {
   font-family: var(--mono);
@@ -500,9 +492,7 @@
 .run-actions button:disabled {
   opacity: 0.55;
 }
-.done-view {
-  max-width: 1100px;
-}
+/* No max width: the done view fills the space up to the chat tab, like the run view. */
 .done-hero,
 .done-panel {
   border: 1px solid var(--line);
@@ -607,7 +597,8 @@
   padding: 20px;
   background: #312f2944;
 }
-.rebuild-dialog {
+.rebuild-dialog,
+.model-dialog {
   width: min(650px, 100%);
   max-height: 90vh;
   overflow: auto;
@@ -616,6 +607,9 @@
   border-radius: 10px;
   padding: 20px;
   box-shadow: 0 10px 35px #312f2933;
+}
+.model-dialog {
+  width: min(480px, 100%);
 }
 .dialog-head {
   display: flex;
@@ -924,6 +918,35 @@
 }
 .step-icon.active {
   color: var(--amb);
+}
+.spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* With reduced motion a spinner stands still and reads as "…". */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    width: auto;
+    height: auto;
+    border: 0;
+    border-radius: 0;
+    vertical-align: baseline;
+    animation: none;
+  }
+  .spinner::before {
+    content: '…';
+  }
 }
 .recent-row time {
   color: var(--mut);

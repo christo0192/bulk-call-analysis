@@ -83,6 +83,10 @@ export function SetupChecklist() {
                 </span>
                 <div class="check-copy">
                   <strong>
+                    {/* The icon is only a shape and a colour; say the state in words too. */}
+                    <span class="sr-only">
+                      {good ? 'Done' : failed ? 'Needs attention' : 'Not done yet'}:{' '}
+                    </span>
                     {name === 'chatgpt_login' && ready(item, auth, name)
                       ? 'Signed in to ChatGPT'
                       : group.title}

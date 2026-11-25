@@ -40,8 +40,8 @@ it('empty-state button opens the form signal', () => {
 it('drawer hides and restores', () => {
   jobsByProject.value = { p: [{ job: 'j', project: 'p', state: 'running' }] };
   render(<MainArea />);
-  fireEvent.click(screen.getByRole('button', { name: /Hide/ }));
-  expect(screen.getByRole('button', { name: /Chat/ })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Hide chat' }));
+  expect(screen.getByRole('button', { name: 'Show chat' })).toBeInTheDocument();
   expect(localStorage.getItem('chat:p')).toBe('hidden');
 });
 it('pause is sent once and errors are shown', async () => {

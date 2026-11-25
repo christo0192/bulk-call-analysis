@@ -40,8 +40,8 @@ const SCREENS: Screen[] = [
       await project(/Webinar objections/)(page);
       await expect(page.getByTestId('run-view')).toBeVisible();
       // The drawer starts open in the run phase; hide it to the tab.
-      await page.getByRole('button', { name: 'Hide ›' }).click();
-      await expect(page.getByRole('button', { name: '‹ Chat' })).toBeVisible();
+      await page.getByRole('button', { name: 'Hide chat' }).click();
+      await expect(page.getByRole('button', { name: 'Show chat' })).toBeVisible();
     },
   },
   { name: 'paused run', open: project(/Renewal concerns/) },
@@ -75,6 +75,54 @@ const SCREENS: Screen[] = [
       await page.getByRole('button', { name: 'Settings' }).click();
     },
   },
+  {
+    name: 'model change dialog',
+    open: async (page) => {
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Settings' }).click();
+      await page.getByRole('button', { name: 'Change Claude model' }).click();
+      await expect(page.getByRole('dialog')).toBeVisible();
+    },
+  },
+  {
+    name: 'empty state',
+    open: async (page) => {
+      await page.goto('/?mock=empty');
+      await expect(page.getByRole('heading', { name: 'No projects yet' })).toBeVisible();
+    },
+  },
+  {
+    name: 'start card',
+    open: async (page) => {
+      await project(/Certificate mentions/)(page);
+      await page.getByRole('button', { name: 'Approve sample' }).click();
+      await expect(page.getByRole('heading', { name: 'Start the full run?' })).toBeVisible();
+      await expect(page.getByText(/Leads to read/)).toBeVisible();
+    },
+  },
+  // Every other banner the run view can show (the quota pause is above).
+  ...(
+    [
+      ['credit-pause', 'Paused to avoid paid credits'],
+      ['spend-control-pause', 'Paused: spending control'],
+      ['auth-pause', 'Paused: sign-in needed'],
+      ['model-unavailable-pause', 'Paused: model unavailable'],
+      ['error-storm-pause', 'Paused: too many errors'],
+      ['network-pause', 'Paused: network unavailable'],
+      ['sleep-pause', 'Paused while the computer slept'],
+      ['power-pause', 'Paused: computer is on battery'],
+      ['stalled', 'Stopped: needs attention'],
+      ['failed', 'Run failed'],
+      ['cancelled', 'Run cancelled'],
+    ] as const
+  ).map(([mode, title]): Screen => ({
+    name: `${mode} banner`,
+    open: async (page) => {
+      await page.goto(`/?mock=${mode}`);
+      await page.getByRole('button', { name: /Webinar objections/ }).click();
+      await expect(page.locator('.run-banner strong')).toHaveText(title);
+    },
+  })),
 ];
 
 /** Elements with their own visible text that are clipped, truncated or off the window. */

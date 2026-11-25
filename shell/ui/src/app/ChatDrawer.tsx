@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'preact/hooks';
 import { Chat } from './chat/Chat';
 import { selectedProject } from '../state/store';
 export function ChatDrawer({
@@ -13,11 +14,26 @@ export function ChatDrawer({
   composerRequest?: { prefix: string; id: number } | null;
   onComposerRequestHandled?: () => void;
 }) {
+  const hide = useRef<HTMLButtonElement>(null);
+  const show = useRef<HTMLButtonElement>(null);
+  // The pressed button is replaced by its opposite; keep keyboard focus on the toggle.
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (!refocus.current) return;
+    refocus.current = false;
+    (visible ? hide : show).current?.focus();
+  }, [visible]);
+  const press = () => {
+    refocus.current = true;
+    toggle();
+  };
   return visible ? (
     <aside class="drawer">
       <div class="drawer-head">
         <span>Chat</span>
-        <button onClick={toggle}>Hide ›</button>
+        <button type="button" ref={hide} aria-label="Hide chat" onClick={press}>
+          Hide ›
+        </button>
       </div>
       <Chat
         key={selectedProject.value ?? ''}
@@ -29,7 +45,9 @@ export function ChatDrawer({
     </aside>
   ) : (
     <aside class="chat-tab">
-      <button onClick={toggle}>‹ Chat</button>
+      <button type="button" ref={show} aria-label="Show chat" onClick={press}>
+        ‹ Chat
+      </button>
     </aside>
   );
 }

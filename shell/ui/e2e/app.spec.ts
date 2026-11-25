@@ -24,9 +24,9 @@ test('rail and drawer hide and show', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Files')).toBeVisible();
   await page.getByRole('button', { name: /Webinar objections/ }).click();
-  await page.getByRole('button', { name: /Hide/ }).click();
-  await expect(page.getByRole('button', { name: /Chat/ })).toBeVisible();
-  await page.getByRole('button', { name: /Chat/ }).click();
+  await page.getByRole('button', { name: 'Hide chat' }).click();
+  await expect(page.getByRole('button', { name: 'Show chat' })).toBeVisible();
+  await page.getByRole('button', { name: 'Show chat' }).click();
   await expect(page.locator('.drawer').getByRole('textbox')).toBeVisible();
 });
 

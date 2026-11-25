@@ -37,6 +37,16 @@ export function MainArea() {
       ),
     [currentProject, phase.value],
   );
+  // A new phase replaces the view. If that took the focused button with it (Approve plan,
+  // Start full run), start again from the heading rather than from nowhere.
+  const heading = useRef<HTMLHeadingElement>(null);
+  const shownPhase = useRef(phase.value);
+  useEffect(() => {
+    if (shownPhase.current === phase.value) return;
+    shownPhase.current = phase.value;
+    if (!document.activeElement || document.activeElement === document.body)
+      heading.current?.focus();
+  }, [phase.value]);
   if (!currentProject)
     return (
       <main class="main">
@@ -126,7 +136,9 @@ export function MainArea() {
     <main class="main">
       <header>
         <div>
-          <h1>{project?.title ?? currentProject}</h1>
+          <h1 ref={heading} tabIndex={-1}>
+            {project?.title ?? currentProject}
+          </h1>
           {current ? <Pill state={state} /> : <span class="pill setup">No job yet</span>}
         </div>
         <div class="actions">

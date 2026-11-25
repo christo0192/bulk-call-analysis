@@ -1,4 +1,4 @@
-import { useEffect } from 'preact/hooks';
+import { useEffect, useRef } from 'preact/hooks';
 import { load, settingsOpen, setupRequired } from '../state/store';
 import { EngineStatusBanner } from './EngineStatusBanner';
 import { Sidebar } from './Sidebar';
@@ -12,6 +12,14 @@ export function App() {
   useEffect(() => {
     void load();
   }, []);
+  // Settings replaces the sidebar; on the way back, focus returns to the Settings button
+  // instead of being lost with the page that closed.
+  const wasSettings = useRef(settingsOpen.value);
+  useEffect(() => {
+    if (wasSettings.current && !settingsOpen.value)
+      document.querySelector<HTMLElement>('.sidebar .settings')?.focus();
+    wasSettings.current = settingsOpen.value;
+  }, [settingsOpen.value]);
   return (
     <>
       <>

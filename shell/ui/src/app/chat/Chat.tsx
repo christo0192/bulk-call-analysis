@@ -309,6 +309,8 @@ export function Chat({
     ]);
     publish();
     setText('');
+    // Sent with the button too: keep typing where you were, and never leave focus on "Stop".
+    textarea.current?.focus();
     setError(null);
     setRunning(true);
     try {

@@ -27,6 +27,12 @@ const STEP_WORDS: Record<string, string> = {
   verifying: 'verifying',
   done_with_issues: 'done with issues',
 };
+/** A step's state in words, for screen readers: the icons alone are only shape and colour. */
+const STEP_STATUS: Record<string, string> = {
+  done: 'Done',
+  active: 'In progress',
+  todo: 'Not started',
+};
 /** Activity lines come from the engine; replace its internal step names with plain words. */
 export const plainActivity = (text: string) =>
   text.replace(/\b[a-z]+(?:_[a-z]+)+\b/g, (word) => STEP_WORDS[word] ?? word.replace(/_/g, ' '));
@@ -537,16 +543,21 @@ export function RunView({ id, onStalled }: { id: string; onStalled?: (text: stri
           <h3>Steps</h3>
           {snapshot.steps.map((step) => (
             <div class="step-row" key={step.id}>
-              <span class={`step-icon ${step.status}`}>
-                {step.status === 'done'
-                  ? '✓'
-                  : step.status === 'active'
-                    ? '◌'
-                    : step.status === 'waiting_for_you'
-                      ? '◉'
-                      : ''}
+              <span class={`step-icon ${step.status}`} aria-hidden="true">
+                {step.status === 'done' ? (
+                  '✓'
+                ) : step.status === 'active' ? (
+                  <span class="spinner" />
+                ) : step.status === 'waiting_for_you' ? (
+                  '◉'
+                ) : (
+                  ''
+                )}
               </span>
               <span>
+                {STEP_STATUS[step.status] && (
+                  <span class="sr-only">{STEP_STATUS[step.status]}: </span>
+                )}
                 {step.status === 'waiting_for_you'
                   ? 'Waiting for you'
                   : step.label.replace(/\s*\([^)]*n\/N[^)]*\)/gi, '')}

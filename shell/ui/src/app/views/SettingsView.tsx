@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import type { RefObject } from 'preact';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import type { AllowanceStatus, AuthStatus, EngineStatus, Settings } from '../../engine/types';
 import { settingsOpen, setupRequired } from '../../state/store';
 import { useSignIn } from '../hooks/useSignIn';
+import { useModalFocus } from '../hooks/useModalFocus';
 import { formatPlanUsage } from '../formatUsage';
 import { weeklyPercent } from '../allowance';
 
@@ -15,7 +17,59 @@ const initialSettings: Settings = {
   workerCount: 1,
   retentionDays: 30,
 };
+const modelNames = { claudeModel: 'Claude', codexModel: 'ChatGPT' } as const;
+
+/** Asks before a model change: it affects every new job. */
+function ModelChangeDialog({
+  name,
+  draft,
+  opener,
+  onDraft,
+  onConfirm,
+  onCancel,
+}: {
+  name: string;
+  draft: string;
+  opener: RefObject<HTMLButtonElement>;
+  onDraft: (value: string) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const dialog = useRef<HTMLDivElement>(null);
+  useModalFocus(dialog, onCancel, opener);
+  return (
+    <div class="modal-backdrop">
+      <div
+        class="model-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="model-dialog-title"
+        ref={dialog}
+      >
+        <h2 id="model-dialog-title">Change the {name} model</h2>
+        <p>
+          Changing a model affects every new job. Results from different models aren't directly
+          comparable.
+        </p>
+        <label htmlFor="model-value">New model</label>
+        <input id="model-value" value={draft} onInput={(e) => onDraft(e.currentTarget.value)} />
+        <div class="dialog-actions">
+          <button onClick={onCancel}>Cancel</button>
+          <button class="primary" onClick={onConfirm}>
+            Change model
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsView() {
+  const claudeChange = useRef<HTMLButtonElement>(null);
+  const codexChange = useRef<HTMLButtonElement>(null);
+  // Settings replaces the sidebar and the button that opened it; start from the page heading.
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => heading.current?.focus(), []);
   const [values, setValues] = useState<Settings>(initialSettings);
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [allowance, setAllowance] = useState<AllowanceStatus | null>(null);
@@ -94,7 +148,9 @@ export function SettingsView() {
     <main class="settings-page">
       <header class="settings-head">
         <div>
-          <h1>Settings</h1>
+          <h1 ref={heading} tabIndex={-1}>
+            Settings
+          </h1>
           <p class="muted">Configure this computer and future jobs.</p>
         </div>
         <button onClick={() => (settingsOpen.value = false)}>Back</button>
@@ -176,10 +232,12 @@ export function SettingsView() {
           {(['claudeModel', 'codexModel'] as const).map((key) => (
             <div class="setting-line" key={key}>
               <span>
-                {key === 'claudeModel' ? 'Claude' : 'ChatGPT'}
+                {modelNames[key]}
                 <b>{String(values[key])}</b>
               </span>
               <button
+                ref={key === 'claudeModel' ? claudeChange : codexChange}
+                aria-label={`Change ${modelNames[key]} model`}
                 disabled={!settingsLoaded}
                 onClick={() => {
                   setModel(key);
@@ -191,27 +249,17 @@ export function SettingsView() {
             </div>
           ))}
           {model && (
-            <div class="confirm-model">
-              <p>
-                Changing a model affects every new job. Results from different models aren't
-                directly comparable.
-              </p>
-              <label htmlFor="model-value">New model</label>
-              <input
-                id="model-value"
-                value={draft}
-                onInput={(e) => setDraft(e.currentTarget.value)}
-              />
-              <button
-                onClick={() => {
-                  void save({ [model]: draft, confirmModelChange: true }, 'model');
-                  setModel(null);
-                }}
-              >
-                Change model
-              </button>
-              <button onClick={() => setModel(null)}>Cancel</button>
-            </div>
+            <ModelChangeDialog
+              name={modelNames[model as keyof typeof modelNames]}
+              draft={draft}
+              opener={model === 'claudeModel' ? claudeChange : codexChange}
+              onDraft={setDraft}
+              onConfirm={() => {
+                void save({ [model]: draft, confirmModelChange: true }, 'model');
+                setModel(null);
+              }}
+              onCancel={() => setModel(null)}
+            />
           )}
           {error && <p class="error">{error}</p>}
         </section>

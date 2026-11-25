@@ -24,8 +24,57 @@ import {
 } from '../mock/fixtures/data';
 const firstRun = typeof window !== 'undefined' && window.location.search.includes('mock=firstrun');
 const noAuth = typeof window !== 'undefined' && window.location.search.includes('mock=noauth');
-const quotaPause =
-  typeof window !== 'undefined' && window.location.search.includes('mock=quota-pause');
+const mockMode =
+  typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('mock');
+// `?mock=empty`: a computer with no projects yet.
+if (mockMode === 'empty') {
+  projects.splice(0);
+  jobs.splice(0);
+}
+// `?mock=<reason>-pause` (quota-pause, credit-pause, spend-control-pause, auth-pause,
+// model-unavailable-pause, error-storm-pause, network-pause, sleep-pause, power-pause),
+// `?mock=stalled`, `?mock=failed` and `?mock=cancelled`: the running demo job shows that banner.
+const bannerPause = mockMode?.endsWith('-pause')
+  ? mockMode.slice(0, -'-pause'.length).replace(/-/g, '_')
+  : null;
+const bannerState = bannerPause
+  ? 'paused'
+  : mockMode === 'stalled' || mockMode === 'failed' || mockMode === 'cancelled'
+    ? mockMode
+    : null;
+const BANNER_PROJECT = 'demo-run';
+if (bannerState) {
+  for (const job of jobs) if (job.project === BANNER_PROJECT) job.state = bannerState;
+  for (const project of projects)
+    if (project.project === BANNER_PROJECT) project.status = bannerState;
+}
+/** The snapshot for a banner switch; synthetic text only. */
+function bannerSnapshot(): Record<string, unknown> {
+  if (bannerPause)
+    return {
+      ...pausedQuotaSnapshot,
+      pauseReason: bannerPause,
+      // The recorded quota pause's reset time is in the past; move it three hours ahead.
+      resumeAt: bannerPause === 'quota' ? Math.floor(Date.now() / 1000) + 3 * 3600 : null,
+    };
+  if (bannerState === 'stalled')
+    return {
+      ...runningSnapshot,
+      state: 'stalled',
+      stall: {
+        reason: 'pull_failed',
+        text: 'Pulling the transcripts failed three times in a row. Check the BigQuery connection, then ask Claude what to do next.',
+      },
+    };
+  return {
+    ...runningSnapshot,
+    state: bannerState,
+    failure:
+      bannerState === 'failed'
+        ? { text: 'The reader stopped answering after repeated errors on the same leads.' }
+        : null,
+  };
+}
 let firstRunActive = firstRun;
 const checklistState = (firstRun ? newComputerChecklist : checklist).map((item) => ({
   ...item,
@@ -151,6 +200,20 @@ export class MockBridge implements EngineBridge {
           ['bq_dry_run', 'tool-2'],
           ['propose_job', 'tool-3'],
         ];
+        // As in the engine, proposing a job announces it (public state "planned"), so a new
+        // project's plan card appears once Claude has prepared the plan.
+        const project = (params as { project: string }).project;
+        const proposed = jobs.find((job) => job.project === project && job.state === 'planned');
+        if (proposed)
+          setTimeout(
+            () =>
+              this.emit({
+                jsonrpc: '2.0',
+                method: 'job/state',
+                params: { project, job: proposed.job, state: 'planned', step: 'plan_proposed' },
+              }),
+            150 + 2 * 400 + 100,
+          );
         tools.forEach(([name, id], index) =>
           setTimeout(
             () => {
@@ -318,6 +381,9 @@ export class MockBridge implements EngineBridge {
     if (method === 'job/snapshot') {
       const requested = (params as { job: string }).job;
       const job = jobs.find((item) => item.job === requested);
+      // Once resumed, the banner switch's job reads like any other running job.
+      const banner =
+        bannerState !== null && job?.project === BANNER_PROJECT && job.state === bannerState;
       const isPaused = job?.state === 'paused';
       if (!isPaused && job?.state === 'running' && !this.runProgressTimer) {
         const advance = () => {
@@ -346,10 +412,7 @@ export class MockBridge implements EngineBridge {
         this.runProgressTimer = setTimeout(advance, 2000);
       }
       return {
-        ...(quotaPause ? pausedQuotaSnapshot : isPaused ? pausedSnapshot : runningSnapshot),
-        // The recorded quota pause (reason "quota"); its reset time is moved three hours ahead,
-        // because the recording's normalised time is in the past.
-        ...(quotaPause ? { resumeAt: Math.floor(Date.now() / 1000) + 3 * 3600 } : {}),
+        ...(banner ? bannerSnapshot() : isPaused ? pausedSnapshot : runningSnapshot),
         job: requested,
         project: job?.project ?? runningSnapshot.project,
         title:
