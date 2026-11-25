@@ -14,8 +14,12 @@ class SpacyModelError(RuntimeError):
     pass
 
 
+def is_model_installed() -> bool:
+    return importlib.util.find_spec("en_core_web_sm") is not None
+
+
 def ensure_model(*, run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> bool:
-    if importlib.util.find_spec("en_core_web_sm") is not None:
+    if is_model_installed():
         return False
     uv = shutil.which("uv")
     if uv is None:

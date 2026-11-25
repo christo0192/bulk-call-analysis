@@ -436,10 +436,12 @@ class _Callbacks(PoolCallbacks):
         self.runner._publish_progress()
         self.runner._liveness.lead_ended(task.lead_id, self.runner._ts())
 
-    async def on_activity(self, ts: float) -> None:
+    async def _check_monitors(self, ts: float, *, activity: bool) -> None:
         for event in self.runner._liveness.check(ts):
             self.runner._publish(event.kind, event.data)
-        self.runner._liveness.on_activity(ts)
+        if activity:
+            self.runner._last_activity_ts = ts
+            self.runner._liveness.on_activity(ts)
         for event in self.runner._sleep.heartbeat(ts, self.runner.job_id):
             if event.kind == "sleep_detected" and self.runner._state() in {
                 JobState.pulling,
@@ -490,6 +492,16 @@ class _Callbacks(PoolCallbacks):
                         self.runner._pause_started = None
                     self.runner._liveness.wake(ts)
             self.runner._publish(event.kind, event.data)
+
+    async def on_check_tick(self, ts: float) -> None:
+        await self._check_monitors(ts, activity=False)
+
+    async def on_codex_activity(self, ts: float) -> None:
+        await self._check_monitors(ts, activity=True)
+
+    async def on_activity(self, ts: float) -> None:
+        """Compatibility entry point for direct coordinator tests."""
+        await self.on_codex_activity(ts)
 
     async def on_quota(self, snapshot: QuotaSnapshot, decision: Decision) -> None:
         guard = self.runner._quota_guard
@@ -575,6 +587,8 @@ class JobRunner:
         self._wake_network_unavailable = False
         self._stop_requested = threading.Event()
         self._worker_tasks: set[asyncio.Task[Any]] = set()
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._last_activity_ts: float | None = None
 
     def request_stop(self) -> None:
         self._stop_requested.set()
@@ -673,20 +687,91 @@ class JobRunner:
         )
 
     def _publish_progress(self) -> None:
-        progress = counts(self.deps.store, self.job_id)
+        state = self._state()
+        if state is JobState.paused:
+            rows = self.deps.store.rows("SELECT resume_state FROM jobs WHERE id=?", (self.job_id,))
+            sample = bool(rows and rows[0][0] == JobState.sample_running.value)
+        else:
+            sample = state is JobState.sample_running
+        progress = counts(self.deps.store, self.job_id, sample=sample)
+        project_rows = self.deps.store.rows("SELECT project_id FROM jobs WHERE id=?", (self.job_id,))
         remaining = progress.remaining
         eta = self._eta.estimate(self._ts(), remaining, self.deps.concurrency)
         self._publish(
             "counts",
             {
                 "done": progress.done,
+                "project": str(project_rows[0][0]) if project_rows else "",
                 "in_flight": progress.in_flight,
                 "remaining": remaining,
+                "retrying": progress.retrying,
                 "failed": sum(progress.failed.values()),
                 "held_back": progress.held_back,
+                "total": progress.total,
+                "phase": "sample" if sample else "full",
             },
         )
-        self._publish("eta", {"low": eta.low, "high": eta.high, "seeded": eta.seeded})
+        self._publish("eta", eta.public())
+
+    def _start_heartbeat(self) -> None:
+        task = self._heartbeat_task
+        if task is None or task.done():
+            self._heartbeat_task = asyncio.create_task(self._heartbeat(), name="bca-heartbeat")
+
+    async def _heartbeat(self) -> None:
+        while True:
+            clock_sleep = getattr(self.deps.clock, "sleep", None)
+            if callable(clock_sleep):
+                await clock_sleep(10)
+            else:
+                await asyncio.sleep(10)
+            if not self._phase_running:
+                return
+            try:
+                self._publish_progress()
+                pool = self._phase_pool
+                workers = (
+                    self.deps.concurrency
+                    if pool is None
+                    else getattr(pool, "concurrency", self.deps.concurrency)
+                )
+                self._publish(
+                    "activity",
+                    {
+                        "last_activity_ts": self._last_activity_ts,
+                        "in_flight": counts(self.deps.store, self.job_id).in_flight,
+                        "workers": workers,
+                    },
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("heartbeat tick failed for job %s", self.job_id)
+
+    async def _stop_heartbeat(self) -> None:
+        task = self._heartbeat_task
+        self._heartbeat_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+
+    def _approved_bytes(self) -> int | None:
+        try:
+            _, version = load_latest_spec(self.deps.job_dir)
+            path = self.deps.job_dir / f"preflight.v{version}.json"
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return (
+                int(raw["dry_run_bytes"])
+                if isinstance(raw, dict) and isinstance(raw.get("dry_run_bytes"), int)
+                else None
+            )
+        except (OSError, ValueError, json.JSONDecodeError, KeyError, TypeError):
+            return None
 
     def _state(self) -> JobState:
         rows = self.deps.store.rows("SELECT state FROM jobs WHERE id=?", (self.job_id,))
@@ -994,6 +1079,7 @@ class JobRunner:
         await self._finish_pause(reason, resume_at)
 
     async def _finish_pause(self, reason: str, resume_at: int | None) -> None:
+        await self._stop_heartbeat()
         if self._pause_finished:
             return
         self._pause_finished = True
@@ -1189,6 +1275,8 @@ class JobRunner:
         """Run one store-driven phase with one pool and one termination rule."""
         self._phase_loop = asyncio.get_running_loop()
         self._phase_running = True
+        self._last_activity_ts = None
+        self._start_heartbeat()
         self._phase_done = asyncio.Event()
         phase_spec_version = self._job_spec_version()
         phase_event = self._get_phase_event()
@@ -1225,6 +1313,7 @@ class JobRunner:
                     self._pause_reason = None
                     self._pause_resume_at = None
                     self._pause_finished = False
+                    self._start_heartbeat()
                     if self._wake_network_unavailable:
                         await self._persist_pause(PauseReason.network.value, None)
                         await self._finish_pause(PauseReason.network.value, None)
@@ -1299,14 +1388,23 @@ class JobRunner:
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(phase_event.wait(), 1.0)
         finally:
-            self._get_phase_event().set()
-            self._phase_running = False
-            if self._phase_done is not None:
-                self._phase_done.set()
-            if not canary and self._phase_pool is pool and self._state() is not JobState.paused:
-                self._phase_pool = None
-            self._phase_loop = None
-            self._phase_event = None
+            cancelled = False
+            try:
+                await self._stop_heartbeat()
+            except asyncio.CancelledError:
+                cancelled = True
+            finally:
+                self._get_phase_event().set()
+                self._phase_running = False
+                if self._phase_done is not None:
+                    self._phase_done.set()
+                if not canary and self._phase_pool is pool and self._state() is not JobState.paused:
+                    self._phase_pool = None
+                self._phase_loop = None
+                self._phase_event = None
+            current = asyncio.current_task()
+            if cancelled or (current is not None and current.cancelling()):
+                raise asyncio.CancelledError
 
     def approve_plan_gate(self, expected_spec_version: int) -> None:
         if self._phase_running:
@@ -1353,7 +1451,7 @@ class JobRunner:
             self.deps.job_dir,
             self.deps.config.bigquery,
             self.job_id,
-            self.deps.approved_bytes,
+            None,
             stop_requested=self._stop_requested.is_set,
         )
         window = (
@@ -1371,7 +1469,7 @@ class JobRunner:
             self.deps.store,
             self.job_id,
             self.deps.config.bigquery,
-            self.deps.approved_bytes,
+            None,
             stop_requested=self._stop_requested.is_set,
         )
         usable_ids = [
@@ -1391,7 +1489,7 @@ class JobRunner:
             self.deps.job_dir,
             self.spec.calls_scope,
             window,
-            self.deps.approved_bytes,
+            self._approved_bytes(),
             stop_requested=self._stop_requested.is_set,
         )
         return intake
@@ -1593,6 +1691,61 @@ class JobRunner:
         else:
             raise ValueError(f"cannot finish output from {state}")
         report = verify_job(self.deps.store, self.job_id, path)
+        output_dir = self.deps.job_dir / "output"
+        reconciliation = cast(Any, report.reconciliation)
+        counts_by_status = dict(getattr(reconciliation, "counts", {}))
+        terms = {str(key): int(value) for key, value in counts_by_status.items()}
+        selected_distinct_ids = int(getattr(reconciliation, "distinct_ids_in", 0))
+        reconciliation_data: dict[str, object] = {
+            "terms": terms,
+            "selected_distinct_ids": selected_distinct_ids,
+            "duplicates_removed": int(getattr(reconciliation, "duplicates_removed", 0)),
+            "adds_up": sum(terms.values()) == selected_distinct_ids,
+        }
+        (output_dir / f"reconciliation.v{self.spec.spec_version}.json").write_text(
+            json.dumps(reconciliation_data, indent=2) + "\n", encoding="utf-8", newline="\n"
+        )
+        failed_reasons: dict[str, int] = {}
+        for row in self.deps.store.rows(
+            "SELECT reason FROM leads WHERE job_id=? AND status='failed'", (self.job_id,)
+        ):
+            reason = str(row[0] or "unknown")
+            failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
+        issue_groups = {
+            "quote_flags": sum(
+                1
+                for row in self.deps.store.rows(
+                    "SELECT flags_json FROM results WHERE job_id=?", (self.job_id,)
+                )
+                if json.loads(str(row[0]))
+            ),
+            "held_back_by_masking": sum(
+                1
+                for row in self.deps.store.rows(
+                    "SELECT reason FROM leads WHERE job_id=? AND status='held_back'", (self.job_id,)
+                )
+                if "mask" in str(row[0]) or "leak" in str(row[0])
+            ),
+            "failed": failed_reasons,
+            "over_size_cap": len(
+                self.deps.store.rows(
+                    "SELECT 1 FROM leads WHERE job_id=? AND calls_dropped_cap>0", (self.job_id,)
+                )
+            ),
+        }
+        report_lines = [
+            report.to_markdown().rstrip(),
+            "",
+            "## Reconciliation",
+            f"{sum(terms.values())} = {selected_distinct_ids} distinct selected ids; "
+            f"adds up: {reconciliation_data['adds_up']}.",
+            "",
+            "## Issue groups",
+            *[f"- {name}: {value}" for name, value in issue_groups.items()],
+        ]
+        (output_dir / f"verify-report.v{self.spec.spec_version}.md").write_text(
+            "\n".join(report_lines) + "\n", encoding="utf-8", newline="\n"
+        )
         progress = counts(self.deps.store, self.job_id)
         has_issues = not report.ok or bool(progress.failed) or progress.held_back > 0
         if self._state() is JobState.verifying:
@@ -1694,4 +1847,21 @@ class JobRunner:
     def rebuild_with_rules(self, new_rules: tuple[object, ...]) -> Path:
         from bca.outputs.excel import rebuild_with_rules as rebuild
 
-        return rebuild(self.deps.store, self.job_id, new_rules, self.deps.job_dir / "output")
+        before = [
+            tuple(row)
+            for row in self.deps.store.rows(
+                "SELECT lead_id, answer_json FROM results WHERE job_id=? ORDER BY lead_id", (self.job_id,)
+            )
+        ]
+        path, _number = rebuild(
+            self.deps.store, self.job_id, new_rules, self.deps.job_dir / "output", self.spec.spec_version
+        )
+        after = [
+            tuple(row)
+            for row in self.deps.store.rows(
+                "SELECT lead_id, answer_json FROM results WHERE job_id=? ORDER BY lead_id", (self.job_id,)
+            )
+        ]
+        if before != after:
+            raise RuntimeError("rebuild changed stored answers")
+        return path

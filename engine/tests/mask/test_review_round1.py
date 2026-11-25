@@ -39,3 +39,7 @@ def test_digits_regex_is_linear_on_a_long_run() -> None:
     started = time.monotonic()
     mask_text("x " + "1" * 40 + "a", MaskingContext())
     assert time.monotonic() - started < 0.5
+
+
+def test_adjacent_name_spans_merge_into_one_placeholder() -> None:
+    assert mask_text("Myself Ravi Kumar from Pune.", MaskingContext()).text == "Myself [NAME] from Pune."

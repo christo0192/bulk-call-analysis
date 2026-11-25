@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from functools import partial
@@ -51,6 +52,10 @@ class FakeClock:
 
     def advance_wall(self, seconds: float) -> None:
         self.current += seconds
+
+    async def sleep(self, seconds: float) -> None:
+        self.advance(seconds)
+        await asyncio.sleep(0)
 
 
 @dataclass

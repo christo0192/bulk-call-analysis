@@ -30,6 +30,7 @@ class Counts:
     not_started: int
     remaining: int
     checklist: tuple[ChecklistItem, ...]
+    total: int
 
 
 _CHECKLIST = (
@@ -92,32 +93,43 @@ def _checklist(store: Store, job_id: str, statuses: Counter[str]) -> tuple[Check
     return tuple(result)
 
 
-def counts(store: Store, job_id: str) -> Counts:
+def counts(store: Store, job_id: str, sample: bool | None = None) -> Counts:
     with store.lock:
-        rows = store.rows("SELECT status, reason, calls_dropped_cap FROM leads WHERE job_id=?", (job_id,))
+        clause = " AND in_sample=?" if sample is not None else ""
+        args: tuple[object, ...] = (job_id, int(sample)) if sample is not None else (job_id,)
+        rows = store.rows(f"SELECT status, reason, calls_dropped_cap FROM leads WHERE job_id=?{clause}", args)
         statuses = Counter(str(row[0]) for row in rows)
         failed = Counter(str(row[1] or "unknown") for row in rows if str(row[0]) == LeadStatus.failed)
         retrying = int(
             store.rows(
-                "SELECT count(*) FROM leads l WHERE l.job_id=? AND l.status='queued' "
+                f"SELECT count(*) FROM leads l WHERE l.job_id=? AND l.status='queued' {clause} "
                 "AND EXISTS (SELECT 1 FROM attempts a WHERE a.job_id=l.job_id "
                 "AND a.lead_id=l.lead_id AND a.counted=1 AND a.outcome='failed')",
-                (job_id,),
+                args,
             )[0][0]
         )
-        terminal_statuses = {
-            LeadStatus.done,
-            LeadStatus.failed,
-            LeadStatus.no_transcript,
-            LeadStatus.transcription_failed,
-            LeadStatus.too_short,
-            LeadStatus.not_found,
-            LeadStatus.held_back,
-        }
-        job_row = store.rows("SELECT state FROM jobs WHERE id=?", (job_id,))
-        if job_row and str(job_row[0][0]) in {"done", "done_with_issues", "failed", "cancelled"}:
-            terminal_statuses.add(LeadStatus.not_started)
-        terminal = sum(statuses[status] for status in terminal_statuses)
+        unusable = sum(
+            statuses[status]
+            for status in (
+                LeadStatus.no_transcript,
+                LeadStatus.transcription_failed,
+                LeadStatus.too_short,
+                LeadStatus.not_found,
+            )
+        )
+        total = len(rows) - unusable
+        remaining = (
+            int(
+                store.rows(
+                    "SELECT count(*) FROM leads l WHERE l.job_id=? "
+                    "AND l.status IN ('pending', 'pulled', 'masked', 'queued', 'not_started') "
+                    f"{clause}",
+                    args,
+                )[0][0]
+            )
+            - retrying
+        )
+        remaining = max(0, remaining)
         return Counts(
             statuses[LeadStatus.done],
             statuses[LeadStatus.in_flight],
@@ -130,6 +142,7 @@ def counts(store: Store, job_id: str) -> Counts:
             sum(int(row[2]) > 0 for row in rows),
             statuses[LeadStatus.not_found],
             statuses[LeadStatus.not_started],
-            max(0, len(rows) - terminal),
+            remaining,
             _checklist(store, job_id, statuses),
+            total,
         )

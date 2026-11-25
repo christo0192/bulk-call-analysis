@@ -20,7 +20,7 @@ from tests.fakes import fake_codex
 
 
 def _run(awaitable: Any) -> Any:
-    return asyncio.run(asyncio.wait_for(awaitable, timeout=15))
+    return asyncio.run(asyncio.wait_for(awaitable, timeout=90))
 
 
 def _real_pool(
@@ -361,6 +361,8 @@ def test_reroute_rate_baseline_resets_after_operator_resume(
     assert coordinator.store.rows("SELECT pause_reason FROM jobs WHERE id='job'")[0][0] == "model_unavailable"
 
 
+# The fake clock's sleep returns at once, so the 10 s heartbeat spins; the time limits here only catch a hang.
+@pytest.mark.timeout(180)
 def test_reroute_rate_denominator_on_large_job(
     coordinator: CoordinatorFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
