@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -418,6 +419,55 @@ class ProductionBackend(ApiBackend):
             if hasattr(self, "jobs") and not self._recovered:
                 self.jobs.recover()
                 self._recovered = True
+
+    def _setup_probes(self) -> dict[str, Callable[[], tuple[bool, str]]]:
+        """First-run checks; each detail is plain words that match the result (shown as is)."""
+        config = self.config
+
+        def connector() -> tuple[bool, str]:
+            if config is None and self.config_error is not None:
+                return False, f"The settings file {self.config_path} could not be read: {self.config_error}"
+            if config is None:
+                return False, f"BigQuery settings not found; put site.toml in {self.app_data}."
+            if config.bigquery.key_path is None:
+                return False, "The settings file names no BigQuery key file (key_path)."
+            return True, "BigQuery settings found."
+
+        def key() -> tuple[bool, str]:
+            if config is None or config.bigquery.key_path is None:
+                return False, "Waiting for the BigQuery settings."
+            if config.bigquery.key_path.is_dir():
+                return False, f"The BigQuery key path is a folder, not a file: {config.bigquery.key_path}"
+            if not config.bigquery.key_path.is_file():
+                # The path may be shown; the key's contents never are (D-UI-KEYPATH).
+                return False, f"The BigQuery key file is missing: {config.bigquery.key_path}"
+            return True, "BigQuery key file found."
+
+        def spacy() -> tuple[bool, str]:
+            if self._test_fakes_allowed():
+                return True, "Name-masking model installed."
+            # The model wheel does not depend on spaCy, so each must be checked: with the model
+            # alone, the first job would fail when the masker loads spaCy.
+            if importlib.util.find_spec("spacy") is None:
+                return False, "spaCy is not installed. Run the app's start script again."
+            if not is_model_installed():
+                return False, "The name-masking model is not installed. Run the app's start script again."
+            return True, "Name-masking model installed."
+
+        def codex_copy() -> tuple[bool, str]:
+            if shutil.which("codex") is not None:
+                return True, "Codex program found."
+            return False, "The Codex program was not found. Install it, then press Check again."
+
+        return {
+            "uv_python": lambda: (sys.version_info >= (3, 12), sys.version.split()[0]),
+            "venv": lambda: (True, sys.executable),
+            "connector": connector,
+            "key": key,
+            "claude_copy": lambda: (True, "available"),
+            "codex_copy": codex_copy,
+            "spacy": spacy,
+        }
 
     def _require_config(self) -> SiteConfig:
         self._reload_config()
@@ -976,32 +1026,17 @@ class ProductionBackend(ApiBackend):
                 self._closed = True
                 return {"stopping": True, "exitCode": 0}
             if method == "setup/checklist":
-                return [item.__dict__ for item in Checklist(self.app_data).items]
+                items = Checklist(self.app_data).items
+                if self.config is None:
+                    for item in items:
+                        if item.name == "connector":
+                            item.status = "failed"
+                            item.detail = f"BigQuery settings not found; put site.toml in {self.app_data}."
+                            break
+                return [item.__dict__ for item in items]
             if method == "setup/runChecks":
                 checklist = Checklist(self.app_data)
-                config = self.config
-                probes = {
-                    "uv_python": lambda: (sys.version_info >= (3, 12), sys.version.split()[0]),
-                    "venv": lambda: (True, sys.executable),
-                    "connector": lambda: (
-                        config is not None and config.bigquery.key_path is not None,
-                        "configured",
-                    ),
-                    "key": lambda: (
-                        bool(
-                            config is not None
-                            and config.bigquery.key_path
-                            and config.bigquery.key_path.is_file()
-                        ),
-                        "located",
-                    ),
-                    "claude_copy": lambda: (True, "available"),
-                    "codex_copy": lambda: (shutil.which("codex") is not None, "codex"),
-                    "spacy": lambda: (
-                        (True, "installed") if is_model_installed() else (False, "not installed")
-                    ),
-                }
-                return {"items": [item.__dict__ for item in checklist.run_checks(probes)]}
+                return {"items": [item.__dict__ for item in checklist.run_checks(self._setup_probes())]}
             if method == "setup/markManual":
                 item = cast(str, params["item"])
                 if item not in MANUAL:

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/preact';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { useSignIn } from './useSignIn';
+import { useSignIn, signInCheckMessage } from './useSignIn';
+import { EngineError } from '../../engine/client';
 import { mockBridge } from '../../engine/bridge';
 import { setupItems } from '../../state/store';
 
@@ -150,4 +151,24 @@ it('sign-in polling never overlaps a slow check', async () => {
   resolveCheck?.();
   await act(async () => Promise.resolve());
   vi.useRealTimers();
+});
+
+it('a failed sign-in check is explained in plain words', () => {
+  // As the engine raises it, and as the Tauri bridge passes it on as text.
+  const structured = new EngineError(
+    -32001,
+    'Codex app-server did not start',
+    'app_server_unavailable',
+  );
+  const text = 'RPC error -32001: Codex app-server did not start';
+  for (const cause of [structured, text]) {
+    const message = signInCheckMessage(cause);
+    expect(message).toContain("Couldn't check the ChatGPT sign-in");
+    expect(message).not.toContain('app-server');
+  }
+  // An engine without auth/status yet: say nothing (the rows already show "Not signed in yet").
+  expect(signInCheckMessage(new EngineError(-32601, 'Method not found'))).toBe('');
+  expect(signInCheckMessage(new EngineError(-32000, 'boom'))).toBe(
+    "Couldn't check the sign-in status (boom). Press Check again.",
+  );
 });

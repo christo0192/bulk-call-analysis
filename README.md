@@ -31,3 +31,30 @@ uv run ruff check .
 uv run mypy src
 uv run pytest -q
 ```
+
+## Run it
+
+On Windows, install Python 3.12, `uv`, Node.js 20 or newer, npm and Rust, plus
+the linker your Rust toolchain needs: the Visual Studio C++ build tools for an
+MSVC toolchain, or a MinGW clang such as llvm-mingw on PATH for a GNU toolchain. On Mac, install Python 3.12, `uv`, Node.js
+20 or newer, npm, and Rust. On Windows run
+`powershell -ExecutionPolicy Bypass -File .\scripts\run-app.ps1` (Windows blocks
+unsigned scripts by default); on Mac run `./scripts/run-app.sh`. Add `-Check` on
+Windows (or `--check` on Mac) to run the prerequisite and dependency checks
+without opening the app. The first run installs the engine's dependencies,
+including spaCy and its English name model, and the app's npm packages.
+
+Copy `config/site.example.toml` to `site.toml`, fill in the site-specific
+values, and put it in the application data folder. The engine looks there for
+its active file: `%LOCALAPPDATA%\BulkCallAnalysis` on Windows or
+`~/Library/Application Support/BulkCallAnalysis` on Mac. During development,
+it also accepts `config/site.toml` from the repository. The first-run screen
+shows where to put the file when it is missing.
+
+Sign in through the official Claude Code and Codex programs when the checklist
+asks. The app does not store their sign-in tokens. Application data, logs,
+the local store, and generated projects are kept in that same application data
+folder. Close the window or use the tray menu to stop the app; it shuts down
+the engine before exiting.
+
+For the UI workflow and development commands, see [the UI guide](docs/ui.md).
