@@ -7,6 +7,9 @@ edition = "2021"
 rust-version = "1.77"
 build = "build.rs"
 
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
 [lib]
 name = "bulk_call_analysis_lib"
 crate-type = ["lib", "staticlib"]

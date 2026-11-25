@@ -976,7 +976,14 @@ class ProductionBackend(ApiBackend):
                 self._closed = True
                 return {"stopping": True, "exitCode": 0}
             if method == "setup/checklist":
-                return [item.__dict__ for item in Checklist(self.app_data).items]
+                items = Checklist(self.app_data).items
+                if self.config is None:
+                    for item in items:
+                        if item.name == "connector":
+                            item.status = "failed"
+                            item.detail = f"BigQuery settings not found; put site.toml in {self.app_data}."
+                            break
+                return [item.__dict__ for item in items]
             if method == "setup/runChecks":
                 checklist = Checklist(self.app_data)
                 config = self.config
