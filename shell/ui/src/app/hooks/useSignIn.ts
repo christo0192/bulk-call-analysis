@@ -6,6 +6,15 @@ import { setupItems } from '../../state/store';
 
 export type SignInVendor = 'claude' | 'codex';
 
+/** Plain words for a failed sign-in status check; the engine's own text stays in the log. */
+export function signInCheckMessage(cause: unknown): string {
+  const error = EngineError.from(cause);
+  if (error.reason === 'app_server_unavailable' || /app-server did not start/i.test(error.message))
+    return "Couldn't check the ChatGPT sign-in: the Codex program didn't start. Sign in to ChatGPT below, then press Check again.";
+  if (error.code === -32601) return '';
+  return `Couldn't check the sign-in status (${error.message}). Press Check again.`;
+}
+
 export function useSignIn(onAuth: (auth: AuthStatus) => void, onError: (message: string) => void) {
   const [waitingFor, setWaitingFor] = useState<SignInVendor | null>(null);
   const [isChecking, setIsChecking] = useState(false);
@@ -27,8 +36,9 @@ export function useSignIn(onAuth: (auth: AuthStatus) => void, onError: (message:
         try {
           auth = await bridge.call('auth/status', {});
           lastAuth.current = auth;
+          onError('');
         } catch (cause) {
-          onError(EngineError.from(cause).message);
+          onError(signInCheckMessage(cause));
         }
       }
       setupItems.value = checks.items;

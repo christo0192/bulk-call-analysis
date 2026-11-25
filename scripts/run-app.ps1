@@ -39,7 +39,13 @@ Write-Output "cargo: found"
 Write-Output "rust host: $rustHost, linker: $linker"
 
 Push-Location (Join-Path $repo "engine")
-try { & uv sync; if ($LASTEXITCODE -ne 0) { Stop-WithMessage "uv sync failed; install uv and check the engine dependencies." } }
+try {
+    & uv sync
+    if ($LASTEXITCODE -ne 0) { Stop-WithMessage "uv sync failed; install uv and check the engine dependencies." }
+    # Masking needs spaCy's small English model to find names; install the pinned wheel once.
+    & uv run python -c "from bca.setup.spacy_model import ensure_model; ensure_model()"
+    if ($LASTEXITCODE -ne 0) { Stop-WithMessage "Installing the name-masking model failed; check the internet connection and run this again." }
+}
 finally { Pop-Location }
 
 $ui = Join-Path $repo "shell\ui"
