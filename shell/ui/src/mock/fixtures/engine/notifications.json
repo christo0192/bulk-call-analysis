@@ -1,0 +1,370 @@
+{
+  "job/state": [
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "state": "running",
+        "step": "building_output"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": { "job": "job-one", "project": "project-one", "state": "done", "step": "done" }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "state": "running",
+        "step": "full_running"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "state": "running",
+        "step": "masking_sample"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": { "job": "job-one", "project": "project-one", "state": "paused", "step": "paused" }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "state": "plan_approved",
+        "step": "plan_approved"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "state": "running",
+        "step": "pulling"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "state": "running",
+        "step": "quote_check"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "state": "sample_approved",
+        "step": "sample_approved"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "state": "sample_ready",
+        "step": "sample_ready"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "state": "running",
+        "step": "sample_running"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/state",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "state": "running",
+        "step": "verifying"
+      }
+    }
+  ],
+  "job/progress": [
+    {
+      "jsonrpc": "2.0",
+      "method": "job/progress",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "phase": "full",
+        "done": 2,
+        "inFlight": 3,
+        "retrying": 0,
+        "failed": 0,
+        "heldBack": 0,
+        "remaining": 3,
+        "total": 8
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "job/progress",
+      "params": {
+        "job": "job-one",
+        "project": "project-one",
+        "phase": "sample",
+        "done": 1,
+        "inFlight": 1,
+        "retrying": 0,
+        "failed": 0,
+        "heldBack": 0,
+        "remaining": 0,
+        "total": 2
+      }
+    }
+  ],
+  "chat/event": [
+    {
+      "jsonrpc": "2.0",
+      "method": "chat/event",
+      "params": {
+        "project": "project-one",
+        "event": {
+          "kind": "result",
+          "data": {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "modelUsage": { "claude-opus-5-5": {} }
+          },
+          "turn": "uuid-1",
+          "entryId": 3
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "chat/event",
+      "params": {
+        "project": "project-one",
+        "event": {
+          "kind": "system",
+          "data": {
+            "type": "system",
+            "subtype": "init",
+            "apiKeySource": "none",
+            "model": "claude-opus-5-5",
+            "permissionMode": "dontAsk",
+            "tools": ["mcp__bq__query", "mcp__app__query", "EndConversation"],
+            "mcp_servers": [
+              { "name": "bq", "status": "connected" },
+              { "name": "app", "status": "connected" }
+            ],
+            "plugins": [],
+            "fast_mode_state": "off",
+            "claude_code_version": "2.1.327"
+          },
+          "turn": "uuid-1",
+          "entryId": 1
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "chat/event",
+      "params": {
+        "project": "project-one",
+        "event": {
+          "kind": "tool_result",
+          "data": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "content": {
+                    "meta": null,
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "{\n  \"bytes\": \"0 B\",\n  \"rows\": [\n    {\n      \"note\": \"synthetic row\"\n    }\n  ],\n  \"truncated\": false\n}",
+                        "annotations": null,
+                        "meta": null
+                      }
+                    ],
+                    "structured_content": null,
+                    "is_error": false,
+                    "result_type": "complete"
+                  }
+                }
+              ]
+            }
+          },
+          "turn": "uuid-1",
+          "entryId": 3
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "chat/event",
+      "params": {
+        "project": "project-one",
+        "event": {
+          "kind": "tool_use",
+          "data": {
+            "type": "assistant",
+            "message": {
+              "model": "claude-opus-5-5",
+              "content": [
+                { "type": "tool_use", "name": "mcp__bq__bq_query", "input": { "sql": "SELECT 1" } }
+              ]
+            }
+          },
+          "turn": "uuid-1",
+          "entryId": 2
+        }
+      }
+    }
+  ],
+  "engine/event": [
+    {
+      "jsonrpc": "2.0",
+      "method": "engine/event",
+      "params": {
+        "kind": "activity",
+        "job": "job-one",
+        "last_activity_ts": 1795587802.4192355,
+        "in_flight": 2,
+        "workers": 4
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "engine/event",
+      "params": {
+        "kind": "counts",
+        "job": "job-one",
+        "done": 1,
+        "project": "project-one",
+        "in_flight": 1,
+        "remaining": 0,
+        "retrying": 0,
+        "failed": 0,
+        "held_back": 0,
+        "total": 2,
+        "phase": "sample"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "engine/event",
+      "params": {
+        "kind": "eta",
+        "job": "job-one",
+        "low": null,
+        "high": null,
+        "seeded": true,
+        "known": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "engine/event",
+      "params": {
+        "kind": "lead_done",
+        "job": "job-one",
+        "lead_id": "1000",
+        "quotes_ok": true,
+        "repair": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "engine/event",
+      "params": {
+        "kind": "lead_failed",
+        "job": "job-one",
+        "lead_id": "1002",
+        "error": "quota_interrupt",
+        "counted": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "engine/event",
+      "params": {
+        "kind": "lead_started",
+        "job": "job-one",
+        "lead_id": "1000",
+        "attempt_id": "uuid-2"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "engine/event",
+      "params": { "kind": "pause", "job": "job-one", "reason": "quota", "resume_at": 1795591387 }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "engine/event",
+      "params": { "kind": "pause", "job": "job-one", "reason": "user", "resume_at": null }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "engine/event",
+      "params": {
+        "kind": "quota",
+        "job": "job-one",
+        "decision": "ALLOW",
+        "reason": "quota is available",
+        "limitId": "codex",
+        "primary": { "usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1700000000 },
+        "secondary": null,
+        "creditsBalance": "5",
+        "hasCredits": false,
+        "spendControlReached": null,
+        "rateLimitReachedType": null,
+        "ordinaryUsageAllowed": true,
+        "planType": null,
+        "takenAt": 1700000000
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "engine/event",
+      "params": {
+        "kind": "state",
+        "job": "job-one",
+        "from": "plan_proposed",
+        "to": "plan_approved",
+        "reason": "plan approved",
+        "source": "store",
+        "project": "project-one"
+      }
+    }
+  ]
+}

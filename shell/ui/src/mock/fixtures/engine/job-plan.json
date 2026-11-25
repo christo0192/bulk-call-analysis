@@ -1,0 +1,27 @@
+{
+  "job": "job-one",
+  "project": "project-one",
+  "specVersion": 1,
+  "title": "Synthetic job",
+  "question": "Synthetic question",
+  "leadSource": { "kind": "sql", "sql": "SELECT '1000' AS lead_id" },
+  "callsScope": { "mode": "all", "windowStart": null, "windowEnd": null },
+  "counts": {
+    "selected": 8,
+    "usable": 8,
+    "noTranscript": 0,
+    "transcriptionFailed": 0,
+    "tooShort": 0,
+    "notFound": 0,
+    "capped": 0,
+    "duplicates": 0,
+    "malformed": 0
+  },
+  "scanBytes": 1,
+  "outputColumns": [{ "name": "answer", "type": "string", "nullable": false, "values": null }],
+  "rules": [],
+  "sampleSize": 2,
+  "estimate": null,
+  "approved": false,
+  "approvedAt": null
+}

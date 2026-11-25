@@ -176,8 +176,9 @@ it.each([
   ['stalled', 'run'],
   ['done', 'done'],
   ['done_with_issues', 'done'],
-  ['failed', 'setup'],
-  ['cancelled', 'setup'],
+  // A failed or cancelled job keeps the run view, which shows the engine's reason and the steps.
+  ['failed', 'run'],
+  ['cancelled', 'run'],
   ['unknown', 'setup'],
 ])('every engine state maps to a label and a phase: %s', (state, expected) => {
   expect(phaseFor(state)).toBe(expected);

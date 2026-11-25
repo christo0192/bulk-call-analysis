@@ -31,7 +31,7 @@ export type JobSummary = {
   remaining?: number | string;
   approvedAt?: number;
 };
-export type FileInfo = { name: string; size: number };
+export type FileInfo = { name: string; size: number; modified?: number; kind?: string };
 export type SetupStatus = 'pending' | 'ok' | 'failed' | 'manual_pending' | 'manual_done';
 export type SetupItem = {
   name: string;
@@ -52,10 +52,91 @@ export type ChatEntry = {
   status?: 'started' | 'done' | 'failed';
   summary?: string;
 };
-export type JobSnapshot = JobStatus & {
-  selected?: number;
-  eta?: string;
-  steps?: { id?: string; ts?: number }[];
+export type SnapshotProgress = {
+  job: string;
+  project: string;
+  phase: string;
+  done: number;
+  inFlight: number;
+  retrying: number;
+  failed: number;
+  heldBack: number;
+  remaining: number;
+  total: number;
+};
+export type SnapshotCounts = {
+  selected: number;
+  usable: number;
+  noTranscript: number;
+  transcriptionFailed: number;
+  tooShort: number;
+  notFound: number;
+  capped: number;
+  failedByReason: Record<string, number>;
+};
+export type SnapshotEta = {
+  low: number | null;
+  high: number | null;
+  seeded: boolean;
+  known: boolean;
+};
+export type JobSnapshot = {
+  job: string;
+  project: string;
+  title: string;
+  state: JobState | string;
+  step: string;
+  specVersion: number;
+  pauseReason: string | null;
+  resumeAt: number | null;
+  planApprovedAt: number | null;
+  sampleApprovedAt: number | null;
+  progress: SnapshotProgress;
+  counts: SnapshotCounts;
+  eta: SnapshotEta | null;
+  activity: {
+    lastActivityTs: number | null;
+    inFlight: number;
+    workers: number;
+    throughputPerMin: number | null;
+  };
+  quota: {
+    codex: {
+      primary: { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
+      stopAtPercent?: number;
+      projectedEndPercent?: number | null;
+      [key: string]: unknown;
+    } | null;
+    claude: Record<string, unknown> | null;
+    projectedEndPercent: number | null;
+  };
+  steps: {
+    id: string;
+    label: string;
+    status: 'done' | 'active' | 'todo' | string;
+    ts?: number;
+    detail: string | null;
+  }[];
+  recent: { ts: number; kind: string; text: string }[];
+  reconciliation: { addsUp: boolean; [key: string]: unknown } | null;
+  failure: { text: string; [key: string]: unknown } | null;
+  stall?: { reason: string; text: string } | null;
+  approvedAt?: number;
+};
+export type RuleDefinition = Rule;
+export type PlanRule = {
+  kind: string;
+  name?: string;
+  summary: string;
+  definition?: RuleDefinition;
+};
+export type OutputColumn = {
+  name: string;
+  type: string;
+  description?: string;
+  nullable?: boolean;
+  // The engine passes the schema's enum through as is: strings, numbers or booleans.
+  values?: (string | number | boolean | null)[] | null;
 };
 export type PlanCard = {
   job: string;
@@ -77,8 +158,8 @@ export type PlanCard = {
     malformed?: number;
   };
   scanBytes: number;
-  outputColumns: { name: string; type: string; description?: string }[];
-  rules: { kind: string; name?: string; summary: string }[];
+  outputColumns: OutputColumn[];
+  rules: PlanRule[];
   sampleSize: number;
   estimate: {
     sampleSeconds: { low: number; high: number } | null;
@@ -119,8 +200,54 @@ export type SampleCard = {
   passed?: number;
   flagged?: number;
 };
-export type DoneView = { total: number; completed: number; issues: string[] };
-export type AllowanceWindow = { name: string; usedPercent: number; resetsAt: number };
+export type OutputFile = {
+  name: string;
+  path: string;
+  kind: string;
+  specVersion: number | null;
+  rebuild: number | null;
+};
+export type Reconciliation = {
+  selected: number;
+  read: number;
+  noTranscript: number;
+  transcriptionFailed: number;
+  tooShort: number;
+  notFound: number;
+  heldBack: number;
+  failed: number;
+  notStarted: number;
+  addsUp: boolean;
+};
+export type OutputIssue = { kind: string; count: number; text: string; leads: string[] };
+export type JobOutputs = {
+  job: string;
+  specVersion: number;
+  state: string;
+  finishedAt: number | null;
+  durationSeconds: number | null;
+  asleepSeconds: number | null;
+  files: OutputFile[];
+  reconciliation: Reconciliation | null;
+  issues: OutputIssue[];
+  headline: string | null;
+};
+export type RuleCondition = {
+  field: string;
+  op: string;
+  value?: string | number | boolean | null | (string | number | boolean)[];
+};
+export type Rule =
+  | { kind: 'in_scope'; match: 'all' | 'any'; conditions: RuleCondition[] }
+  | { kind: 'threshold_group'; name: string; field: string; edges: number[]; labels: string[] }
+  | { kind: 'review_flag'; name: string; match: 'all' | 'any'; conditions: RuleCondition[] };
+export type RebuildResult = { job: string; name: string; path: string; rebuild: number };
+export type AllowanceWindow = {
+  name: string;
+  usedPercent: number;
+  resetsAt: number;
+  windowDurationMins?: number;
+};
 export type AllowanceStatus = {
   codex: { windows: AllowanceWindow[]; stopAtPercent: number } | null;
   claude: {
@@ -181,8 +308,8 @@ export type MethodMap = {
   'job/pause': { params: { job: string }; result: JobStatus };
   'job/resume': { params: { job: string }; result: JobStatus };
   'job/rebuildRules': {
-    params: { job: string; rules: unknown[] };
-    result: { job: string; path: string };
+    params: { job: string; rules: Rule[] };
+    result: RebuildResult;
   };
   'auth/claudeLogin': { params: {}; result: { started: true; vendor: 'claude' } };
   'auth/codexLogin': { params: {}; result: { started: true; vendor: 'codex' } };
@@ -206,7 +333,7 @@ export type MethodMap = {
     params: { project: string; text: string };
     result: { name: string; raw: number; distinct: number; duplicates: number; malformed: number };
   };
-  'job/outputs': { params: { job: string }; result: DoneView };
+  'job/outputs': { params: { job: string }; result: JobOutputs };
   'allowance/status': { params: {}; result: AllowanceStatus };
   'files/path': { params: { project: string; name: string }; result: { path: string } };
 };

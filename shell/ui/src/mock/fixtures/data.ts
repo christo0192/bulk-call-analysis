@@ -60,11 +60,34 @@ export const plan: PlanCard = {
   outputColumns: [
     { name: 'asked_discount', type: 'boolean' },
     { name: 'discount_amount', type: 'string' },
+    // A number column, so the bands rule can be tried in the dev mock and the browser tests.
+    { name: 'discount_percent', type: 'number' },
+    // An integer and a fixed-choice column, so lists of each can be tried in the browser tests.
+    { name: 'call_count', type: 'integer' },
+    { name: 'objection', type: 'string', values: ['too expensive, will think', 'not now', 'fine'] },
     { name: 'reason', type: 'string' },
   ],
   rules: [
-    { kind: 'answer', summary: 'Answer from the call, not metadata' },
-    { kind: 'quote', summary: 'Include a short masked quote for every answer' },
+    {
+      kind: 'in_scope',
+      summary: 'Asked for a discount',
+      definition: {
+        kind: 'in_scope',
+        match: 'all',
+        conditions: [{ field: 'answer.asked_discount', op: 'eq', value: true }],
+      },
+    },
+    {
+      kind: 'review_flag',
+      name: 'discount reason present',
+      summary: 'Discount reason is present',
+      definition: {
+        kind: 'review_flag',
+        name: 'discount reason present',
+        match: 'all',
+        conditions: [{ field: 'answer.reason', op: 'not_null' }],
+      },
+    },
   ],
   sampleSize: 20,
   estimate: null,
