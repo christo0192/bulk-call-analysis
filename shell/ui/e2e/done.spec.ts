@@ -58,3 +58,27 @@ test('typed number lists keep every item in the real browser', async ({ page }) 
     conditions: [{ field: 'answer.discount_percent', op: 'in', value: [1.5, 2] }],
   });
 });
+
+test('an integer list typed in the real browser keeps every item', async ({ page }) => {
+  // Chromium's number box drops the commas of "1, 2" (it becomes 12); the value box is text.
+  await page.goto('/');
+  await page.getByRole('button', { name: /Shipping questions/ }).click();
+  await page.getByRole('button', { name: 'Rebuild with new rules' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: 'Review flag' }).click();
+  await dialog.getByLabel('Field').selectOption('answer.call_count');
+  await dialog.getByLabel('Operator').selectOption('in');
+  await dialog.getByLabel('Value').pressSequentially('1, 2');
+  await dialog.getByRole('button', { name: 'Add rule' }).click();
+  await dialog.getByRole('button', { name: 'Rebuild' }).click();
+  await expect(dialog).toContainText('Rebuilt:');
+  const rebuildCalls = await page.evaluate(async () => {
+    const { mockBridge } = await import('/src/engine/bridge.ts');
+    return mockBridge.calls.filter((call) => call.method === 'job/rebuildRules');
+  });
+  const rules = (rebuildCalls[0]?.params as { rules: unknown[] }).rules;
+  expect(rules.at(-1)).toMatchObject({
+    kind: 'review_flag',
+    conditions: [{ field: 'answer.call_count', op: 'in', value: [1, 2] }],
+  });
+});

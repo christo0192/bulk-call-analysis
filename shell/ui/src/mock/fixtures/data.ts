@@ -62,6 +62,9 @@ export const plan: PlanCard = {
     { name: 'discount_amount', type: 'string' },
     // A number column, so the bands rule can be tried in the dev mock and the browser tests.
     { name: 'discount_percent', type: 'number' },
+    // An integer and a fixed-choice column, so lists of each can be tried in the browser tests.
+    { name: 'call_count', type: 'integer' },
+    { name: 'objection', type: 'string', values: ['too expensive, will think', 'not now', 'fine'] },
     { name: 'reason', type: 'string' },
   ],
   rules: [

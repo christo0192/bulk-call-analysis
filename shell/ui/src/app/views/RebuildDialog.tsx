@@ -506,19 +506,36 @@ function ValueControl({
         <option value="false">No</option>
       </select>
     );
-  if (column?.values)
+  if (column?.values) {
+    // A list operator picks several options; they travel joined by OPTION_SEPARATOR so an option
+    // with a comma or spaces stays exactly as the engine defines it.
+    const list = isList(operator);
+    const chosen = list ? value.split(OPTION_SEPARATOR).filter(Boolean) : [value];
     return (
       <select
         aria-label="Value"
-        value={value}
-        onChange={(event) => onChange(event.currentTarget.value)}
+        multiple={list}
+        {...(list ? {} : { value })}
+        onChange={(event) => {
+          const target = event.currentTarget;
+          onChange(
+            list
+              ? Array.from(target.selectedOptions, (option) => option.value)
+                  .filter(Boolean)
+                  .join(OPTION_SEPARATOR)
+              : target.value,
+          );
+        }}
       >
-        <option value="">Choose</option>
+        {!list && <option value="">Choose</option>}
         {column.values.map((item) => (
-          <option value={item}>{item}</option>
+          <option value={item} key={item} {...(list ? { selected: chosen.includes(item) } : {})}>
+            {item}
+          </option>
         ))}
       </select>
     );
+  }
   // Always a text box: a number box drops the commas of a list ("1, 2" becomes 12) and
   // accepts forms the engine reads differently. The values are checked on Add rule.
   const numberColumn = numeric(column?.type ?? '');
@@ -554,12 +571,17 @@ const INTEGER = /^-?\d+$/;
 // Plain decimals only: no hex, no exponent, no thousands separators.
 const DECIMAL = /^-?(?:\d+(?:\.\d+)?|\.\d+)$/;
 const isList = (op: string) => op === 'in' || op === 'not_in';
+/** Joins the options chosen for an enum list; never part of an option the engine sends. */
+const OPTION_SEPARATOR = '\u001f';
 /**
  * The typed text, split into items only for the list operators. A comma inside a single value is
- * part of that value ("too expensive, will think"); text columns keep their spaces.
+ * part of that value ("too expensive, will think"); text columns keep their spaces. Options picked
+ * from an enum are sent exactly as the engine lists them, never split or trimmed.
  */
 function conditionItems(condition: RuleCondition, column?: OutputColumn): string[] {
   const raw = String(condition.value ?? '');
+  if (column?.values)
+    return isList(condition.op) ? raw.split(OPTION_SEPARATOR).filter((item) => item !== '') : [raw];
   const text = column?.type === 'string' || !column;
   if (!isList(condition.op)) return [text ? raw : raw.trim()];
   return raw.split(',').map((item) => item.trim());
@@ -570,6 +592,12 @@ function validateCondition(condition: RuleCondition, plan: PlanCard): string[] {
   const values = conditionItems(condition, column);
   if (column?.type === 'boolean' && values.some((value) => value !== 'true' && value !== 'false'))
     return ['Choose Yes or No'];
+  if (column?.values) {
+    // Enum options are sent exactly as listed; only check that one was picked.
+    if (!values.length || values.some((value) => !column.values!.includes(value)))
+      return ['Choose at least one option'];
+    return [];
+  }
   if (values.some((value) => !value.trim())) return ['Enter a value'];
   if (column?.type === 'integer' && values.some((value) => !INTEGER.test(value)))
     return ['Whole numbers only'];

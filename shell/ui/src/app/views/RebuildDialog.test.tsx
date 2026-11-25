@@ -493,3 +493,70 @@ it('focus is trapped inside the dialog', () => {
   fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
   expect(document.activeElement).toBe(last);
 });
+
+it('enum list options are sent exactly as listed', async () => {
+  const currentPlan: PlanCard = {
+    ...recordedPlan,
+    outputColumns: [
+      {
+        name: 'objection',
+        type: 'string',
+        values: ['too expensive, will think', 'not now', ' padded '],
+      },
+    ],
+  };
+  const dialog = renderDialog(vi.fn(), currentPlan);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Review flag' }));
+  fireEvent.change(within(dialog).getByLabelText('Field'), {
+    target: { value: 'answer.objection' },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'in' } });
+  // Nothing chosen yet: refused.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('Choose at least one option');
+  const select = within(dialog).getByLabelText('Value') as HTMLSelectElement;
+  expect(select.multiple).toBe(true);
+  for (const option of Array.from(select.options))
+    option.selected = option.value === 'too expensive, will think' || option.value === ' padded ';
+  fireEvent.change(select);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  await vi.waitFor(() => {
+    const call = mockBridge.calls.find((item) => item.method === 'job/rebuildRules');
+    expect(call?.params).toEqual({
+      job: 'job-one',
+      rules: [
+        {
+          kind: 'review_flag',
+          name: 'review flag 1',
+          match: 'all',
+          // Not split at the comma, not trimmed.
+          conditions: [
+            {
+              field: 'answer.objection',
+              op: 'in',
+              value: ['too expensive, will think', ' padded '],
+            },
+          ],
+        },
+      ],
+    });
+  });
+});
+
+it('number values use a text box (a number box drops the commas of a list)', () => {
+  const currentPlan: PlanCard = {
+    ...recordedPlan,
+    outputColumns: [
+      { name: 'count', type: 'integer' },
+      { name: 'score', type: 'number' },
+    ],
+  };
+  const dialog = renderDialog(vi.fn(), currentPlan);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Review flag' }));
+  for (const field of ['answer.count', 'answer.score']) {
+    fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: field } });
+    fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'in' } });
+    expect((within(dialog).getByLabelText('Value') as HTMLInputElement).type).toBe('text');
+  }
+});
