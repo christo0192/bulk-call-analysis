@@ -49,6 +49,13 @@ export function stepStatuses(state: string | undefined): StepStatus[] {
   }
   return statuses;
 }
+/** Each step's state in words for screen readers; on screen it is a tick or a colour. */
+const statusWords: Record<StepStatus, string> = {
+  done: 'Done',
+  current: 'Current step',
+  waiting: '',
+  todo: 'Not started',
+};
 export function formatKb(size: number): string {
   return `${Math.max(1, Math.ceil(size / 1024))} KB`;
 }
@@ -90,8 +97,13 @@ export function Rail({ project, state }: { project: string; state?: string }) {
       <ol class="steps">
         {stepNames.map((name, i) => (
           <li class={statuses[i]} key={name}>
-            <span class="step-marker">{statuses[i] === 'done' ? '✓' : ''}</span>
+            <span class="step-marker" aria-hidden="true">
+              {statuses[i] === 'done' ? '✓' : ''}
+            </span>
             <span>
+              {statusWords[statuses[i]!] && (
+                <span class="sr-only">{statusWords[statuses[i]!]}: </span>
+              )}
               {name}
               {statuses[i] === 'waiting' && <small>waiting for you</small>}
             </span>

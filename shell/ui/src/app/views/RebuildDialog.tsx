@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { bridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import { openProjectFile } from '../../engine/shellCommands';
+import { useModalFocus } from '../hooks/useModalFocus';
 import type {
   PlanCard,
   Rule,
@@ -41,7 +42,6 @@ export function RebuildDialog({
   onRebuilt?: () => void;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
-  const opener = useRef<Element | null>(null);
   const [rules, setRules] = useState<DialogRule[]>(
     plan.rules.flatMap((rule) =>
       rule.definition
@@ -68,42 +68,7 @@ export function RebuildDialog({
   const hasNumberColumn = plan.outputColumns.some((column) => numeric(column.type));
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
-  useEffect(() => {
-    opener.current = document.activeElement;
-    const focusFirst = requestAnimationFrame(() =>
-      dialog.current?.querySelector<HTMLElement>('input, select, button')?.focus(),
-    );
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== 'Tab' || !dialog.current) return;
-      const items = [
-        ...dialog.current.querySelectorAll<HTMLElement>('button, input, select, textarea'),
-      ].filter(
-        (item) => !(item as HTMLButtonElement | HTMLInputElement | HTMLSelectElement).disabled,
-      );
-      const first = items[0];
-      const last = items[items.length - 1];
-      if (
-        first &&
-        last &&
-        ((event.shiftKey && document.activeElement === first) ||
-          (!event.shiftKey && document.activeElement === last))
-      ) {
-        event.preventDefault();
-        (event.shiftKey ? last : first).focus();
-      }
-    };
-    document.addEventListener('keydown', handler);
-    return () => {
-      cancelAnimationFrame(focusFirst);
-      document.removeEventListener('keydown', handler);
-      opener.current instanceof HTMLElement && opener.current.focus();
-    };
-  }, []);
+  useModalFocus(dialog, onClose);
   useEffect(() => {
     if (firstJob.current !== job) onCloseRef.current();
   }, [job]);

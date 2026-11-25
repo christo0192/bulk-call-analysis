@@ -31,9 +31,15 @@ button {
 }
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 2px solid var(--acc);
   outline-offset: 2px;
+}
+/* Headings take focus only so that, after a view changes, keyboard and screen-reader users
+   start from them; no ring when that follows a mouse click. */
+h1[tabindex='-1']:focus:not(:focus-visible) {
+  outline: none;
 }
 .banner {
   background: var(--amb);
@@ -45,8 +51,9 @@ textarea:focus-visible {
   height: 100%;
   flex: 1;
   min-height: 0;
-  max-width: 1280px;
-  margin: auto;
+  /* The app fills its desktop window: a centred 1280 px frame left wide grey margins on a full
+     HD screen. */
+  width: 100%;
   background: var(--win);
   display: flex;
 }
@@ -283,6 +290,7 @@ footer b {
 }
 .empty {
   margin: auto;
+  padding: 24px;
   color: var(--mut);
   text-align: center;
 }
@@ -377,8 +385,12 @@ footer b {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  * {
+  /* `*` alone misses ::before and ::after, which can animate too. */
+  *,
+  *::before,
+  *::after {
     scroll-behavior: auto !important;
     transition: none !important;
+    animation: none !important;
   }
 }

@@ -12,6 +12,30 @@ const duration = (seconds: number) => {
   const hours = Math.floor(minutes / 60);
   return minutes % 60 ? `${hours} h ${minutes % 60} min` : `${hours} h`;
 };
+/** The engine's internal step names, in the words the screens use. */
+const STEP_WORDS: Record<string, string> = {
+  plan_proposed: 'plan proposed',
+  plan_approved: 'plan approved',
+  pulling: 'pulling transcripts',
+  masking_sample: 'masking the sample',
+  sample_running: 'reading the sample',
+  sample_ready: 'sample ready to check',
+  sample_approved: 'sample approved',
+  full_running: 'reading every lead',
+  quote_check: 'checking quotes',
+  building_output: 'building the workbook',
+  verifying: 'verifying',
+  done_with_issues: 'done with issues',
+};
+/** A step's state in words, for screen readers: the icons alone are only shape and colour. */
+const STEP_STATUS: Record<string, string> = {
+  done: 'Done',
+  active: 'In progress',
+  todo: 'Not started',
+};
+/** Activity lines come from the engine; replace its internal step names with plain words. */
+export const plainActivity = (text: string) =>
+  text.replace(/\b[a-z]+(?:_[a-z]+)+\b/g, (word) => STEP_WORDS[word] ?? word.replace(/_/g, ' '));
 const time = (ts: number) =>
   new Intl.DateTimeFormat(undefined, {
     weekday: 'short',
@@ -229,6 +253,27 @@ function AllowanceTile({ snapshot }: { snapshot: JobSnapshot }) {
   );
 }
 
+/** The latest value, but changed at most once per `ms`: a live region read out every second is noise. */
+export function useThrottled(value: string, ms: number): string {
+  const [shown, setShown] = useState(value);
+  const lastChange = useRef(0);
+  useEffect(() => {
+    if (value === shown) return;
+    const wait = lastChange.current + ms - Date.now();
+    const apply = () => {
+      lastChange.current = Date.now();
+      setShown(value);
+    };
+    if (wait <= 0) {
+      apply();
+      return;
+    }
+    const timer = window.setTimeout(apply, wait);
+    return () => window.clearTimeout(timer);
+  }, [value, shown, ms]);
+  return shown;
+}
+
 export function RunView({ id, onStalled }: { id: string; onStalled?: (text: string) => void }) {
   const [live, dispatch] = useReducer(reduce, id, initialJobLive);
   const liveStateRef = useRef<string | undefined>(undefined);
@@ -298,6 +343,13 @@ export function RunView({ id, onStalled }: { id: string; onStalled?: (text: stri
     };
   }, [id]);
   const snapshot = live.snapshot;
+  // What a screen reader hears about progress: at most every 10 seconds.
+  const progressWords = snapshot
+    ? `Read ${number(snapshot.progress.done)} of ${number(snapshot.progress.total)} ${
+        snapshot.progress.phase === 'sample' ? 'sample leads' : 'leads'
+      }.`
+    : '';
+  const announcedProgress = useThrottled(progressWords, 10_000);
   if (!snapshot)
     return (
       <div class="phase-view" data-testid="run-view">
@@ -375,6 +427,9 @@ export function RunView({ id, onStalled }: { id: string; onStalled?: (text: stri
           </button>
         </div>
       )}
+      <p class="sr-only" aria-live="polite">
+        {announcedProgress}
+      </p>
       <section class="run-hero">
         <div class="run-big-number">
           <strong>{number(progress.done)}</strong>
@@ -488,16 +543,21 @@ export function RunView({ id, onStalled }: { id: string; onStalled?: (text: stri
           <h3>Steps</h3>
           {snapshot.steps.map((step) => (
             <div class="step-row" key={step.id}>
-              <span class={`step-icon ${step.status}`}>
-                {step.status === 'done'
-                  ? '✓'
-                  : step.status === 'active'
-                    ? '◌'
-                    : step.status === 'waiting_for_you'
-                      ? '◉'
-                      : ''}
+              <span class={`step-icon ${step.status}`} aria-hidden="true">
+                {step.status === 'done' ? (
+                  '✓'
+                ) : step.status === 'active' ? (
+                  <span class="spinner" />
+                ) : step.status === 'waiting_for_you' ? (
+                  '◉'
+                ) : (
+                  ''
+                )}
               </span>
               <span>
+                {STEP_STATUS[step.status] && (
+                  <span class="sr-only">{STEP_STATUS[step.status]}: </span>
+                )}
                 {step.status === 'waiting_for_you'
                   ? 'Waiting for you'
                   : step.label.replace(/\s*\([^)]*n\/N[^)]*\)/gi, '')}
@@ -511,10 +571,11 @@ export function RunView({ id, onStalled }: { id: string; onStalled?: (text: stri
           {snapshot.recent
             .slice()
             .reverse()
-            .map((item) => (
-              <div class="recent-row" key={`${item.ts}-${item.text}`}>
+            .map((item, index) => (
+              // Two entries can share a time and text (a pause, a resume, a pause again).
+              <div class="recent-row" key={`${index}-${item.ts}`}>
                 <time>{time(item.ts)}</time>
-                <span>{item.text}</span>
+                <span>{plainActivity(item.text)}</span>
               </div>
             ))}
         </section>

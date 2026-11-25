@@ -37,4 +37,4 @@ This repository is public. Read this file fully before you change anything.
 
 ## UI
 
-The desktop UI uses Preact 10, TypeScript, Vite, and plain CSS. From `shell/ui`, run `npm run dev` for the mock bridge, `npm run typecheck`, `npm test`, `npm run build`, and `npm run e2e`. Keep labels wrap-safe: do not use ellipsis, clipping, or fixed heights on text containers. Use real buttons and links for interactions, no inline scripts, and synthetic fixtures only. The visual specification is `shell/ui/design/mockups.html`.
+The desktop UI uses Preact 10, TypeScript, Vite, and plain CSS. From `shell/ui`, run `npm run dev` for the mock bridge, `npm run typecheck`, `npm test`, `npm run build`, and `npm run e2e`. Keep labels wrap-safe: do not use ellipsis, clipping, or fixed heights on text containers. Use real buttons and links for interactions, no inline scripts, and synthetic fixtures only. The visual specification is `shell/ui/design/mockups.html`. The UI guide, [`docs/ui.md`](docs/ui.md), covers the mock switches, the UI rules (keyboard, screen readers, reduced motion) and the screen test.

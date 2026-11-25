@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { bridge } from '../engine/bridge';
 import type { Project } from '../engine/types';
 import { EngineError } from '../engine/client';
@@ -38,9 +38,21 @@ export function Sidebar() {
   const [title, setTitle] = useState('');
   const [createError, setCreateError] = useState<string | null>(null);
   const open = newProjectOpen.value;
+  // `autofocus` only works when the page loads, so move focus into the title box by hand.
+  const titleBox = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (!open) setTitle('');
+    else titleBox.current?.focus();
   }, [open]);
+  // The form (and the focused title box) goes away after Create; put focus on the new project
+  // instead of losing it to the page.
+  const projectButtons = useRef(new Map<string, HTMLButtonElement>());
+  const [focusProject, setFocusProject] = useState<string | null>(null);
+  useEffect(() => {
+    if (!focusProject) return;
+    projectButtons.current.get(focusProject)?.focus();
+    setFocusProject(null);
+  }, [focusProject]);
   const allowanceText = (value: string | number | undefined) =>
     value === undefined ? 'unknown' : typeof value === 'number' ? `${value}% used` : value;
   async function create() {
@@ -53,6 +65,7 @@ export function Sidebar() {
       addProject(created);
       selectedProject.value = project;
       newProjectOpen.value = false;
+      setFocusProject(project);
     } catch (error) {
       setCreateError(EngineError.from(error).message);
     }
@@ -85,8 +98,8 @@ export function Sidebar() {
           <input
             id="project-title"
             value={title}
+            ref={titleBox}
             onInput={(event) => setTitle((event.currentTarget as HTMLInputElement).value)}
-            autoFocus
           />
           {createError && <p class="error">{createError}</p>}
           <button class="primary" type="submit">
@@ -106,6 +119,10 @@ export function Sidebar() {
             <button
               class={`project ${selectedProject.value === project.project ? 'selected' : ''}`}
               key={project.project}
+              ref={(element) => {
+                if (element) projectButtons.current.set(project.project, element);
+                else projectButtons.current.delete(project.project);
+              }}
               onClick={() => {
                 selectedProject.value = project.project;
               }}
