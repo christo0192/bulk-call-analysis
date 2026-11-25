@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/preact';
 import { mockBridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
-import { plan } from '../../mock/fixtures/data';
+import recordedPlanFixture from '../../mock/fixtures/engine/job-plan.json';
 import { openProjectFile } from '../../engine/shellCommands';
 import { RebuildDialog } from './RebuildDialog';
 import type { PlanCard } from '../../engine/types';
@@ -12,35 +12,37 @@ vi.mock('../../engine/shellCommands', () => ({ openProjectFile: vi.fn(async () =
 
 beforeEach(() => mockBridge.resetForTest());
 
-const recordedPlan: PlanCard = {
-  ...plan,
+const recordedPlan = {
+  ...recordedPlanFixture,
   job: 'job-one',
   project: 'project-one',
-  outputColumns: [{ name: 'answer', type: 'string' }],
   rules: [],
-};
+} as unknown as PlanCard;
 const planWithRules: PlanCard = {
   ...recordedPlan,
+  outputColumns: [
+    { name: 'asked_discount', type: 'boolean' },
+    { name: 'discount_percent', type: 'number' },
+    { name: 'reason', type: 'string' },
+  ],
   rules: [
     {
-      kind: 'threshold_group',
-      summary: 'Answer from the call, not metadata',
+      kind: 'in_scope',
+      summary: 'Asked for a discount',
       definition: {
-        kind: 'threshold_group',
-        name: 'Answer from the call, not metadata',
-        field: 'answer.answer',
-        edges: [1],
-        labels: ['low', 'high'],
+        kind: 'in_scope',
+        match: 'all',
+        conditions: [{ field: 'answer.asked_discount', op: 'eq', value: true }],
       },
     },
     {
       kind: 'review_flag',
-      summary: 'Include a short masked quote for every answer',
+      summary: 'Discount reason is present',
       definition: {
         kind: 'review_flag',
-        name: 'Review answer',
+        name: 'discount reason present',
         match: 'all',
-        conditions: [{ field: 'answer.answer', op: 'contains', value: 'urgent' }],
+        conditions: [{ field: 'answer.reason', op: 'not_null' }],
       },
     },
   ],
@@ -55,12 +57,45 @@ const renderDialog = (onClose = vi.fn(), currentPlan = recordedPlan) => {
   return screen.getByRole('dialog');
 };
 
-it('lists current rules and removes one', () => {
+it('removing a rule removes it from the payload', async () => {
   const dialog = renderDialog(vi.fn(), planWithRules);
-  expect(within(dialog).getByText('Answer from the call, not metadata')).toBeInTheDocument();
+  expect(within(dialog).getByText('Asked for a discount')).toBeInTheDocument();
   expect(within(dialog).getAllByRole('button', { name: 'Remove' })).toHaveLength(2);
   fireEvent.click(within(dialog).getAllByRole('button', { name: 'Remove' })[0]!);
   expect(within(dialog).getAllByRole('button', { name: 'Remove' })).toHaveLength(1);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('removes every rule');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild without rules' }));
+  await vi.waitFor(() =>
+    expect(mockBridge.calls).toContainEqual({
+      method: 'job/rebuildRules',
+      params: { job: 'job-one', rules: [planWithRules.rules[1]!.definition] },
+    }),
+  );
+});
+
+it('empty list asks first', () => {
+  const dialog = renderDialog();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('This removes every rule');
+  expect(mockBridge.calls).not.toContainEqual(
+    expect.objectContaining({ method: 'job/rebuildRules' }),
+  );
+});
+
+it('sends kept and new rules together', async () => {
+  const dialog = renderDialog(vi.fn(), planWithRules);
+  fireEvent.input(within(dialog).getByLabelText('Edges'), { target: { value: '10, 20' } });
+  fireEvent.input(within(dialog).getByLabelText('Labels'), {
+    target: { value: 'low, medium, high' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  await vi.waitFor(() => {
+    const call = mockBridge.calls.find((item) => item.method === 'job/rebuildRules');
+    expect(call?.params).toMatchObject({ job: 'job-one' });
+    expect((call?.params as { rules: unknown[] }).rules).toHaveLength(3);
+  });
 });
 
 it('adds a bands rule and validates edges and labels', () => {
@@ -128,7 +163,116 @@ it('adds an in scope rule with typed values', async () => {
   );
 });
 
-it('rebuild success shows the new file with open', async () => {
+it('each operator and type sends the form the engine accepts', async () => {
+  const currentPlan: PlanCard = {
+    ...recordedPlan,
+    outputColumns: [
+      { name: 'count', type: 'integer' },
+      { name: 'score', type: 'number' },
+      { name: 'flag', type: 'boolean' },
+      { name: 'label', type: 'string' },
+    ],
+  };
+  const dialog = renderDialog(vi.fn(), currentPlan);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'In scope' }));
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.count' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'gt' } });
+  fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: '3' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.score' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'in' } });
+  fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: '1.5, 2.5' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.flag' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'eq' } });
+  fireEvent.change(within(dialog).getByLabelText('Value'), { target: { value: 'true' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.label' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'contains' } });
+  fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: 'urgent' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  await vi.waitFor(() => {
+    const call = mockBridge.calls.find((item) => item.method === 'job/rebuildRules');
+    expect(call?.params).toMatchObject({
+      rules: [
+        { kind: 'in_scope', conditions: [{ field: 'answer.count', op: 'gt', value: 3 }] },
+        { kind: 'in_scope', conditions: [{ field: 'answer.score', op: 'in', value: [1.5, 2.5] }] },
+        { kind: 'in_scope', conditions: [{ field: 'answer.flag', op: 'eq', value: true }] },
+        {
+          kind: 'in_scope',
+          conditions: [{ field: 'answer.label', op: 'contains', value: 'urgent' }],
+        },
+      ],
+    });
+  });
+});
+
+it('empty and bad values are refused', () => {
+  const currentPlan: PlanCard = {
+    ...recordedPlan,
+    outputColumns: [
+      { name: 'count', type: 'integer' },
+      { name: 'flag', type: 'boolean' },
+    ],
+  };
+  const dialog = renderDialog(vi.fn(), currentPlan);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'In scope' }));
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.count' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'eq' } });
+  fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: '' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('Enter a value');
+  fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: '3.7' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('Whole numbers only');
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.flag' } });
+  fireEvent.change(within(dialog).getByLabelText('Value'), { target: { value: '' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('Choose Yes or No');
+  expect(mockBridge.calls).not.toContainEqual(
+    expect.objectContaining({ method: 'job/rebuildRules' }),
+  );
+});
+
+it('kept is_null rules are sent without a value', async () => {
+  const currentPlan: PlanCard = {
+    ...recordedPlan,
+    outputColumns: [{ name: 'reason', type: 'string' }],
+    rules: [
+      {
+        kind: 'review_flag',
+        summary: 'Missing reason',
+        definition: {
+          kind: 'review_flag',
+          name: 'missing reason',
+          match: 'all',
+          conditions: [{ field: 'answer.reason', op: 'is_null', value: 'should be removed' }],
+        },
+      },
+    ],
+  };
+  const dialog = renderDialog(vi.fn(), currentPlan);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  await vi.waitFor(() =>
+    expect(mockBridge.calls).toContainEqual({
+      method: 'job/rebuildRules',
+      params: {
+        job: 'job-one',
+        rules: [
+          {
+            kind: 'review_flag',
+            name: 'missing reason',
+            match: 'all',
+            conditions: [{ field: 'answer.reason', op: 'is_null' }],
+          },
+        ],
+      },
+    }),
+  );
+});
+
+it('success shows the name only and opens by path', async () => {
   const dialog = renderDialog(vi.fn(), planWithRules);
   fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
   // The dialog shows the file name only and opens by the project-relative path.
@@ -152,10 +296,84 @@ it('invalid rules shows the engine detail', async () => {
   expect(await within(dialog).findByRole('alert')).toHaveTextContent('Edges overlap');
 });
 
+it('second in scope is blocked', () => {
+  const dialog = renderDialog(vi.fn(), planWithRules);
+  expect(within(dialog).getByRole('button', { name: 'In scope' })).toBeDisabled();
+});
+
+it('bands refuse empty and non numeric edges', () => {
+  const dialog = renderDialog(vi.fn(), planWithNumberColumn);
+  fireEvent.input(within(dialog).getByLabelText('Edges'), { target: { value: '' } });
+  fireEvent.input(within(dialog).getByLabelText('Labels'), { target: { value: 'low' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('not a finite number');
+  fireEvent.input(within(dialog).getByLabelText('Edges'), { target: { value: 'ten' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('not a finite number');
+});
+
+it('double click sends one call', async () => {
+  const dialog = renderDialog(vi.fn(), planWithRules);
+  fireEvent.doubleClick(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  await vi.waitFor(() =>
+    expect(mockBridge.calls.filter((call) => call.method === 'job/rebuildRules')).toHaveLength(1),
+  );
+});
+
+it('rejected rule can be removed and rebuilt', async () => {
+  mockBridge.setResponse('job/rebuildRules', async () => {
+    throw new EngineError(-32000, 'invalid', 'invalid_rules', { detail: 'Bad rule' });
+  });
+  const dialog = renderDialog(vi.fn(), planWithRules);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  await within(dialog).findByText('Bad rule');
+  fireEvent.click(within(dialog).getAllByRole('button', { name: 'Remove' })[0]!);
+  mockBridge.setResponse('job/rebuildRules', async () => ({
+    job: 'job-one',
+    name: 'results.xlsx',
+    path: 'jobs/job-one/output/results.xlsx',
+    rebuild: 1,
+  }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  expect(await within(dialog).findByText(/Rebuilt: results\.xlsx/)).toBeInTheDocument();
+});
+
 it('escape closes and returns focus', () => {
   const onClose = vi.fn();
-  renderDialog(onClose);
+  const opener = document.createElement('button');
+  opener.textContent = 'open';
+  document.body.append(opener);
+  opener.focus();
+  let view: ReturnType<typeof render>;
+  view = render(
+    <RebuildDialog
+      job="job-one"
+      plan={recordedPlan}
+      onClose={() => {
+        onClose();
+        view.unmount();
+      }}
+    />,
+  );
   fireEvent.keyDown(document, { key: 'Escape' });
+  expect(onClose).toHaveBeenCalledOnce();
+  expect(document.activeElement).toBe(opener);
+  opener.remove();
+});
+
+it('re-render does not move focus', () => {
+  const onClose = vi.fn();
+  const view = render(<RebuildDialog job="job-one" plan={recordedPlan} onClose={onClose} />);
+  const input = view.getByLabelText('Name');
+  input.focus();
+  view.rerender(<RebuildDialog job="job-one" plan={recordedPlan} onClose={onClose} />);
+  expect(document.activeElement).toBe(input);
+});
+
+it('closes when the job changes', () => {
+  const onClose = vi.fn();
+  const view = render(<RebuildDialog job="job-one" plan={recordedPlan} onClose={onClose} />);
+  view.rerender(<RebuildDialog job="job-two" plan={recordedPlan} onClose={onClose} />);
   expect(onClose).toHaveBeenCalledOnce();
 });
 

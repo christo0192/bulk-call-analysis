@@ -34,16 +34,42 @@ it('renders the recorded outputs', async () => {
 });
 
 it('duration includes time asleep', async () => {
-  mockBridge.setResponse('job/outputs', async () => ({
-    ...outputs,
-    durationSeconds: 3600,
-    asleepSeconds: 1680,
-  }));
+  mockBridge.setResponse(
+    'job/outputs',
+    async () =>
+      ({
+        ...outputs,
+        durationSeconds: 3600,
+        asleepSeconds: 1680,
+      }) as never,
+  );
   renderDone();
   expect(await screen.findByText(/including 28 min asleep/)).toBeInTheDocument();
 });
 
-it('open results calls open_project_file with the newest workbook', async () => {
+it('newest workbook compares integers', async () => {
+  mockBridge.setResponse(
+    'job/outputs',
+    async () =>
+      ({
+        ...outputs,
+        files: [
+          ...outputs.files,
+          {
+            ...outputs.files[0],
+            name: 'results.v2.xlsx',
+            path: 'jobs/job-one/output/results.v2.xlsx',
+            specVersion: 2,
+          },
+          {
+            ...outputs.files[0],
+            name: 'results.v1.rebuild2.xlsx',
+            path: 'jobs/job-one/output/results.v1.rebuild2.xlsx',
+            rebuild: 2,
+          },
+        ],
+      }) as never,
+  );
   renderDone();
   await screen.findByRole('button', { name: 'Open results' });
   fireEvent.click(screen.getByRole('button', { name: 'Open results' }));
@@ -53,6 +79,86 @@ it('open results calls open_project_file with the newest workbook', async () => 
       'jobs/job-one/output/results.v1.xlsx',
     ),
   );
+});
+
+it('opens files by their project path', async () => {
+  mockBridge.setResponse(
+    'job/outputs',
+    async () =>
+      ({
+        ...outputs,
+        files: [
+          { ...outputs.files[0], path: 'jobs/job-one/output/latest.xlsx' },
+          { ...outputs.files[2], path: 'jobs/job-one/output/verify.md' },
+          {
+            name: 'summary.md',
+            path: 'jobs/job-one/output/summary.md',
+            kind: 'summary',
+            specVersion: 1,
+            rebuild: null,
+          },
+        ],
+      }) as never,
+  );
+  renderDone();
+  fireEvent.click(await screen.findByRole('button', { name: 'Open results' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Open summary' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Open verify report' }));
+  await waitFor(() => {
+    expect(openProjectFile).toHaveBeenCalledWith('project-one', 'jobs/job-one/output/latest.xlsx');
+    expect(openProjectFile).toHaveBeenCalledWith('project-one', 'jobs/job-one/output/summary.md');
+    expect(openProjectFile).toHaveBeenCalledWith('project-one', 'jobs/job-one/output/verify.md');
+  });
+});
+
+it('null values are never shown as zero or 1970', async () => {
+  mockBridge.setResponse('job/outputs', async () => ({
+    ...outputs,
+    finishedAt: null,
+    durationSeconds: null,
+    reconciliation: null,
+  }));
+  renderDone();
+  const hero = await screen.findByText("The reconciliation isn't available");
+  expect(hero.closest('.done-hero')).not.toHaveTextContent('0');
+  expect(hero.closest('.done-hero')).not.toHaveTextContent('1970');
+});
+
+it('missing reconciliation shows no tick', async () => {
+  mockBridge.setResponse('job/outputs', async () => ({ ...outputs, reconciliation: null }));
+  renderDone();
+  const hero = await screen.findByText("The reconciliation isn't available");
+  expect(hero.closest('.done-hero')).not.toHaveTextContent('✓');
+});
+
+it('stale answer from another job is ignored', async () => {
+  let releaseFirst!: (value: unknown) => void;
+  const first = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  mockBridge.setResponse(
+    'job/outputs',
+    async (params) =>
+      ((params as { job: string }).job === 'job-one'
+        ? first
+        : { ...outputs, headline: 'job two' }) as never,
+  );
+  const view = renderDone();
+  view.rerender(
+    <DoneView id="job-two" project="project-one" rebuildOpen={false} onCloseRebuild={vi.fn()} />,
+  );
+  expect(await screen.findByText('job two')).toBeInTheDocument();
+  releaseFirst({ ...outputs, headline: 'stale job one' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(screen.queryByText('stale job one')).toBeNull();
+});
+
+it('plan failure still shows results', async () => {
+  mockBridge.setResponse('job/plan', async () => {
+    throw new Error('plan unavailable');
+  });
+  renderDone();
+  expect(await screen.findByRole('button', { name: 'Open results' })).toBeInTheDocument();
 });
 
 it('open errors show plain words', async () => {
@@ -70,7 +176,7 @@ it('open errors show plain words', async () => {
   expect(await screen.findByRole('alert')).toHaveTextContent("The app can't open that file type");
 });
 
-it('rebuild success stays visible while outputs reload', async () => {
+it('reloads after a rebuild', async () => {
   let releaseOutputs!: () => void;
   const outputsReloaded = new Promise<void>((resolve) => {
     releaseOutputs = resolve;
@@ -131,6 +237,25 @@ it('issues view lists lead ids', async () => {
   renderDone();
   fireEvent.click(await screen.findByRole('button', { name: 'View' }));
   expect(screen.getByText('lead-9')).toBeInTheDocument();
+});
+
+it('issue list says first 50', async () => {
+  mockBridge.setResponse('job/outputs', async () => ({
+    ...outputs,
+    issues: [
+      {
+        kind: 'flagged',
+        count: 75,
+        text: 'Flagged leads',
+        leads: Array.from({ length: 75 }, (_, i) => `lead-${i + 1}`),
+      },
+    ],
+  }));
+  renderDone();
+  fireEvent.click(await screen.findByRole('button', { name: 'View' }));
+  expect(screen.getByText('First 50 of 75')).toBeInTheDocument();
+  expect(screen.getByText(/lead-50/)).toBeInTheDocument();
+  expect(screen.queryByText(/lead-51/)).toBeNull();
 });
 
 it('run again focuses the composer with a prefix', async () => {

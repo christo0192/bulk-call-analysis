@@ -1,7 +1,8 @@
 import { beforeEach, expect, it } from 'vitest';
-import { cleanup, render, screen, within } from '@testing-library/preact';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/preact';
 import running from '../../mock/fixtures/engine/job-snapshot-running.json';
 import { mockBridge } from '../../engine/bridge';
+import { EngineError } from '../../engine/client';
 import { RunView } from './RunView';
 
 beforeEach(() => mockBridge.resetForTest());
@@ -52,11 +53,32 @@ it('credit buttons call the engine', async () => {
   buttons[0]?.click();
   expect(mockBridge.calls.some((call) => call.method === 'job/resume')).toBe(true);
 });
-it('stalled offers no pause', async () => {
-  mockBridge.setResponse('job/snapshot', async () => snapshot({ state: 'stalled' }));
+it('stalled banner explains the engine reason and has no cancel', async () => {
+  mockBridge.setResponse('job/snapshot', async () =>
+    snapshot({
+      state: 'stalled',
+      stall: { reason: 'pull_failed', text: 'Pulling the transcripts failed.' },
+    }),
+  );
   render(<RunView id="job-one" />);
   const banner = await screen.findByRole('status');
-  expect(within(banner).queryByRole('button', { name: 'Pause' })).toBeNull();
+  expect(banner).toHaveTextContent('Pulling the transcripts failed.');
+  expect(screen.queryByRole('button', { name: 'Pause' })).toBeNull();
+});
+
+it('banner resume is sent once and shows the draining reason', async () => {
+  mockBridge.setResponse('job/snapshot', async () =>
+    snapshot({ state: 'paused', pauseReason: 'network', resumeAt: null }),
+  );
+  mockBridge.setResponse('job/resume', async () => {
+    throw new EngineError(-32000, 'still running', 'job_running');
+  });
+  render(<RunView id="job-one" />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Resume' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Still finishing the leads in progress. Try again in a moment.',
+  );
+  expect(mockBridge.calls.filter((call) => call.method === 'job/resume')).toHaveLength(1);
 });
 it('failed job shows the engine reason', async () => {
   mockBridge.setResponse('job/snapshot', async () =>

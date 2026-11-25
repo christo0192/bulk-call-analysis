@@ -7,10 +7,14 @@ import { mockBridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import { plan, sample } from '../../mock/fixtures/data';
 import { adaptPlan } from '../../engine/adapters';
+import { openProjectFile } from '../../engine/shellCommands';
+import { selectedProject } from '../../state/store';
+
+vi.mock('../../engine/shellCommands', () => ({ openProjectFile: vi.fn(async () => null) }));
 
 beforeEach(() => {
-  mockBridge.calls = [];
-  mockBridge.clearResponses();
+  mockBridge.resetForTest();
+  selectedProject.value = 'p1';
   mockBridge.setResponse('job/plan', async (params) => ({
     ...plan,
     job: (params as { job: string }).job,
@@ -186,4 +190,10 @@ it('not now collapses the start card and it can be reopened', async () => {
   fireEvent.click(await screen.findByRole('button', { name: 'Not now' }));
   fireEvent.click(screen.getByRole('button', { name: 'Start the full run' }));
   expect(screen.getByRole('button', { name: 'Not now' })).toBeInTheDocument();
+});
+
+it('sample card opens the sample file by path', async () => {
+  render(<SampleCard job="job-one" />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Open sample.csv' }));
+  expect(openProjectFile).toHaveBeenCalledWith('p1', 'sample.csv');
 });
