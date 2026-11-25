@@ -94,6 +94,11 @@ class MemoryBackend(ApiBackend):
     async def call(self, method: str, params: dict[str, object]) -> object:
         if method == "projects/list":
             return list(self.projects.values())
+        if method == "projects/jobs":
+            project = _string(params, "project")
+            if project not in self.projects:
+                raise RpcError(-32001, "Project not found", {"reason": "project_not_found"})
+            return {"jobs": []}
         if method == "projects/create":
             project_id = _string(params, "project")
             title = _string(params, "title")
@@ -104,12 +109,28 @@ class MemoryBackend(ApiBackend):
         if method == "files/list":
             _string(params, "project")
             return []
+        if method == "files/path":
+            _string(params, "project")
+            _string(params, "name")
+            raise RpcError(-32001, "File not found", {"reason": "file_not_found"})
+        if method == "chat/history":
+            _string(params, "project")
+            return {"entries": [], "more": False}
+        if method == "allowance/status":
+            return {"codex": None, "claude": None}
+        if method == "ids/attach":
+            _string(params, "project")
+            _string(params, "text")
+            raise RpcError(-32601, "Method not found")
         if method == "settings/get":
             return dict(self.settings)
         if method == "settings/set":
             self.settings.update(params)
             return dict(self.settings)
         if method == "job/status":
+            job = _string(params, "job")
+            return self.jobs.get(job, {"job": job, "state": "unknown"})
+        if method in {"job/plan", "job/sample", "job/snapshot", "job/outputs"}:
             job = _string(params, "job")
             return self.jobs.get(job, {"job": job, "state": "unknown"})
         if method == "auth/status":
@@ -149,8 +170,13 @@ class ApiService:
             "settings/get",
             "settings/set",
             "projects/list",
+            "projects/jobs",
             "projects/create",
             "files/list",
+            "files/path",
+            "chat/history",
+            "allowance/status",
+            "ids/attach",
             "chat/send",
             "chat/stop",
             "job/status",
@@ -160,6 +186,10 @@ class ApiService:
             "job/pause",
             "job/resume",
             "job/rebuildRules",
+            "job/plan",
+            "job/sample",
+            "job/snapshot",
+            "job/outputs",
             "auth/claudeLogin",
             "auth/codexLogin",
             "auth/status",
@@ -210,10 +240,19 @@ class ApiService:
         common: dict[str, set[str]] = {
             "setup/markManual": {"item"},
             "files/list": {"project"},
+            "files/path": {"project", "name"},
+            "projects/jobs": {"project"},
+            "chat/history": {"project", "before", "limit"},
+            "allowance/status": set(),
+            "ids/attach": {"project", "text"},
             "projects/create": {"project", "title"},
             "chat/send": {"project", "text"},
             "chat/stop": {"project"},
             "job/status": {"job"},
+            "job/plan": {"job", "specVersion"},
+            "job/sample": {"job"},
+            "job/snapshot": {"job"},
+            "job/outputs": {"job"},
             "job/approvePlan": {"job", "expectedSpecVersion"},
             "job/approveSample": {"job", "expectedSpecVersion"},
             "job/startFull": {"job"},
@@ -237,6 +276,7 @@ class ApiService:
         if method == "settings/set":
             settings_allowed = {
                 "connectorPath",
+                "keyPath",
                 "workerCount",
                 "retentionDays",
                 "claudeModel",
@@ -249,6 +289,8 @@ class ApiService:
                     raise RpcError(-32602, "Invalid params", {"field": key, "reason": "must be a string"})
             for key in ("workerCount", "retentionDays"):
                 value = data.get(key)
+                if key == "workerCount" and value is None:
+                    continue
                 if key in data and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
                     raise RpcError(
                         -32602, "Invalid params", {"field": key, "reason": "must be a positive integer"}
@@ -269,6 +311,17 @@ class ApiService:
         allowed: set[str] | None = common.get(method)
         if allowed is not None:
             _exact(data, allowed)
+        if method == "chat/history":
+            if "before" in data and (isinstance(data["before"], bool) or not isinstance(data["before"], int)):
+                raise RpcError(-32602, "Invalid params", {"field": "before", "reason": "must be an integer"})
+            if "limit" in data and (
+                isinstance(data["limit"], bool)
+                or not isinstance(data["limit"], int)
+                or not 1 <= data["limit"] <= 500
+            ):
+                raise RpcError(
+                    -32602, "Invalid params", {"field": "limit", "reason": "must be between 1 and 500"}
+                )
         if method == "os/powerStatus":
             on_ac, percent = data.get("onAc"), data.get("percent")
             if on_ac is not None and not isinstance(on_ac, bool):
@@ -285,6 +338,8 @@ class ApiService:
                     "Invalid params",
                     {"field": "percent", "reason": "must be between 0 and 100"},
                 )
+        if method == "job/plan" and "specVersion" in data:
+            _int(data, "specVersion")
         required: dict[str, tuple[str, ...]] = {
             "setup/markManual": ("item",),
             "files/list": ("project",),
@@ -292,6 +347,10 @@ class ApiService:
             "chat/send": ("project", "text"),
             "chat/stop": ("project",),
             "job/status": ("job",),
+            "job/plan": ("job",),
+            "job/sample": ("job",),
+            "job/snapshot": ("job",),
+            "job/outputs": ("job",),
             "job/approvePlan": ("job", "expectedSpecVersion"),
             "job/approveSample": ("job", "expectedSpecVersion"),
             "job/startFull": ("job",),

@@ -385,7 +385,9 @@ def test_recover_after_crash_in_each_phase(
     )
 
 
-@pytest.mark.timeout(5)
+# 15 s: a slow CI runner waited on the store lock (SQLite's busy wait is 5 s) and tripped 5 s; a real
+# hang still fails (see #31).
+@pytest.mark.timeout(15)
 def test_recover_fresh_runner_when_full_run_has_no_masking_left(
     coordinator: CoordinatorFixture, make_runner: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

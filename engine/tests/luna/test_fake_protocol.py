@@ -78,3 +78,8 @@ def test_fake_codex_selects_lead_from_bundle_token() -> None:
     prompt = "Return the answer.\n" + bundle.text
 
     assert fake_codex._lead_from_params({"input": [{"type": "text", "text": prompt}]}) == "10"
+
+
+def test_fake_codex_uses_defaults_without_a_scenario() -> None:
+    assert fake_codex._scenario(None) == {}
+    assert fake_codex._scenario(Path("__missing_fake_codex_scenario__.json")) == {}

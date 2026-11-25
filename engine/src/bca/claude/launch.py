@@ -236,6 +236,10 @@ async def run_turn(
             if event.kind == "rate_limit":
                 decision = rate_guard.inspect(event)
                 if decision.blocked_reason is not None or isinstance(decision.status, Limited):
+                    # Let the caller persist the event before enforcing the
+                    # policy.  Rate-limit observations are read-model data,
+                    # including rejected events that terminate the turn.
+                    yield event
                     reason = decision.blocked_reason or "limited"
                     if reason == "extra_usage_on":
                         raise TurnGuardError("Claude rate policy blocked turn: extra_usage_on", reason)

@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 7
 
 
 def _now() -> str:
@@ -69,12 +69,14 @@ class Store:
         with self.transaction() as cur:
             cur.execute("INSERT INTO projects VALUES (?, ?, ?)", (project_id, title, _now()))
 
-    def create_job(self, job_id: str, project_id: str, spec_version: int, state: str = "draft") -> None:
+    def create_job(
+        self, job_id: str, project_id: str, spec_version: int, state: str = "draft", title: str | None = None
+    ) -> None:
         now = _now()
         with self.transaction() as cur:
             cur.execute(
-                "INSERT INTO jobs(id, project_id, state, spec_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (job_id, project_id, state, spec_version, now, now),
+                "INSERT INTO jobs(id, project_id, state, spec_version, created_at, updated_at, title) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (job_id, project_id, state, spec_version, now, now, title),
             )
 
     def add_lead(
@@ -104,6 +106,30 @@ class Store:
                 "INSERT INTO job_events(job_id, ts, kind, data_json) VALUES (?, ?, ?, ?)",
                 (job_id, _now(), kind, json.dumps(data)),
             )
+
+    def append_activity(self, job_id: str, kind: str, text: str, ts: str | None = None) -> None:
+        """Persist a bounded, operator-safe activity line for a job."""
+        with self.transaction() as cur:
+            cur.execute(
+                "INSERT INTO job_activity(job_id, ts, kind, text) VALUES (?, ?, ?, ?)",
+                (job_id, ts or _now(), kind, text),
+            )
+            cur.execute(
+                "DELETE FROM job_activity WHERE job_id=? AND id NOT IN "
+                "(SELECT id FROM job_activity WHERE job_id=? ORDER BY id DESC LIMIT 500)",
+                (job_id, job_id),
+            )
+
+    def mark_repair_pending(self, job_id: str, lead_id: str) -> None:
+        """Queue a lead whose recorded answer needs quote repair."""
+        with self.transaction() as cur:
+            updated = cur.execute(
+                "UPDATE leads SET status='queued', reason='quote_repair_pending' "
+                "WHERE job_id=? AND lead_id=?",
+                (job_id, lead_id),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("lead not found")
 
     def start_attempt(
         self,
@@ -391,6 +417,16 @@ def _run_migration(connection: sqlite3.Connection, statements: list[str], versio
     connection.execute("BEGIN IMMEDIATE")
     try:
         for statement in statements:
+            words = statement.split()
+            if len(words) >= 6 and words[0].upper() == "ALTER" and words[1].upper() == "TABLE":
+                table = words[2]
+                if words[3].upper() == "ADD" and words[4].upper() == "COLUMN":
+                    column = words[5]
+                    columns = {
+                        str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+                    }
+                    if column in columns:
+                        continue
             connection.execute(statement)
         connection.execute(f"PRAGMA user_version={version}")
         connection.commit()
@@ -476,13 +512,26 @@ def open_store(path: Path) -> Store:
             4,
         )
         version = 4
-    if version < LATEST_SCHEMA_VERSION:
+    if version < 5:
         _run_migration(
             connection,
             [
                 "ALTER TABLE leads ADD COLUMN calls_dropped_unusable INTEGER NOT NULL DEFAULT 0",
             ],
             5,
+        )
+        version = 5
+    if version < 6:
+        _run_migration(connection, ["ALTER TABLE jobs ADD COLUMN title TEXT"], 6)
+        version = 6
+    if version < 7:
+        _run_migration(
+            connection,
+            [
+                "CREATE TABLE IF NOT EXISTS job_activity(id INTEGER PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), ts TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL)",
+                "CREATE INDEX IF NOT EXISTS job_activity_job_id ON job_activity(job_id, id)",
+            ],
+            7,
         )
     return Store(connection)
 

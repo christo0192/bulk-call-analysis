@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from dataclasses import dataclass
 from typing import Literal
@@ -31,6 +32,29 @@ class Counts:
     remaining: int
     checklist: tuple[ChecklistItem, ...]
     total: int
+
+
+def progress_sample_scope(store: Store, job_id: str) -> bool | None:
+    """Return sample-only progress during the sample phase, or all leads."""
+    row = store.rows("SELECT state, resume_state FROM jobs WHERE id=?", (job_id,))
+    if not row:
+        return None
+    state = str(row[0][0])
+    if state in {"paused", "stalled"} and row[0][1]:
+        state = str(row[0][1])
+    elif state in {"failed", "cancelled"}:
+        for event_row in store.rows(
+            "SELECT data_json FROM job_events WHERE job_id=? AND kind='state' ORDER BY id DESC",
+            (job_id,),
+        ):
+            try:
+                event = json.loads(str(event_row[0]))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and str(event.get("to")) not in {"failed", "cancelled"}:
+                state = str(event.get("to", state))
+                break
+    return True if state in {"pulling", "masking_sample", "sample_running", "sample_ready"} else None
 
 
 _CHECKLIST = (

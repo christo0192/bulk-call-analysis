@@ -104,6 +104,15 @@ def _event(cur: object, job_id: str, current: JobState, target: JobState, reason
         "INSERT INTO job_events(job_id, ts, kind, data_json) VALUES (?, ?, 'state', ?)",
         (job_id, _timestamp(), json.dumps({"from": current, "to": target, "reason": reason})),
     )
+    cur.execute(
+        "INSERT INTO job_activity(job_id, ts, kind, text) VALUES (?, ?, 'state', ?)",
+        (job_id, _timestamp(), f"State changed from {current} to {target}."),
+    )
+    cur.execute(
+        "DELETE FROM job_activity WHERE job_id=? AND id NOT IN "
+        "(SELECT id FROM job_activity WHERE job_id=? ORDER BY id DESC LIMIT 500)",
+        (job_id, job_id),
+    )
 
 
 def transition(store: Store, job_id: str, to: JobState, reason: str | None = None) -> None:
@@ -119,8 +128,16 @@ def transition(store: Store, job_id: str, to: JobState, reason: str | None = Non
         raise TransitionError(f"cannot move {current} to {to}")
     with store.transaction() as cur:
         changed = cur.execute(
-            "UPDATE jobs SET state=?, resume_state=?, updated_at=? WHERE id=? AND state=?",
-            (to, current if to == JobState.stalled else None, _timestamp(), job_id, current),
+            "UPDATE jobs SET state=?, resume_state=?, updated_at=?, finished_at=CASE WHEN ? IN ('done','done_with_issues','failed','cancelled') THEN ? ELSE finished_at END WHERE id=? AND state=?",
+            (
+                to,
+                current if to == JobState.stalled else None,
+                _timestamp(),
+                to.value,
+                _timestamp(),
+                job_id,
+                current,
+            ),
         )
         if changed.rowcount != 1:
             raise TransitionError("job changed before transition")
@@ -142,12 +159,21 @@ def _gate(
         raise TransitionError(f"{message} requires operator")
     with store.transaction() as cur:
         clauses = " AND spec_version=?" if expected is not None else ""
-        args_list: list[object] = [target, _timestamp(), _timestamp(), job_id, source]
+        args_list: list[object] = [
+            target,
+            _timestamp(),
+            _timestamp(),
+            _timestamp()
+            if target in {JobState.done, JobState.done_with_issues, JobState.failed, JobState.cancelled}
+            else None,
+            job_id,
+            source,
+        ]
         if expected is not None:
             args_list.append(expected)
         args = tuple(args_list)
         changed = cur.execute(
-            f"UPDATE jobs SET state=?, {timestamp_column}=?, updated_at=? WHERE id=? AND state=?{clauses}",
+            f"UPDATE jobs SET state=?, {timestamp_column}=?, updated_at=?, finished_at=? WHERE id=? AND state=?{clauses}",
             args,
         )
         if changed.rowcount != 1:

@@ -161,7 +161,9 @@ def test_main_provider_rule_is_linear(unit: str) -> None:
 
     small = best_of_three(50_000)
     large = best_of_three(200_000)
-    assert large / max(small, 0.01) < 6
+    # Quadratic growth is 16x for 4x the input; 8x allows timer noise when the small run takes a
+    # few milliseconds (a fast CI machine measured 6.3x on linear code), as the other growth tests do.
+    assert large / max(small, 0.02) < 8
 
 
 def _rough_texts() -> list[str]:
@@ -276,4 +278,6 @@ def test_main_provider_rule_is_linear_on_shaped_texts(build: object) -> None:
 
     small = best_of_three(50_000)
     large = best_of_three(200_000)
-    assert large / max(small, 0.01) < 6
+    # Quadratic growth is 16x for 4x the input; 8x allows timer noise when the small run takes a
+    # few milliseconds (a fast CI machine measured 6.3x on linear code), as the other growth tests do.
+    assert large / max(small, 0.02) < 8

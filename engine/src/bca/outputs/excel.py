@@ -140,14 +140,16 @@ def _rule_names(rules: Iterable[object]) -> list[str]:
 
 
 def _spec_rows(
-    store: Store, job_id: str, spec: JobSpec, rules: object = None
+    store: Store, job_id: str, spec: JobSpec, rules: object = None, sample: bool = False
 ) -> tuple[list[ColumnSpec], list[dict[str, object]], list[dict[str, object]]]:
     rule_set = spec.rules if rules is None else cast(Any, rules)
     rows: list[dict[str, object]] = []
     not_read: list[dict[str, object]] = []
     leads = store.rows(
         "SELECT lead_id, status, reason, calls_pulled, calls_sent, "
-        "calls_dropped_cap, calls_dropped_unusable FROM leads WHERE job_id=? ORDER BY lead_id",
+        "calls_dropped_cap, calls_dropped_unusable FROM leads WHERE job_id=? "
+        + ("AND in_sample=1 " if sample else "")
+        + "ORDER BY lead_id",
         (job_id,),
     )
     result_map = {
@@ -259,6 +261,27 @@ def build_workbook(store: Store, job_id: str, spec: JobSpec, out_dir: Path, vers
     return path
 
 
+def build_sample_workbook(store: Store, job_id: str, spec: JobSpec, out_dir: Path, version: int) -> Path:
+    """Build the sample workbook atomically using only the selected sample leads."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"sample.v{version}.xlsx"
+    columns, rows, not_read = _spec_rows(store, job_id, spec, sample=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=out_dir, prefix=f".{path.stem}.", suffix=path.suffix, delete=False
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+        write_results(temporary_path, columns, rows, "Results")
+        _write_side_sheets(temporary_path, spec, not_read)
+        os.replace(str(temporary_path), str(path))
+        temporary_path = None
+        return path
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def rebuild_with_rules(
     store: Store, job_id: str, new_rules: tuple[object, ...], out_dir: Path, spec_version: int
 ) -> tuple[Path, int]:
@@ -290,11 +313,23 @@ def rebuild_with_rules(
             break
         except FileExistsError:
             rebuild_number += 1
+    # The reserved name stays an empty placeholder until the whole workbook is written to a
+    # hidden temporary file and moved into place, so nobody opens a half-written rebuild.
+    temporary_path: Path | None = None
     try:
-        write_results(target, columns, rows, "Results")
-        _write_side_sheets(target, spec, not_read, "rebuilt with new rules")
+        with tempfile.NamedTemporaryFile(
+            dir=out_dir, prefix=f".{target.stem}.", suffix=target.suffix, delete=False
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+        write_results(temporary_path, columns, rows, "Results")
+        _write_side_sheets(temporary_path, spec, not_read, "rebuilt with new rules")
+        os.replace(str(temporary_path), str(target))
+        temporary_path = None
     except BaseException:
         target.unlink(missing_ok=True)
         raise
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
     store.append_event(job_id, "rules_rebuilt", {"rules": [cast(Any, rule).to_dict() for rule in new_rules]})
     return target, rebuild_number

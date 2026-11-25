@@ -133,6 +133,20 @@ payloads: dict[str, list[dict[str, object]]] = {
             },
         },
     ],
+    "rate_limit_allowed": [
+        init,
+        {
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "allowed_warning",
+                "resetsAt": 1234567890,
+                "utilization": 0.8,
+                "overageEnabled": False,
+                "errorCode": None,
+            },
+        },
+        {"type": "result", "subtype": "success", "is_error": False, "modelUsage": {"claude-opus-5-5": {}}},
+    ],
     "extra_usage": [
         init,
         {
