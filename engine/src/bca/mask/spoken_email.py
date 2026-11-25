@@ -1019,7 +1019,8 @@ def provider_replacements(text: str) -> list[tuple[int, int]]:
     if any(
         len(token.value) > 1024 and any(char in token.value for char in ".-' ") for token in tokenize(text)
     ):
-        from .main_provider_rule import provider_replacements as main_provider_replacements
-
-        return main_provider_replacements(text)
+        # The parser's provider patterns are slow inside very long tokens. Main's provider rule
+        # already runs on every text as the floor (patterns.apply_patterns), so leave these
+        # texts to it instead of running it a second time here.
+        return []
     return _provider_replacements_legacy(text)

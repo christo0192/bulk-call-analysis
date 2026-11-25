@@ -6,6 +6,8 @@ import re
 import time
 from pathlib import Path
 
+import pytest
+
 from bca.mask.main_provider_rule import provider_replacements
 
 _spoken_domain = re.compile(
@@ -144,9 +146,11 @@ def test_main_provider_rule_matches_main() -> None:
         assert sorted(set(provider_replacements(text))) == sorted(set(_main_oracle(text)))
 
 
-def test_main_provider_rule_is_linear() -> None:
+@pytest.mark.parametrize("unit", ["ravi at gmail dot com ", "gmail-", "x.gmail"])
+def test_main_provider_rule_is_linear(unit: str) -> None:
+    # The last two units build ONE long token holding thousands of provider words.
     def best_of_three(size: int) -> float:
-        text = ("ravi at gmail dot com " * (size // 20 + 1))[:size]
+        text = (unit * (size // len(unit) + 1))[:size]
         provider_replacements(text[:1000])
         timings = []
         for _ in range(3):
@@ -157,4 +161,4 @@ def test_main_provider_rule_is_linear() -> None:
 
     small = best_of_three(50_000)
     large = best_of_three(200_000)
-    assert large / small < 6
+    assert large / max(small, 0.01) < 6

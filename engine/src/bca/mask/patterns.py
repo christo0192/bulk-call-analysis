@@ -118,8 +118,10 @@ def apply_patterns(
         + main_provider_rule.provider_replacements(text)
         + spoken_email.find_spoken_emails(text)
     )
+    # A span longer than every allowed id can't be one; skipping the copy keeps long tokens linear.
+    longest_id = max((len(item) for item in allow_ids), default=0)
     for start, end in email_spans:
-        if text[start:end] in allow_ids:
+        if end - start <= longest_id and text[start:end] in allow_ids:
             continue
         while start < end and text[start] in "(\"'":
             start += 1
@@ -163,9 +165,12 @@ def apply_patterns(
                 continue
             start = match.start()
             if detector.name == "URL" and email_spans:
-                prefix = re.search(r"(?i)\blinkedin\s+is\s*$", text[:start])
+                # Only the words just before the URL matter; searching the whole prefix for
+                # every URL would be quadratic in long texts.
+                window = max(0, start - 200)
+                prefix = re.search(r"(?i)\blinkedin\s+is\s*$", text[window:start])
                 if prefix:
-                    start = prefix.start()
+                    start = window + prefix.start()
             counts[detector.name] = counts.get(detector.name, 0) + 1
             spans.append((start, match.end(), detector.replacement, detector.name))
     merged: list[tuple[int, int, str, str, int]] = []
@@ -182,7 +187,13 @@ def apply_patterns(
             merged[-1] = (old_start, max(old_end, end), old_replacement, old_detector, old_length)
         else:
             merged.append((start, end, replacement, detector_name, end - start))
-    current = text
-    for start, end, replacement, _, _ in reversed(merged):
-        current = current[:start] + replacement + current[end:]
-    return current, counts
+    # One forward pass (the merged spans are sorted and do not overlap); replacing span by span
+    # copied the whole text each time.
+    parts: list[str] = []
+    position = 0
+    for start, end, replacement, _, _ in merged:
+        parts.append(text[position:start])
+        parts.append(replacement)
+        position = end
+    parts.append(text[position:])
+    return "".join(parts), counts

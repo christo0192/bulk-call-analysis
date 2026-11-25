@@ -1,4 +1,11 @@
-"""Linear port of the main application's spoken webmail rule."""
+"""Linear port of the main application's spoken webmail rule.
+
+Main's rule (`_spoken_email_replacements` on main) re-tokenises `text[: match.start()]` for every
+provider match and strips and casefolds each token it walks over. The results here are the same,
+which `tests/mask/test_main_provider_rule.py` checks against main's code kept verbatim, but every
+token is tokenised once, and a token is never copied or casefolded when it is longer than any word
+the rule compares it with. So one long unbroken token full of provider words stays linear.
+"""
 
 from __future__ import annotations
 
@@ -10,13 +17,9 @@ _spoken_domain = re.compile(
     r"(?:\s*(?:\.|dot)\s*(?:com|in|co|net|org)\b)?"
 )
 _TOKEN = re.compile(r"\S+")
-
-
-def provider_replacements(text: str) -> list[tuple[int, int]]:
-    replacements: list[tuple[int, int]] = []
-    token_matches = list(_TOKEN.finditer(text))
-    token_starts = [match.start() for match in token_matches]
-    stop = {
+_PUNCTUATION = frozenset(",.?!")
+_STOP = frozenset(
+    {
         "is",
         "id",
         "email",
@@ -55,23 +58,61 @@ def provider_replacements(text: str) -> list[tuple[int, int]]:
         "registered",
         "official",
     }
-    connectors = {"at", "the", "rate", "of", "@"}
+)
+_CONNECTORS = frozenset({"at", "the", "rate", "of", "@"})
+# Longer than every word in _STOP and _CONNECTORS: a stripped piece this long can't match one.
+_LONGEST = max(len(word) for word in _STOP | _CONNECTORS)
+# Stands for any stripped piece longer than _LONGEST: never a stop word or connector, length > 1.
+_LONG = "\x00long piece"
+
+
+def provider_replacements(text: str) -> list[tuple[int, int]]:
+    tokens = [(match.start(), match.end()) for match in _TOKEN.finditer(text)]
+    starts = [start for start, _ in tokens]
+    # Where each token's leading ",.?!" run ends; computed once, so a long run is scanned once.
+    left_strip: list[int] = []
+    for start, end in tokens:
+        position = start
+        while position < end and text[position] in _PUNCTUATION:
+            position += 1
+        left_strip.append(position)
+
+    def stripped(index: int, end: int) -> tuple[str, int]:
+        """`text[token_start:end].strip(",.?!")` casefolded, and its length (a short form only)."""
+        left = min(left_strip[index], end)
+        right = end
+        while right > left and text[right - 1] in _PUNCTUATION:
+            right -= 1
+        length = right - left
+        if length > _LONGEST:
+            return _LONG, length
+        return text[left:right].casefold(), length
+
+    replacements: list[tuple[int, int]] = []
     for domain in _spoken_domain.finditer(text):
-        j = bisect_left(token_starts, domain.start())
+        cut = domain.start()
+        # Main tokenises text[:cut]: the tokens that start before the match, the last one cut at it.
+        j = bisect_left(starts, cut)
         if not j:
             continue
-        while j and token_matches[j - 1].group().strip(",.?!").casefold() in connectors:
+        last = j - 1  # the token main sees cut at the match
+
+        def piece(index: int, cut: int = cut, last: int = last) -> tuple[str, int]:
+            end = tokens[index][1]
+            return stripped(index, min(end, cut) if index == last else end)
+
+        while j and piece(j - 1)[0] in _CONNECTORS:
             j -= 1
         k, meaningful = j, 0
         lower_bound = max(0, j - 64)
         while k > lower_bound:
-            token = token_matches[k - 1].group().strip(",.?!")
-            if len(token) > 1 and token.casefold() in stop:
+            value, length = piece(k - 1)
+            if length > 1 and value in _STOP:
                 break
             if meaningful >= 6:
                 break
-            meaningful += len(token) > 1
+            meaningful += length > 1
             k -= 1
         if k != j:
-            replacements.append((token_matches[k].start(), domain.end()))
+            replacements.append((tokens[k][0], domain.end()))
     return replacements

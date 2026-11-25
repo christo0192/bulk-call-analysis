@@ -30,6 +30,11 @@ PERFORMANCE_INPUTS = (
     "ravi at acme dot com ",
     " @ ",
     "at the rate ",
+    # One unbroken token full of provider words (each unit repeats with no space):
+    # gate 9 found these quadratic in the provider floor and in apply_patterns.
+    "gmail-",
+    "x.gmail",
+    "a'gmail",
 )
 
 
