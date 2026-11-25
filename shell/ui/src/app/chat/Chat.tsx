@@ -72,6 +72,8 @@ export function Chat({
   const [ids, setIds] = useState('');
   const [attachOpen, setAttachOpen] = useState(false);
   const [running, setRunning] = useState(false);
+  // Read out once when a reply finishes; streamed text is never announced token by token.
+  const [announcement, setAnnouncement] = useState('');
   const [error, setError] = useState<ChatError | null>(null);
   const [attachMessage, setAttachMessage] = useState<string | null>(null);
   const [earlierError, setEarlierError] = useState(false);
@@ -145,6 +147,10 @@ export function Chat({
     }
     endedTurns.current.add(turn);
     if (activeTurn.current === turn) activeTurn.current = null;
+    // A changed text is what makes a screen reader speak again for the next reply.
+    setAnnouncement((previous) =>
+      previous === 'Claude replied' ? 'Claude replied.' : 'Claude replied',
+    );
     setRunning(false);
     const aliases = [turn, turnAliases.current.get(turn)].filter(
       (value): value is string => value !== undefined,
@@ -385,6 +391,9 @@ export function Chat({
   });
   return (
     <section class="chat" aria-label="Claude chat">
+      <p class="sr-only" aria-live="polite">
+        {announcement}
+      </p>
       <div
         class="chat-scroll"
         ref={scroller}

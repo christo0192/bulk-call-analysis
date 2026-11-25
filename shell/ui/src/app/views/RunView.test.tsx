@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import running from '../../mock/fixtures/engine/job-snapshot-running.json';
-import { RunView, plainActivity } from './RunView';
+import { RunView, plainActivity, useThrottled } from './RunView';
 import { mockBridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import type { JobSnapshot } from '../../engine/types';
@@ -306,4 +306,35 @@ it('activity lines use plain words for the engine step names', () => {
   expect(plainActivity('Lead 1002 failed: quota_interrupt')).toBe(
     'Lead 1002 failed: quota interrupt',
   );
+});
+
+it('progress is announced at most every 10 seconds', () => {
+  vi.useFakeTimers();
+  try {
+    function Probe({ value }: { value: string }) {
+      return <p data-testid="probe">{useThrottled(value, 10_000)}</p>;
+    }
+    const view = render(<Probe value="Read 1 of 8 leads." />);
+    const shown = () => screen.getByTestId('probe').textContent;
+    expect(shown()).toBe('Read 1 of 8 leads.');
+    view.rerender(<Probe value="Read 2 of 8 leads." />);
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    // The first change after mount goes out at once.
+    expect(shown()).toBe('Read 2 of 8 leads.');
+    view.rerender(<Probe value="Read 3 of 8 leads." />);
+    view.rerender(<Probe value="Read 4 of 8 leads." />);
+    act(() => {
+      vi.advanceTimersByTime(9_000);
+    });
+    expect(shown()).toBe('Read 2 of 8 leads.');
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    // Only the newest value is read, never each step in between.
+    expect(shown()).toBe('Read 4 of 8 leads.');
+  } finally {
+    vi.useRealTimers();
+  }
 });

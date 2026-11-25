@@ -31,6 +31,7 @@ button {
 }
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 2px solid var(--acc);
   outline-offset: 2px;
@@ -380,5 +381,6 @@ footer b {
   * {
     scroll-behavior: auto !important;
     transition: none !important;
+    animation: none !important;
   }
 }

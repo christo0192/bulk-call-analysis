@@ -247,6 +247,27 @@ function AllowanceTile({ snapshot }: { snapshot: JobSnapshot }) {
   );
 }
 
+/** The latest value, but changed at most once per `ms`: a live region read out every second is noise. */
+export function useThrottled(value: string, ms: number): string {
+  const [shown, setShown] = useState(value);
+  const lastChange = useRef(0);
+  useEffect(() => {
+    if (value === shown) return;
+    const wait = lastChange.current + ms - Date.now();
+    const apply = () => {
+      lastChange.current = Date.now();
+      setShown(value);
+    };
+    if (wait <= 0) {
+      apply();
+      return;
+    }
+    const timer = window.setTimeout(apply, wait);
+    return () => window.clearTimeout(timer);
+  }, [value, shown, ms]);
+  return shown;
+}
+
 export function RunView({ id, onStalled }: { id: string; onStalled?: (text: string) => void }) {
   const [live, dispatch] = useReducer(reduce, id, initialJobLive);
   const liveStateRef = useRef<string | undefined>(undefined);
@@ -316,6 +337,13 @@ export function RunView({ id, onStalled }: { id: string; onStalled?: (text: stri
     };
   }, [id]);
   const snapshot = live.snapshot;
+  // What a screen reader hears about progress: at most every 10 seconds.
+  const progressWords = snapshot
+    ? `Read ${number(snapshot.progress.done)} of ${number(snapshot.progress.total)} ${
+        snapshot.progress.phase === 'sample' ? 'sample leads' : 'leads'
+      }.`
+    : '';
+  const announcedProgress = useThrottled(progressWords, 10_000);
   if (!snapshot)
     return (
       <div class="phase-view" data-testid="run-view">
@@ -393,6 +421,9 @@ export function RunView({ id, onStalled }: { id: string; onStalled?: (text: stri
           </button>
         </div>
       )}
+      <p class="sr-only" aria-live="polite">
+        {announcedProgress}
+      </p>
       <section class="run-hero">
         <div class="run-big-number">
           <strong>{number(progress.done)}</strong>

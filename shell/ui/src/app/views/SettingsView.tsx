@@ -158,7 +158,11 @@ export function SettingsView() {
             >
               Save
             </button>
-            {saved === 'connector' && <span class="saved">Saved</span>}
+            {saved === 'connector' && (
+              <span class="saved" role="status">
+                Saved
+              </span>
+            )}
           </div>
           {fieldError && <p class="error">{fieldError}</p>}
           <p class="muted">
@@ -228,7 +232,11 @@ export function SettingsView() {
           </select>
           <p class="muted">Applies to the next job you start or resume.</p>
           {workersError && <p class="error">{workersError}</p>}
-          {saved === 'workers' && <span class="saved">Saved</span>}
+          {saved === 'workers' && (
+            <span class="saved" role="status">
+              Saved
+            </span>
+          )}
         </section>
         <section class="settings-card">
           <h2>Retention</h2>

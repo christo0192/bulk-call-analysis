@@ -306,3 +306,24 @@ it('status entries are not labelled as Claude', async () => {
   expect(await screen.findByText('Turn ended')).toBeInTheDocument();
   expect(screen.queryByText('Claude')).toBeNull();
 });
+
+it('a finished reply is announced once to screen readers, not token by token', async () => {
+  const view = chat();
+  const region = () => view.container.querySelector('.chat [aria-live="polite"]');
+  event('assistant_delta', { delta: { text: 'first answer' } }, 'turn-a');
+  expect(region()?.textContent).toBe('');
+  mockBridge.emit({
+    jsonrpc: '2.0',
+    method: 'chat/event',
+    params: { project: 'p1', event: { status: 'completed' } },
+  });
+  await waitFor(() => expect(region()?.textContent).toBe('Claude replied'));
+  event('assistant_delta', { delta: { text: 'second answer' } }, 'turn-b');
+  mockBridge.emit({
+    jsonrpc: '2.0',
+    method: 'chat/event',
+    params: { project: 'p1', event: { status: 'completed' } },
+  });
+  // The text changes so the second reply is read out too.
+  await waitFor(() => expect(region()?.textContent).toBe('Claude replied.'));
+});

@@ -49,6 +49,8 @@ it('saving the key file path calls settings/set and shows Saved', async () => {
   });
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(screen.getByText('Saved')).toBeInTheDocument());
+  // Screen readers hear it too.
+  expect(screen.getByRole('status')).toHaveTextContent('Saved');
   expect(mockBridge.calls).toContainEqual({
     method: 'settings/set',
     params: { connectorPath: 'connector.exe' },
