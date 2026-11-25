@@ -34,8 +34,9 @@ uv run pytest -q
 
 ## Run it
 
-On Windows, install Python 3.12, `uv`, Node.js 20 or newer, npm, Rust, and
-the Visual Studio C++ build tools. On Mac, install Python 3.12, `uv`, Node.js
+On Windows, install Python 3.12, `uv`, Node.js 20 or newer, npm and Rust, plus
+the linker your Rust toolchain needs: the Visual Studio C++ build tools for an
+MSVC toolchain, or a MinGW clang such as llvm-mingw on PATH for a GNU toolchain. On Mac, install Python 3.12, `uv`, Node.js
 20 or newer, npm, and Rust. Run `.\scripts\run-app.ps1` on Windows or
 `./scripts/run-app.sh` on Mac. Add `--check` (or `-Check` on Windows) to run
 the prerequisite and dependency checks without opening the app.
