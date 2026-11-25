@@ -175,6 +175,12 @@ export function RebuildDialog({
         },
       ]);
     } else {
+      // The engine allows one in-scope rule per job; a second one is refused at rebuild time.
+      if (kind === 'in_scope' && rules.some((item) => item.definition.kind === 'in_scope'))
+        return setError({
+          message: 'Only one in-scope rule is allowed. Add a review flag instead.',
+          client: true,
+        });
       if (conditions.some((item) => !item.field || !item.op))
         return setError({ message: 'Enter a value', client: true });
       const validation = conditions.flatMap((condition) => validateCondition(condition, plan));
@@ -230,6 +236,10 @@ export function RebuildDialog({
     }
   };
   const currentInScope = rules.some((item) => item.definition.kind === 'in_scope');
+  // Once an in-scope rule exists, leave the in-scope form so it can't be filled in again.
+  useEffect(() => {
+    if (currentInScope && kind === 'in_scope') setKind('review_flag');
+  }, [currentInScope, kind]);
   return (
     <div class="modal-backdrop">
       <div
@@ -509,14 +519,23 @@ function ValueControl({
         ))}
       </select>
     );
+  // Always a text box: a number box drops the commas of a list ("1, 2" becomes 12) and
+  // accepts forms the engine reads differently. The values are checked on Add rule.
+  const numberColumn = numeric(column?.type ?? '');
   return (
     <input
       aria-label="Value"
-      type={column?.type === 'integer' ? 'number' : 'text'}
-      step={column?.type === 'integer' ? '1' : undefined}
+      type="text"
+      inputMode={numberColumn ? (column?.type === 'integer' ? 'numeric' : 'decimal') : undefined}
       value={value}
       onInput={(event) => onChange(event.currentTarget.value)}
-      placeholder={operator === 'in' || operator === 'not_in' ? 'comma-separated' : undefined}
+      placeholder={
+        operator === 'in' || operator === 'not_in'
+          ? numberColumn
+            ? 'numbers, comma-separated'
+            : 'comma-separated'
+          : undefined
+      }
     />
   );
 }
@@ -531,26 +550,36 @@ function availableOperators(column?: OutputColumn) {
     )
     .filter((operator) => operator !== 'contains' || column?.type === 'string');
 }
+const INTEGER = /^-?\d+$/;
+// Plain decimals only: no hex, no exponent, no thousands separators.
+const DECIMAL = /^-?(?:\d+(?:\.\d+)?|\.\d+)$/;
+const isList = (op: string) => op === 'in' || op === 'not_in';
+/**
+ * The typed text, split into items only for the list operators. A comma inside a single value is
+ * part of that value ("too expensive, will think"); text columns keep their spaces.
+ */
+function conditionItems(condition: RuleCondition, column?: OutputColumn): string[] {
+  const raw = String(condition.value ?? '');
+  const text = column?.type === 'string' || !column;
+  if (!isList(condition.op)) return [text ? raw : raw.trim()];
+  return raw.split(',').map((item) => item.trim());
+}
 function validateCondition(condition: RuleCondition, plan: PlanCard): string[] {
   if (condition.op === 'is_null' || condition.op === 'not_null') return [];
   const column = plan.outputColumns.find((item) => `answer.${item.name}` === condition.field);
-  const values = String(condition.value ?? '')
-    .split(',')
-    .map((item) => item.trim());
+  const values = conditionItems(condition, column);
   if (column?.type === 'boolean' && values.some((value) => value !== 'true' && value !== 'false'))
     return ['Choose Yes or No'];
-  if (values.some((value) => !value)) return ['Enter a value'];
-  if (column?.type === 'integer' && values.some((value) => !/^-?\d+$/.test(value)))
+  if (values.some((value) => !value.trim())) return ['Enter a value'];
+  if (column?.type === 'integer' && values.some((value) => !INTEGER.test(value)))
     return ['Whole numbers only'];
-  if (column?.type === 'number' && values.some((value) => !Number.isFinite(Number(value))))
-    return ['Enter a finite number'];
+  if (column?.type === 'number' && values.some((value) => !DECIMAL.test(value)))
+    return ['Enter a number, like 12 or 12.5'];
   return [];
 }
 function typedCondition(condition: RuleCondition, plan: PlanCard): RuleCondition {
   const column = plan.outputColumns.find((item) => `answer.${item.name}` === condition.field);
-  const values = String(condition.value ?? '')
-    .split(',')
-    .map((item) => item.trim());
+  const values = conditionItems(condition, column);
   const convert = (item: string) =>
     column?.type === 'boolean'
       ? item === 'true'
@@ -565,10 +594,7 @@ function typedCondition(condition: RuleCondition, plan: PlanCard): RuleCondition
     ...(condition.op === 'is_null' || condition.op === 'not_null'
       ? {}
       : {
-          value:
-            condition.op === 'in' || condition.op === 'not_in'
-              ? values.map(convert)
-              : convert(values[0] ?? ''),
+          value: isList(condition.op) ? values.map(convert) : convert(values[0] ?? ''),
         }),
   };
 }
@@ -589,7 +615,32 @@ function withoutNullValue(rule: Rule): Rule {
     ),
   } as Rule;
 }
+const OPERATOR_WORDS: Record<string, string> = {
+  eq: 'is',
+  ne: 'is not',
+  in: 'is one of',
+  not_in: 'is none of',
+  lt: '<',
+  le: '≤',
+  gt: '>',
+  ge: '≥',
+  is_null: 'is empty',
+  not_null: 'is not empty',
+  contains: 'contains',
+};
+function conditionText(condition: RuleCondition) {
+  const field = condition.field.replace(/^answer\./, '');
+  const words = OPERATOR_WORDS[condition.op] ?? condition.op;
+  if (condition.op === 'is_null' || condition.op === 'not_null') return `${field} ${words}`;
+  const value = Array.isArray(condition.value)
+    ? condition.value.map((item) => JSON.stringify(item)).join(', ')
+    : JSON.stringify(condition.value);
+  return `${field} ${words} ${value}`;
+}
+/** A new rule's title shows its values, so a mistyped value is visible before Rebuild. */
 function ruleTitle(rule: Rule) {
-  if (rule.kind === 'threshold_group') return rule.name;
-  return `${rule.kind === 'in_scope' ? 'In scope' : rule.name}: ${rule.conditions.map((condition) => `${condition.field} ${condition.op}`).join(', ')}`;
+  if (rule.kind === 'threshold_group')
+    return `${rule.name}: ${rule.field.replace(/^answer\./, '')} bands at ${rule.edges.join(', ')} (${rule.labels.join(', ')})`;
+  const joiner = rule.match === 'any' ? ' or ' : ' and ';
+  return `${rule.kind === 'in_scope' ? 'In scope' : rule.name}: ${rule.conditions.map(conditionText).join(joiner)}`;
 }

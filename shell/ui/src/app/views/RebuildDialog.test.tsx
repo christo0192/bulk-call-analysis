@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/preact';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/preact';
 import { mockBridge } from '../../engine/bridge';
 import { EngineError } from '../../engine/client';
 import recordedPlanFixture from '../../mock/fixtures/engine/job-plan.json';
@@ -174,11 +174,14 @@ it('each operator and type sends the form the engine accepts', async () => {
     ],
   };
   const dialog = renderDialog(vi.fn(), currentPlan);
+  // One in-scope rule (the engine allows one), then review flags for the other operators.
   fireEvent.click(within(dialog).getByRole('button', { name: 'In scope' }));
   fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.count' } });
   fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'gt' } });
   fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: '3' } });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  // The dialog leaves the in-scope form by itself once an in-scope rule exists.
+  expect(within(dialog).getByRole('button', { name: 'In scope' })).toBeDisabled();
   fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.score' } });
   fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'in' } });
   fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: '1.5, 2.5' } });
@@ -194,13 +197,32 @@ it('each operator and type sends the form the engine accepts', async () => {
   fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
   await vi.waitFor(() => {
     const call = mockBridge.calls.find((item) => item.method === 'job/rebuildRules');
-    expect(call?.params).toMatchObject({
+    // Exact payload; the orchestrator checked these four definitions with the engine's own
+    // _rule and validate_rules (bca.store.spec, bca.outputs.rules).
+    expect(call?.params).toEqual({
+      job: 'job-one',
       rules: [
-        { kind: 'in_scope', conditions: [{ field: 'answer.count', op: 'gt', value: 3 }] },
-        { kind: 'in_scope', conditions: [{ field: 'answer.score', op: 'in', value: [1.5, 2.5] }] },
-        { kind: 'in_scope', conditions: [{ field: 'answer.flag', op: 'eq', value: true }] },
         {
           kind: 'in_scope',
+          match: 'all',
+          conditions: [{ field: 'answer.count', op: 'gt', value: 3 }],
+        },
+        {
+          kind: 'review_flag',
+          name: 'review flag 1',
+          match: 'all',
+          conditions: [{ field: 'answer.score', op: 'in', value: [1.5, 2.5] }],
+        },
+        {
+          kind: 'review_flag',
+          name: 'review flag 2',
+          match: 'all',
+          conditions: [{ field: 'answer.flag', op: 'eq', value: true }],
+        },
+        {
+          kind: 'review_flag',
+          name: 'review flag 3',
+          match: 'all',
           conditions: [{ field: 'answer.label', op: 'contains', value: 'urgent' }],
         },
       ],
@@ -296,9 +318,89 @@ it('invalid rules shows the engine detail', async () => {
   expect(await within(dialog).findByRole('alert')).toHaveTextContent('Edges overlap');
 });
 
-it('second in scope is blocked', () => {
-  const dialog = renderDialog(vi.fn(), planWithRules);
+it('second in scope is blocked', async () => {
+  // Kept in-scope rule: the kind is disabled.
+  const kept = renderDialog(vi.fn(), planWithRules);
+  expect(within(kept).getByRole('button', { name: 'In scope' })).toBeDisabled();
+  cleanup();
+  // A new in-scope rule: a second one can't be added, and one reaches the engine.
+  const currentPlan: PlanCard = {
+    ...recordedPlan,
+    outputColumns: [
+      { name: 'count', type: 'integer' },
+      { name: 'label', type: 'string' },
+    ],
+  };
+  const dialog = renderDialog(vi.fn(), currentPlan);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'In scope' }));
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.count' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'gt' } });
+  fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: '3' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
   expect(within(dialog).getByRole('button', { name: 'In scope' })).toBeDisabled();
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.label' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'eq' } });
+  fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: 'x' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  await vi.waitFor(() => {
+    const call = mockBridge.calls.find((item) => item.method === 'job/rebuildRules');
+    const rules = (call?.params as { rules: { kind: string }[] }).rules;
+    expect(rules.map((rule) => rule.kind)).toEqual(['in_scope', 'review_flag']);
+  });
+});
+
+it('a comma inside a single value is kept, and number lists keep every item', async () => {
+  const currentPlan: PlanCard = {
+    ...recordedPlan,
+    outputColumns: [
+      { name: 'reason', type: 'string' },
+      { name: 'score', type: 'number' },
+      { name: 'count', type: 'integer' },
+    ],
+  };
+  const dialog = renderDialog(vi.fn(), currentPlan);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Review flag' }));
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.reason' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'eq' } });
+  fireEvent.input(within(dialog).getByLabelText('Value'), {
+    target: { value: 'too expensive, will think' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  // "1,5" is not a number here (no decimal commas): refused, nothing added.
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.score' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'eq' } });
+  fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: '1,5' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('Enter a number, like 12 or 12.5');
+  fireEvent.change(within(dialog).getByLabelText('Field'), { target: { value: 'answer.count' } });
+  fireEvent.change(within(dialog).getByLabelText('Operator'), { target: { value: 'in' } });
+  fireEvent.input(within(dialog).getByLabelText('Value'), { target: { value: '1, 2' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  // New rules show their values, so a mistyped value is visible before Rebuild.
+  expect(within(dialog).getByText(/reason is "too expensive, will think"/)).toBeInTheDocument();
+  expect(within(dialog).getByText(/count is one of 1, 2/)).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  await vi.waitFor(() => {
+    const call = mockBridge.calls.find((item) => item.method === 'job/rebuildRules');
+    expect(call?.params).toEqual({
+      job: 'job-one',
+      rules: [
+        {
+          kind: 'review_flag',
+          name: 'review flag 1',
+          match: 'all',
+          conditions: [{ field: 'answer.reason', op: 'eq', value: 'too expensive, will think' }],
+        },
+        {
+          kind: 'review_flag',
+          name: 'review flag 2',
+          match: 'all',
+          conditions: [{ field: 'answer.count', op: 'in', value: [1, 2] }],
+        },
+      ],
+    });
+  });
 });
 
 it('bands refuse empty and non numeric edges', () => {

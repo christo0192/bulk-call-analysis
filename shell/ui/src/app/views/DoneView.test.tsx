@@ -53,19 +53,37 @@ it('newest workbook compares integers', async () => {
     async () =>
       ({
         ...outputs,
+        // Spec 10 beats spec 9 and rebuild 10 beats rebuild 9: wrong as text or as "v.rebuild"
+        // decimals (10 sorts below 9 as text, and 9.10 below 9.9 as a decimal).
         files: [
           ...outputs.files,
           {
             ...outputs.files[0],
-            name: 'results.v2.xlsx',
-            path: 'jobs/job-one/output/results.v2.xlsx',
-            specVersion: 2,
+            name: 'results.v9.rebuild9.xlsx',
+            path: 'jobs/job-one/output/results.v9.rebuild9.xlsx',
+            specVersion: 9,
+            rebuild: 9,
           },
           {
             ...outputs.files[0],
-            name: 'results.v1.rebuild2.xlsx',
-            path: 'jobs/job-one/output/results.v1.rebuild2.xlsx',
-            rebuild: 2,
+            name: 'results.v10.rebuild9.xlsx',
+            path: 'jobs/job-one/output/results.v10.rebuild9.xlsx',
+            specVersion: 10,
+            rebuild: 9,
+          },
+          {
+            ...outputs.files[0],
+            name: 'results.v10.rebuild10.xlsx',
+            path: 'jobs/job-one/output/results.v10.rebuild10.xlsx',
+            specVersion: 10,
+            rebuild: 10,
+          },
+          {
+            ...outputs.files[0],
+            name: 'results.v10.xlsx',
+            path: 'jobs/job-one/output/results.v10.xlsx',
+            specVersion: 10,
+            rebuild: null,
           },
         ],
       }) as never,
@@ -76,7 +94,7 @@ it('newest workbook compares integers', async () => {
   await waitFor(() =>
     expect(openProjectFile).toHaveBeenCalledWith(
       'project-one',
-      'jobs/job-one/output/results.v2.xlsx',
+      'jobs/job-one/output/results.v10.rebuild10.xlsx',
     ),
   );
 });
@@ -90,11 +108,12 @@ it('opens files by their project path', async () => {
         files: [
           { ...outputs.files[0], path: 'jobs/job-one/output/latest.xlsx' },
           { ...outputs.files[2], path: 'jobs/job-one/output/verify.md' },
+          // Exactly as the engine lists the summary (production.py _job_outputs).
           {
             name: 'summary.md',
-            path: 'jobs/job-one/output/summary.md',
-            kind: 'summary',
-            specVersion: 1,
+            path: 'summary.md',
+            kind: 'markdown',
+            specVersion: null,
             rebuild: null,
           },
         ],
@@ -106,7 +125,7 @@ it('opens files by their project path', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Open verify report' }));
   await waitFor(() => {
     expect(openProjectFile).toHaveBeenCalledWith('project-one', 'jobs/job-one/output/latest.xlsx');
-    expect(openProjectFile).toHaveBeenCalledWith('project-one', 'jobs/job-one/output/summary.md');
+    expect(openProjectFile).toHaveBeenCalledWith('project-one', 'summary.md');
     expect(openProjectFile).toHaveBeenCalledWith('project-one', 'jobs/job-one/output/verify.md');
   });
 });

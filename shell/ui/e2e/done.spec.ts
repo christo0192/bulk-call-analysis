@@ -33,3 +33,28 @@ test('done view opens results and rebuilds with a new bands rule', async ({ page
   });
   await dialog.getByRole('button', { name: 'Open' }).click();
 });
+
+test('typed number lists keep every item in the real browser', async ({ page }) => {
+  // A number box in Chromium drops the commas of "1.5, 2" (it became 152 before this fix).
+  await page.goto('/');
+  await page.getByRole('button', { name: /Shipping questions/ }).click();
+  await page.getByRole('button', { name: 'Rebuild with new rules' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: 'Review flag' }).click();
+  await dialog.getByLabel('Field').selectOption('answer.discount_percent');
+  await dialog.getByLabel('Operator').selectOption('in');
+  await dialog.getByLabel('Value').pressSequentially('1.5, 2');
+  await dialog.getByRole('button', { name: 'Add rule' }).click();
+  await expect(dialog).toContainText('discount_percent is one of 1.5, 2');
+  await dialog.getByRole('button', { name: 'Rebuild' }).click();
+  await expect(dialog).toContainText('Rebuilt:');
+  const rebuildCalls = await page.evaluate(async () => {
+    const { mockBridge } = await import('/src/engine/bridge.ts');
+    return mockBridge.calls.filter((call) => call.method === 'job/rebuildRules');
+  });
+  const rules = (rebuildCalls[0]?.params as { rules: { conditions?: unknown[] }[] }).rules;
+  expect(rules.at(-1)).toMatchObject({
+    kind: 'review_flag',
+    conditions: [{ field: 'answer.discount_percent', op: 'in', value: [1.5, 2] }],
+  });
+});
