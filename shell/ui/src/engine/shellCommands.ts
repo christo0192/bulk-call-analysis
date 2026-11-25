@@ -1,14 +1,20 @@
 import { invoke } from '@tauri-apps/api/core';
-import { mockBridge } from './mockBridge';
+import { mockBridgeLoaded } from './bridge';
+import { EngineError } from './client';
 
-export async function openProjectFile(project: string, name: string): Promise<null> {
-  if ('__TAURI_INTERNALS__' in window) return invoke<null>('open_project_file', { project, name });
-  mockBridge.shellCalls.push({ command: 'open_project_file', params: { project, name } });
+/** A desktop-shell command. Outside the desktop app the dev mock records it instead. */
+async function shellCommand(command: string, params: Record<string, string>): Promise<null> {
+  if ('__TAURI_INTERNALS__' in window) return invoke<null>(command, params);
+  const mock = await mockBridgeLoaded;
+  if (!mock) throw new EngineError(-32601, 'Available in the desktop app', 'method_not_allowed');
+  mock.shellCalls.push({ command, params });
   return null;
 }
 
+export async function openProjectFile(project: string, name: string): Promise<null> {
+  return shellCommand('open_project_file', { project, name });
+}
+
 export async function openProjectFolder(project: string): Promise<null> {
-  if ('__TAURI_INTERNALS__' in window) return invoke<null>('open_project_folder', { project });
-  mockBridge.shellCalls.push({ command: 'open_project_folder', params: { project } });
-  return null;
+  return shellCommand('open_project_folder', { project });
 }

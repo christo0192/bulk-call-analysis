@@ -525,6 +525,9 @@ export function Chat({
           placeholder="Ask Claude about this job…"
           onInput={(event) => setText((event.currentTarget as HTMLTextAreaElement).value)}
           onKeyDown={(event) => {
+            // While an input method is composing (Japanese, Chinese, Korean…), Enter picks the
+            // characters; it must not send. Some browsers report that only as keyCode 229.
+            if (event.isComposing || event.keyCode === 229) return;
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault();
               if (!running) void send();

@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import outputs from '../../mock/fixtures/engine/job-outputs.json';
-import { mockBridge } from '../../engine/bridge';
+import { mockBridge } from '../../engine/mockBridge';
 import { EngineError } from '../../engine/client';
 import { DoneView } from './DoneView';
 import { MainArea } from '../MainArea';

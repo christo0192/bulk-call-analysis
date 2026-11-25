@@ -3,7 +3,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { bytes } from './Cards';
 import { PlanCard, SampleCard, StartCard } from './Cards';
 import { formatCount } from '../format';
-import { mockBridge } from '../../engine/bridge';
+import { mockBridge } from '../../engine/mockBridge';
 import { EngineError } from '../../engine/client';
 import { plan, sample } from '../../mock/fixtures/data';
 import { adaptPlan } from '../../engine/adapters';

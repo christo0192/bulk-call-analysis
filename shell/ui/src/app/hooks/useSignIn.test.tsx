@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/preact';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useSignIn, signInCheckMessage } from './useSignIn';
 import { EngineError } from '../../engine/client';
-import { mockBridge } from '../../engine/bridge';
+import { mockBridge } from '../../engine/mockBridge';
 import { setupItems } from '../../state/store';
 
 beforeEach(() => {

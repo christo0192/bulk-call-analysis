@@ -115,17 +115,20 @@ function StateBanner({
       .finally(() => setPending(false));
   };
   if (!kind) return null;
-  const reset =
-    snapshot.resumeAt === null
+  const resumeAt = snapshot.resumeAt;
+  // The countdown changes every minute, so it stays out of the announced part below: a screen
+  // reader hears the banner once, not again each minute.
+  const countdown =
+    kind !== 'quota' || resumeAt === null
       ? null
-      : snapshot.resumeAt <= Date.now() / 1000
+      : resumeAt <= Date.now() / 1000
         ? 'Starting again…'
-        : `${time(snapshot.resumeAt)} (in ${duration(snapshot.resumeAt - Date.now() / 1000)})`;
+        : `Starts again in ${duration(resumeAt - Date.now() / 1000)}.`;
   const copy: Record<Exclude<BannerKind, null | 'user'>, [string, string]> = {
     quota: [
       'Paused: ChatGPT allowance',
-      reset
-        ? `The app stopped sending new leads so it never runs onto paid credits. It starts again on its own when the allowance resets: ${reset}. ${number(snapshot.progress.remaining)} leads are waiting, and nothing was lost.`
+      resumeAt !== null
+        ? `The app stopped sending new leads so it never runs onto paid credits. It starts again on its own when the allowance resets: ${time(resumeAt)}. ${number(snapshot.progress.remaining)} leads are waiting, and nothing was lost.`
         : 'Press Resume when your allowance is back.',
     ],
     credit: [
@@ -168,9 +171,13 @@ function StateBanner({
   };
   const [title, text] = copy[kind];
   return (
-    <section class={`run-banner ${kind}`} role="status">
-      <strong>{title}</strong>
-      <p>{text}</p>
+    <section class={`run-banner ${kind}`}>
+      {/* The live part: only what stays the same while this banner shows. */}
+      <div role="status">
+        <strong>{title}</strong>
+        <p>{text}</p>
+      </div>
+      {countdown && <p>{countdown}</p>}
       {kind === 'credit' && (
         <div class="banner-actions">
           <button type="button" disabled={pending} onClick={resume}>

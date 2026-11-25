@@ -8,7 +8,7 @@ import {
   setupRequired,
 } from './store';
 import type { Notification, Project } from '../engine/types';
-import { mockBridge } from '../engine/bridge';
+import { mockBridge } from '../engine/mockBridge';
 describe('phase mapping', () => {
   beforeEach(() => {
     jobsByProject.value = { p: [{ job: 'j', project: 'p', state: 'planned' }] };

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { Sidebar } from './Sidebar';
-import { mockBridge } from '../engine/bridge';
+import { mockBridge } from '../engine/mockBridge';
 import {
   projects,
   selectedProject,

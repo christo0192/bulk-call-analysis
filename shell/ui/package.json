@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --strictPort",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && npm run check:dist",
+    "check:dist": "node scripts/check-dist.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "format": "prettier --write .",

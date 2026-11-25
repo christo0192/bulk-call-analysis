@@ -42,6 +42,11 @@ const bannerState = bannerPause
   : mockMode === 'stalled' || mockMode === 'failed' || mockMode === 'cancelled'
     ? mockMode
     : null;
+// `?mock=engine-<status>` (engine-starting, engine-restarting, engine-stopped, engine-error): the
+// engine reports that status, so the banner above the window shows; the projects still load.
+const engineStartStatus = mockMode?.startsWith('engine-')
+  ? mockMode.slice('engine-'.length)
+  : 'ready';
 const BANNER_PROJECT = 'demo-run';
 if (bannerState) {
   for (const job of jobs) if (job.project === BANNER_PROJECT) job.state = bannerState;
@@ -486,6 +491,6 @@ export class MockBridge implements EngineBridge {
   emitStatus(status: string, reason?: string): void {
     this.statuses.forEach((cb) => cb({ status, reason }));
   }
-  status = async () => 'ready';
+  status = async () => engineStartStatus;
 }
 export const mockBridge = new MockBridge();

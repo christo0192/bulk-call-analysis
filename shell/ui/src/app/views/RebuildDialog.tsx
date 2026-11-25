@@ -69,6 +69,21 @@ export function RebuildDialog({
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   useModalFocus(dialog, onClose);
+  // Remove, Rebuild and a finished rebuild take away (or disable) the focused button. Each says
+  // where focus goes next; it moves there after the render, so it never drops out of the dialog.
+  const rulesHeading = useRef<HTMLHeadingElement>(null);
+  const rebuildButton = useRef<HTMLButtonElement>(null);
+  const confirmButton = useRef<HTMLButtonElement>(null);
+  const openButton = useRef<HTMLButtonElement>(null);
+  const focusNext = useRef<(() => HTMLElement | null) | null>(null);
+  useEffect(() => {
+    // An earlier render's effect can run first (before the target is drawn, or while it is still
+    // disabled); keep waiting until the target can take focus.
+    const target = focusNext.current?.();
+    if (!target || (target as HTMLButtonElement).disabled) return;
+    focusNext.current = null;
+    target.focus();
+  });
   useEffect(() => {
     if (firstJob.current !== job) onCloseRef.current();
   }, [job]);
@@ -176,6 +191,8 @@ export function RebuildDialog({
   const rebuild = async () => {
     if (!rules.length && !confirmEmpty) {
       setConfirmEmpty(true);
+      // Rebuild is disabled while the question shows; its answer takes focus.
+      focusNext.current = () => confirmButton.current;
       return;
     }
     setPending(true);
@@ -187,6 +204,8 @@ export function RebuildDialog({
       });
       setRebuilt(result);
       setConfirmEmpty(false);
+      // The new workbook is the next thing to open.
+      focusNext.current = () => openButton.current;
       onRebuilt?.();
     } catch (reason) {
       const parsed = EngineError.from(reason);
@@ -196,6 +215,8 @@ export function RebuildDialog({
           parsed.reason === 'invalid_rules' && typeof detail === 'string' ? detail : parsed.message,
         client: false,
       });
+      // Back to the button that was pressed, enabled again once the rebuild has stopped.
+      focusNext.current = () => confirmButton.current ?? rebuildButton.current;
     } finally {
       setPending(false);
     }
@@ -223,7 +244,9 @@ export function RebuildDialog({
         <p class="dialog-note">
           Re-sorts the stored answers in seconds. No re-reading, no allowance used.
         </p>
-        <h3>Current rules</h3>
+        <h3 ref={rulesHeading} tabIndex={-1}>
+          Current rules
+        </h3>
         {rules.map((item, index) => (
           <div class="rule-row" key={`${item.definition.kind}-${index}`} title={item.summary}>
             <span>{item.summary}</span>
@@ -232,6 +255,14 @@ export function RebuildDialog({
                 setConfirmEmpty(false);
                 setError(null);
                 setRules((items) => items.filter((_, item) => item !== index));
+                // To the Remove button that takes this row's place, the one above, or the heading.
+                focusNext.current = () => {
+                  const removes = [
+                    ...(dialog.current?.querySelectorAll<HTMLButtonElement>('.rule-row button') ??
+                      []),
+                  ];
+                  return removes[Math.min(index, removes.length - 1)] ?? rulesHeading.current;
+                };
               }}
             >
               Remove
@@ -369,29 +400,41 @@ export function RebuildDialog({
           <p class="dialog-note" role="alert">
             This removes every rule from the new workbook.
             <br />
-            <button disabled={pending} onClick={() => void rebuild()}>
+            <button ref={confirmButton} disabled={pending} onClick={() => void rebuild()}>
               Rebuild without rules
             </button>
-            <button onClick={() => setConfirmEmpty(false)}>Keep editing</button>
-          </p>
-        )}
-        {rebuilt && (
-          <p class="rebuild-success">
-            Rebuilt: {rebuilt.name}{' '}
             <button
-              onClick={() =>
-                void openProjectFile(plan.project, rebuilt.path).catch((reason) =>
-                  setError({ message: EngineError.from(reason).message, client: false }),
-                )
-              }
+              onClick={() => {
+                setConfirmEmpty(false);
+                focusNext.current = () => rebuildButton.current;
+              }}
             >
-              Open
+              Keep editing
             </button>
           </p>
         )}
+        {/* Always in the page, so screen readers announce "Rebuilt" when it appears. */}
+        <div role="status">
+          {rebuilt && (
+            <p class="rebuild-success">
+              Rebuilt: {rebuilt.name}{' '}
+              <button
+                ref={openButton}
+                onClick={() =>
+                  void openProjectFile(plan.project, rebuilt.path).catch((reason) =>
+                    setError({ message: EngineError.from(reason).message, client: false }),
+                  )
+                }
+              >
+                Open
+              </button>
+            </p>
+          )}
+        </div>
         <div class="dialog-actions">
           <button onClick={close}>Cancel</button>
           <button
+            ref={rebuildButton}
             class="primary"
             disabled={pending || confirmEmpty || error?.client === true}
             onClick={() => void rebuild()}

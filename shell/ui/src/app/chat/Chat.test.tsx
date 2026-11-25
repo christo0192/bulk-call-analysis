@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { cleanTool } from './Chat';
 import { Chat } from './Chat';
-import { mockBridge } from '../../engine/bridge';
+import { mockBridge } from '../../engine/mockBridge';
 import { EngineError } from '../../engine/client';
 
 const entry = (id: number, role: 'user' | 'assistant' | 'status', text: string, turn = 't1') => ({

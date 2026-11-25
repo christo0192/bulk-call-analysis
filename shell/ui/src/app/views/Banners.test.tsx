@@ -1,11 +1,12 @@
-import { beforeEach, expect, it } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/preact';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/preact';
 import running from '../../mock/fixtures/engine/job-snapshot-running.json';
-import { mockBridge } from '../../engine/bridge';
+import { mockBridge } from '../../engine/mockBridge';
 import { EngineError } from '../../engine/client';
 import { RunView } from './RunView';
 
 beforeEach(() => mockBridge.resetForTest());
+afterEach(() => vi.useRealTimers());
 const snapshot = (changes: Record<string, unknown>) => ({ ...running, ...changes }) as never;
 const reasons = [
   'quota',
@@ -36,6 +37,26 @@ it('every real pause reason has its banner', async () => {
     cleanup();
   }
 });
+it('the quota banner is announced once: its countdown moves on outside the live status', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const resumeAt = Math.floor(Date.now() / 1000) + 3 * 3600;
+  mockBridge.setResponse('job/snapshot', async () =>
+    snapshot({ state: 'paused', pauseReason: 'quota', resumeAt }),
+  );
+  render(<RunView id="job-one" />);
+  const status = await screen.findByRole('status');
+  const announced = status.textContent;
+  expect(announced).toMatch(/Paused: ChatGPT allowance.*allowance resets/);
+  const banner = status.closest('.run-banner') as HTMLElement;
+  expect(banner).toHaveTextContent(/in 3 h\b/);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(61_000);
+  });
+  // The countdown on screen moved on a minute...
+  expect(banner).toHaveTextContent(/in 2 h 59 min/);
+  // ...but the part a screen reader announces did not change, so it is not read out again.
+  expect(status.textContent).toBe(announced);
+});
 it('quota without a reset time asks for resume', async () => {
   mockBridge.setResponse('job/snapshot', async () =>
     snapshot({ state: 'paused', pauseReason: 'quota', resumeAt: null }),
@@ -48,7 +69,8 @@ it('credit buttons call the engine', async () => {
     snapshot({ state: 'paused', pauseReason: 'credit', resumeAt: null }),
   );
   render(<RunView id="job-one" />);
-  const banner = await screen.findByRole('status');
+  // The banner's buttons sit beside its announced status, not inside it.
+  const banner = (await screen.findByRole('status')).closest('.run-banner') as HTMLElement;
   const buttons = within(banner).getAllByRole('button');
   buttons[0]?.click();
   expect(mockBridge.calls.some((call) => call.method === 'job/resume')).toBe(true);

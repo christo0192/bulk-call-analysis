@@ -686,6 +686,17 @@
   color: var(--acc-ink);
   overflow-wrap: anywhere;
 }
+/* The run and done cards fill a wide window, but their text keeps a readable line length and a
+   label stays near its number. */
+.run-banner p,
+.run-note,
+.done-hero > p,
+.done-panel p {
+  max-width: 75ch;
+}
+.reconciliation-line {
+  max-width: 30rem;
+}
 @media (max-width: 700px) {
   .done-columns {
     grid-template-columns: 1fr;

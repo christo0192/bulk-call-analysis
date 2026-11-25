@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import running from '../mock/fixtures/engine/job-snapshot-running.json';
 import { jobs as fixtureJobs, projects as fixtureProjects } from '../mock/fixtures/data';
-import { mockBridge } from '../engine/bridge';
+import { mockBridge } from '../engine/mockBridge';
 import type { JobSummary } from '../engine/types';
 import {
   jobsByProject,
@@ -276,6 +276,29 @@ it('the composer sends on Enter, adds a line on Shift+Enter and keeps focus afte
   expect(document.activeElement).toBe(box);
 });
 
+it('Enter while an input method is composing picks the characters and sends nothing', async () => {
+  mockBridge.setResponse('chat/history', async () => ({ entries: [], more: false }));
+  mockBridge.setResponse('chat/send', async () => ({ status: 'completed', project: 'p1' }));
+  render(<Chat project="p1" />);
+  const box = screen.getByPlaceholderText(/Ask Claude/) as HTMLTextAreaElement;
+  box.focus();
+  fireEvent.input(box, { target: { value: 'にほんご' } });
+  // The input method's Enter: flagged as composing, or (in some browsers) only keyCode 229.
+  expect(fireEvent.keyDown(box, { key: 'Enter', isComposing: true })).toBe(true);
+  expect(fireEvent.keyDown(box, { key: 'Enter', keyCode: 229 })).toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(mockBridge.calls.some((call) => call.method === 'chat/send')).toBe(false);
+  expect(box).toHaveValue('にほんご');
+  // Once the composition has ended, Enter sends.
+  expect(fireEvent.keyDown(box, { key: 'Enter' })).toBe(false);
+  await waitFor(() =>
+    expect(mockBridge.calls).toContainEqual({
+      method: 'chat/send',
+      params: { project: 'p1', text: 'にほんご' },
+    }),
+  );
+});
+
 it('hiding and showing the chat keeps focus on the toggle', async () => {
   frame('demo-run');
   const hide = await screen.findByRole('button', { name: 'Hide chat' });
@@ -324,6 +347,21 @@ it('when the next step replaces the view, focus moves to the project heading', a
   await waitFor(() =>
     expect(document.activeElement).toBe(
       screen.getByRole('heading', { name: /Discount questions/ }),
+    ),
+  );
+});
+
+it('when a run finishes while focus is in the chat, focus moves to the project heading', async () => {
+  frame('demo-run');
+  const box = await screen.findByPlaceholderText(/Ask Claude/);
+  box.focus();
+  // The run finishes: the done view replaces it, and the chat drawer folds to its tab.
+  act(() => setJobState('demo-run', 'done'));
+  await screen.findByTestId('done-view');
+  expect(screen.queryByPlaceholderText(/Ask Claude/)).toBeNull();
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole('heading', { name: /Webinar objections/ }),
     ),
   );
 });

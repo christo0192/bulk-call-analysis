@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { SettingsView } from './SettingsView';
-import { mockBridge } from '../../engine/bridge';
+import { mockBridge } from '../../engine/mockBridge';
 import { settingsOpen, setupRequired } from '../../state/store';
 import { App } from '../App';
 

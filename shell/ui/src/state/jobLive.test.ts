@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import running from '../mock/fixtures/engine/job-snapshot-running.json';
 import { initialJobLive, reduce } from './jobLive';
 import type { JobSnapshot, Notification } from '../engine/types';
-import { mockBridge } from '../engine/bridge';
+import { mockBridge } from '../engine/mockBridge';
 
 beforeEach(() => {
   mockBridge.resetForTest();
