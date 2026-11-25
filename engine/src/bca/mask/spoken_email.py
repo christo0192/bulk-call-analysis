@@ -1015,12 +1015,27 @@ def _provider_replacements_legacy(text: str) -> list[tuple[int, int]]:
     return [(_speaker_start(text, start, end), end) for start, end in result]
 
 
+# Stands in for a very long token: not a space (token boundaries stay), not a word character and
+# none of the parser's punctuation, so no pattern can match inside it or reach across it.
+_LONG_TOKEN_FILLER = "\x00"
+
+
 def provider_replacements(text: str) -> list[tuple[int, int]]:
-    if any(
-        len(token.value) > 1024 and any(char in token.value for char in ".-' ") for token in tokenize(text)
-    ):
-        # The parser's provider patterns are slow inside very long tokens. Main's provider rule
-        # already runs on every text as the floor (patterns.apply_patterns), so leave these
-        # texts to it instead of running it a second time here.
-        return []
+    # The parser's provider patterns backtrack inside very long tokens that hold ".", "-" or "'".
+    # Hide only those tokens, same length so every offset is kept, and still read the rest of the
+    # field: one long link must not switch off provider masking for the whole transcript.
+    long_tokens = [
+        token
+        for token in tokenize(text)
+        if len(token.value) > 1024 and any(char in token.value for char in ".-'")
+    ]
+    if long_tokens:
+        pieces: list[str] = []
+        position = 0
+        for token in long_tokens:
+            pieces.append(text[position : token.raw_start])
+            pieces.append(_LONG_TOKEN_FILLER * (token.raw_end - token.raw_start))
+            position = token.raw_end
+        pieces.append(text[position:])
+        text = "".join(pieces)
     return _provider_replacements_legacy(text)

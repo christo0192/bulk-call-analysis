@@ -162,3 +162,118 @@ def test_main_provider_rule_is_linear(unit: str) -> None:
     small = best_of_three(50_000)
     large = best_of_three(200_000)
     assert large / max(small, 0.01) < 6
+
+
+def _rough_texts() -> list[str]:
+    """Long tokens, punctuation runs and long runs of one-character words, which the plain
+    vocabulary above never builds: gate 10 found the port differed from main after 64 or more
+    one-character tokens, and re-scanned a long trailing punctuation run for every match."""
+    rng = random.Random(10)
+    words = [
+        "ravi",
+        "kumar",
+        "a",
+        "s",
+        "at",
+        "the",
+        "rate",
+        "of",
+        "@",
+        "dot",
+        "com",
+        "gmail",
+        "yahoo",
+        "g",
+        "mail",
+        "is",
+        "my",
+        "okay,",
+        "sir.",
+        "-",
+        ",",
+        "...",
+        "x.gmail",
+        "a'gmail",
+        "gmail-",
+        "@gmail",
+        "AT",
+        "Rate",
+        "it's",
+        "ß",
+        "ﬁ",
+        "!!at!!",
+        "gmail.com,",
+    ]
+
+    def long_token() -> str:
+        size = rng.randint(30, 300)
+        return rng.choice(
+            [
+                "x" + "." * size,
+                "!" * size,
+                "gmail-" * (size // 6 + 1),
+                "a" * size,
+                "".join(rng.choice("ab.,!?-'@") for _ in range(size)),
+            ]
+        )
+
+    texts = []
+    for _ in range(3000):
+        parts = []
+        for _ in range(rng.randint(1, 30)):
+            roll = rng.random()
+            if roll < 0.06:
+                parts.append(long_token())
+            elif roll < 0.10:
+                parts.append(" ".join(rng.choice("abcsu-,.@") for _ in range(rng.randint(40, 120))))
+            else:
+                parts.append(rng.choice(words))
+        texts.append(rng.choice([" ", "  ", "\n"]).join(parts))
+    return texts
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "s u r e s h k u m a r " * 6 + "at gmail dot com",
+        "ok " + "- " * 70 + "ravi at gmail dot com",
+        "ok " + ", " * 70 + "gmail.com",
+        "at " * 300 + "gmail",
+        "@ " * 100 + "@gmail @gmail @gmail",
+    ],
+)
+def test_main_provider_rule_matches_main_after_long_runs(text: str) -> None:
+    # Main walks back with no token limit; the port must too.
+    assert sorted(set(provider_replacements(text))) == sorted(set(_main_oracle(text)))
+
+
+def test_main_provider_rule_matches_main_on_rough_texts() -> None:
+    for text in _rough_texts():
+        assert sorted(set(provider_replacements(text))) == sorted(set(_main_oracle(text)))
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        # A long trailing punctuation run, then one token full of provider words.
+        lambda size: "x" + "." * (size // 2) + " " + ("gmail-" * (size // 12 + 1))[: size // 2],
+        lambda size: "word" + "!" * (size // 2) + " " + ("yahoo." * (size // 12 + 1))[: size // 2],
+        # Thousands of one-character words before thousands of matches.
+        lambda size: "a " * (size // 4) + ("gmail-" * (size // 12 + 1))[: size // 2],
+        lambda size: "at " * (size // 6) + ("gmail " * (size // 12 + 1))[: size // 2],
+    ],
+    ids=["dots-then-gmail", "bangs-then-yahoo", "one-char-words", "connectors"],
+)
+def test_main_provider_rule_is_linear_on_shaped_texts(build: object) -> None:
+    def best_of_three(size: int) -> float:
+        text = build(size)  # type: ignore[operator]
+        timings = []
+        for _ in range(3):
+            started = time.perf_counter()
+            provider_replacements(text)
+            timings.append(time.perf_counter() - started)
+        return min(timings)
+
+    small = best_of_three(50_000)
+    large = best_of_three(200_000)
+    assert large / max(small, 0.01) < 6
