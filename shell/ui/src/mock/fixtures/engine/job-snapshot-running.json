@@ -148,5 +148,6 @@
     }
   ],
   "reconciliation": null,
-  "failure": null
+  "failure": null,
+  "stall": null
 }

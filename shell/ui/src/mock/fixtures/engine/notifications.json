@@ -257,8 +257,8 @@
       "params": {
         "kind": "activity",
         "job": "job-one",
-        "last_activity_ts": 1795519468.402469,
-        "in_flight": 1,
+        "last_activity_ts": 1795587802.4192355,
+        "in_flight": 2,
         "workers": 4
       }
     },
@@ -326,7 +326,7 @@
     {
       "jsonrpc": "2.0",
       "method": "engine/event",
-      "params": { "kind": "pause", "job": "job-one", "reason": "quota", "resume_at": 1795523054 }
+      "params": { "kind": "pause", "job": "job-one", "reason": "quota", "resume_at": 1795591387 }
     },
     {
       "jsonrpc": "2.0",

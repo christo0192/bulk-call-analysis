@@ -139,5 +139,6 @@
     { "ts": 1700000000, "kind": "state", "text": "State changed from full_running to paused." }
   ],
   "reconciliation": null,
-  "failure": null
+  "failure": null,
+  "stall": null
 }

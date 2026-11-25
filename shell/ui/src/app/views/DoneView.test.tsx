@@ -76,7 +76,7 @@ it('newest workbook compares integers', async () => {
   await waitFor(() =>
     expect(openProjectFile).toHaveBeenCalledWith(
       'project-one',
-      'jobs/job-one/output/results.v1.xlsx',
+      'jobs/job-one/output/results.v2.xlsx',
     ),
   );
 });

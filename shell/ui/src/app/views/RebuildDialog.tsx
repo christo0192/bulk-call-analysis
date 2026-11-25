@@ -12,6 +12,8 @@ import type {
 } from '../../engine/types';
 
 type Kind = 'in_scope' | 'threshold_group' | 'review_flag';
+type DialogRule = { definition: Rule; summary: string };
+type DialogError = { message: string; client: boolean };
 const operators = [
   'eq',
   'ne',
@@ -40,8 +42,12 @@ export function RebuildDialog({
 }) {
   const dialog = useRef<HTMLDivElement>(null);
   const opener = useRef<Element | null>(null);
-  const [rules, setRules] = useState<Rule[]>(
-    plan.rules.flatMap((rule) => (rule.definition ? [withoutNullValue(rule.definition)] : [])),
+  const [rules, setRules] = useState<DialogRule[]>(
+    plan.rules.flatMap((rule) =>
+      rule.definition
+        ? [{ definition: withoutNullValue(rule.definition), summary: rule.summary }]
+        : [],
+    ),
   );
   const [kind, setKind] = useState<Kind>('threshold_group');
   const [name, setName] = useState('');
@@ -54,7 +60,7 @@ export function RebuildDialog({
   const [labels, setLabels] = useState('');
   const [match, setMatch] = useState<'all' | 'any'>('all');
   const [conditions, setConditions] = useState<RuleCondition[]>([blank()]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DialogError | null>(null);
   const [rebuilt, setRebuilt] = useState<RebuildResult | null>(null);
   const [pending, setPending] = useState(false);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
@@ -130,32 +136,65 @@ export function RebuildDialog({
     if (kind === 'threshold_group') {
       const rawEdges = edges.split(',').map((value) => value.trim());
       if (rawEdges.some((value) => !value || !Number.isFinite(Number(value))))
-        return setError(
-          `Edge "${rawEdges.find((value) => !value || !Number.isFinite(Number(value))) ?? ''}" is not a finite number.`,
-        );
+        return setError({
+          message: `Edge "${rawEdges.find((value) => !value || !Number.isFinite(Number(value))) ?? ''}" is not a finite number.`,
+          client: true,
+        });
       const numbers = rawEdges.map(Number);
       if (numbers.some((value, index) => index > 0 && value <= numbers[index - 1]!))
-        return setError('Edges must be strictly increasing.');
+        return setError({ message: 'Edges must be strictly increasing.', client: true });
       const names = labels.split(',').map((value) => value.trim());
       if (names.some((value) => !value) || names.length !== numbers.length + 1)
-        return setError('Labels must contain one more non-empty item than edges.');
-      if (new Set(names).size !== names.length) return setError('Labels must be unique.');
+        return setError({
+          message: 'Labels must contain one more non-empty item than edges.',
+          client: true,
+        });
+      if (new Set(names).size !== names.length)
+        return setError({ message: 'Labels must be unique.', client: true });
       setRules((items) => [
         ...items,
-        { kind, name: name || nextName('band', items), field, edges: numbers, labels: names },
+        {
+          definition: {
+            kind,
+            name:
+              name ||
+              nextName(
+                'band',
+                items.map((item) => item.definition),
+              ),
+            field,
+            edges: numbers,
+            labels: names,
+          },
+          summary:
+            name ||
+            nextName(
+              'band',
+              items.map((item) => item.definition),
+            ),
+        },
       ]);
     } else {
       if (conditions.some((item) => !item.field || !item.op))
-        return setError('Complete every condition.');
+        return setError({ message: 'Enter a value', client: true });
       const validation = conditions.flatMap((condition) => validateCondition(condition, plan));
-      if (validation.length) return setError(validation[0]!);
+      if (validation.length) return setError({ message: validation[0]!, client: true });
       const definition = {
         kind,
-        ...(kind === 'review_flag' ? { name: name || nextName('review flag', rules) } : {}),
+        ...(kind === 'review_flag'
+          ? {
+              name:
+                name ||
+                nextName(
+                  'review flag',
+                  rules.map((item) => item.definition),
+                ),
+            }
+          : {}),
         match,
         conditions: conditions.map((condition) => typedCondition(condition, plan)),
       } as Rule;
-      setRules((items) => [...items, definition]);
+      setRules((items) => [...items, { definition, summary: ruleTitle(definition) }]);
     }
     setName('');
     setEdges('');
@@ -171,21 +210,26 @@ export function RebuildDialog({
     setPending(true);
     setError(null);
     try {
-      const result = await bridge.call('job/rebuildRules', { job, rules });
+      const result = await bridge.call('job/rebuildRules', {
+        job,
+        rules: rules.map((item) => item.definition),
+      });
       setRebuilt(result);
       setConfirmEmpty(false);
       onRebuilt?.();
     } catch (reason) {
       const parsed = EngineError.from(reason);
       const detail = (parsed.data as { detail?: unknown } | null)?.detail;
-      setError(
-        parsed.reason === 'invalid_rules' && typeof detail === 'string' ? detail : parsed.message,
-      );
+      setError({
+        message:
+          parsed.reason === 'invalid_rules' && typeof detail === 'string' ? detail : parsed.message,
+        client: false,
+      });
     } finally {
       setPending(false);
     }
   };
-  const currentInScope = rules.some((rule) => rule.kind === 'in_scope');
+  const currentInScope = rules.some((item) => item.definition.kind === 'in_scope');
   return (
     <div class="modal-backdrop">
       <div
@@ -205,12 +249,13 @@ export function RebuildDialog({
           Re-sorts the stored answers in seconds. No re-reading, no allowance used.
         </p>
         <h3>Current rules</h3>
-        {rules.map((rule, index) => (
-          <div class="rule-row" key={`${rule.kind}-${index}`} title={ruleTitle(rule)}>
-            <span>{ruleTitle(rule)}</span>
+        {rules.map((item, index) => (
+          <div class="rule-row" key={`${item.definition.kind}-${index}`} title={item.summary}>
+            <span>{item.summary}</span>
             <button
               onClick={() => {
                 setConfirmEmpty(false);
+                setError(null);
                 setRules((items) => items.filter((_, item) => item !== index));
               }}
             >
@@ -335,14 +380,14 @@ export function RebuildDialog({
           </>
         )}
         <button
-          disabled={!!error || (kind === 'threshold_group' && !hasNumberColumn)}
+          disabled={error?.client === true || (kind === 'threshold_group' && !hasNumberColumn)}
           onClick={addRule}
         >
           Add rule
         </button>
         {error && (
           <p class="dialog-error" role="alert">
-            {error}
+            {error.message}
           </p>
         )}
         {confirmEmpty && (
@@ -361,7 +406,7 @@ export function RebuildDialog({
             <button
               onClick={() =>
                 void openProjectFile(plan.project, rebuilt.path).catch((reason) =>
-                  setError(EngineError.from(reason).message),
+                  setError({ message: EngineError.from(reason).message, client: false }),
                 )
               }
             >
@@ -373,7 +418,7 @@ export function RebuildDialog({
           <button onClick={close}>Cancel</button>
           <button
             class="primary"
-            disabled={pending || confirmEmpty || !!error}
+            disabled={pending || confirmEmpty || error?.client === true}
             onClick={() => void rebuild()}
           >
             Rebuild
@@ -492,13 +537,13 @@ function validateCondition(condition: RuleCondition, plan: PlanCard): string[] {
   const values = String(condition.value ?? '')
     .split(',')
     .map((item) => item.trim());
+  if (column?.type === 'boolean' && values.some((value) => value !== 'true' && value !== 'false'))
+    return ['Choose Yes or No'];
   if (values.some((value) => !value)) return ['Enter a value'];
   if (column?.type === 'integer' && values.some((value) => !/^-?\d+$/.test(value)))
     return ['Whole numbers only'];
   if (column?.type === 'number' && values.some((value) => !Number.isFinite(Number(value))))
     return ['Enter a finite number'];
-  if (column?.type === 'boolean' && values.some((value) => value !== 'true' && value !== 'false'))
-    return ['Choose Yes or No'];
   return [];
 }
 function typedCondition(condition: RuleCondition, plan: PlanCard): RuleCondition {

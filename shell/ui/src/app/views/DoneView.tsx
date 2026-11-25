@@ -20,7 +20,7 @@ const fileError = (error: unknown) => {
   if (parsed.reason === 'type_not_allowed') return "The app can't open that file type";
   return parsed.message;
 };
-const fileRank = (file: OutputFile) => [file.specVersion ?? -1, file.rebuild ?? -1] as const;
+const fileRank = (file: OutputFile) => [file.specVersion ?? -1, file.rebuild ?? 0] as const;
 
 export function DoneView({
   id,

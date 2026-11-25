@@ -63,9 +63,9 @@ it('removing a rule removes it from the payload', async () => {
   expect(within(dialog).getAllByRole('button', { name: 'Remove' })).toHaveLength(2);
   fireEvent.click(within(dialog).getAllByRole('button', { name: 'Remove' })[0]!);
   expect(within(dialog).getAllByRole('button', { name: 'Remove' })).toHaveLength(1);
+  // One rule is left, so the rebuild goes straight through with only that rule.
   fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild' }));
-  expect(within(dialog).getByRole('alert')).toHaveTextContent('removes every rule');
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild without rules' }));
+  expect(within(dialog).queryByText(/removes every rule/)).toBeNull();
   await vi.waitFor(() =>
     expect(mockBridge.calls).toContainEqual({
       method: 'job/rebuildRules',
@@ -314,7 +314,9 @@ it('bands refuse empty and non numeric edges', () => {
 
 it('double click sends one call', async () => {
   const dialog = renderDialog(vi.fn(), planWithRules);
-  fireEvent.doubleClick(within(dialog).getByRole('button', { name: 'Rebuild' }));
+  const rebuild = within(dialog).getByRole('button', { name: 'Rebuild' });
+  fireEvent.click(rebuild);
+  fireEvent.click(rebuild);
   await vi.waitFor(() =>
     expect(mockBridge.calls.filter((call) => call.method === 'job/rebuildRules')).toHaveLength(1),
   );
