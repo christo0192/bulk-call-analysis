@@ -38,11 +38,28 @@ it('eta known shows the range and finish time', async () => {
     expect(screen.getByText(/Somewhere between 1 h and 2 h/)).toBeInTheDocument(),
   );
 });
-it('last activity ticks every second and shows a dash when null', async () => {
-  vi.useFakeTimers({ shouldAdvanceTime: true });
+it('last activity shows a dash when the engine has seen no activity yet', async () => {
+  const snapshot = running as unknown as JobSnapshot;
+  mockBridge.setResponse('job/snapshot', async () => ({
+    ...snapshot,
+    activity: { ...snapshot.activity, lastActivityTs: null },
+  }));
   render(<RunView id="job-one" />);
-  await vi.advanceTimersByTimeAsync(1000);
   await waitFor(() => expect(screen.getByText(/Last activity —/)).toBeInTheDocument());
+});
+
+it('last activity counts up every second from the engine time', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const snapshot = running as unknown as JobSnapshot;
+  const now = Math.floor(Date.now() / 1000);
+  mockBridge.setResponse('job/snapshot', async () => ({
+    ...snapshot,
+    activity: { ...snapshot.activity, lastActivityTs: now - 5 },
+  }));
+  render(<RunView id="job-one" />);
+  await waitFor(() => expect(screen.getByText(/Last activity [5-7] s ago/)).toBeInTheDocument());
+  await vi.advanceTimersByTimeAsync(3000);
+  await waitFor(() => expect(screen.getByText(/Last activity (8|9|10) s ago/)).toBeInTheDocument());
 });
 it('progress notification updates counts in place', async () => {
   render(<RunView id="job-one" />);
