@@ -608,3 +608,54 @@ def test_turn_failed_entry_has_plain_words_not_the_raw_error(tmp_path: Path, rea
     entry = json.loads(stored.splitlines()[-1])
     assert entry["role"] == "status" and entry["text"] == text
     assert "synthetic raw detail" not in stored and "9876543210" not in stored
+
+
+# Live launch, 2026-11-26: a signed-out Codex answered "account authentication required to read
+# rate limits", which auth/status turned into "Internal error" on the first-run checklist.
+def test_signed_out_codex_reads_as_not_signed_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state: dict[str, Any] = {"logged_in": False}
+    backend = make_backend(tmp_path, launch_pool=_fake_launch(state))
+    _signed_out_claude(monkeypatch)
+    status = cast(dict[str, Any], run(backend.call("auth/status", {})))
+    assert status["codex"]["loggedIn"] is False
+    assert cast(dict[str, Any], run(backend.call("allowance/status", {})))["codex"] is None
+    # Signed out: the rate limits are never asked for (Codex refuses them).
+    assert "account/rateLimits/read" not in state["calls"]
+
+
+def test_rate_limits_needing_sign_in_read_as_not_signed_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state: dict[str, Any] = {
+        "fail": {
+            "account/rateLimits/read": AppServerRpcError(
+                -32600, "codex account authentication required to read rate limits"
+            )
+        }
+    }
+    backend = make_backend(tmp_path, launch_pool=_fake_launch(state))
+    _signed_out_claude(monkeypatch)
+    status = cast(dict[str, Any], run(backend.call("auth/status", {})))
+    assert status["codex"]["loggedIn"] is False
+
+
+def test_concurrent_status_calls_start_codex_once(tmp_path: Path) -> None:
+    # Two Codex processes starting at once on one CODEX_HOME failed ("failed to initialize sqlite").
+    state: dict[str, Any] = {"logged_in": True}
+    launches: list[int] = []
+    inner = _fake_launch(state)
+
+    async def counting_launch() -> Any:
+        launches.append(1)
+        await asyncio.sleep(0.05)
+        return await inner()
+
+    backend = make_backend(tmp_path, launch_pool=counting_launch)
+
+    async def together() -> list[Any]:
+        return list(await asyncio.gather(*(backend._codex_allowance() for _ in range(4))))
+
+    results = asyncio.run(together())
+    assert len(launches) == 1
+    assert all(result == results[0] for result in results)
+    assert results[0] is not None and results[0]["loggedIn"] is True
