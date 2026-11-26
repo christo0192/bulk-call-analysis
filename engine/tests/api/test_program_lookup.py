@@ -38,6 +38,11 @@ def _file(path: Path, text: str = "") -> Path:
     return path
 
 
+def _is_missing_program(path: Path, stem: str) -> bool:
+    """Windows: an absolute <stem>.exe that does not exist, so CreateProcess does no search."""
+    return path.is_absolute() and path.name.lower() == f"{stem}.exe" and not path.exists()
+
+
 def _npm_codex(shim_dir: Path) -> Path:
     """npm's layout: codex.cmd in the shim folder, the native codex.exe inside the package."""
     _file(shim_dir / "codex.cmd", "@echo off\r\n")
@@ -65,9 +70,8 @@ def test_a_lone_cmd_shim_is_never_started(tmp_path: Path, monkeypatch: pytest.Mo
     _file(npm / "claude.cmd", "@echo off\r\n")
     _file(npm / "tool.bat", "@echo off\r\n")
     _only_on_path(monkeypatch, npm)
-    assert _program("claude") == Path("claude")
-    assert _program("tool") == Path("tool")
-    assert not _program("claude").is_file()
+    assert _is_missing_program(_program("claude"), "claude")
+    assert _is_missing_program(_program("tool"), "tool")
 
 
 @windows_only
@@ -96,9 +100,13 @@ def test_a_bare_name_is_looked_up_on_path(tmp_path: Path, monkeypatch: pytest.Mo
     assert _program("synthetic-tool") == program.absolute()
 
 
-def test_an_unknown_name_is_used_as_given(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_unknown_name_is_reported_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _only_on_path(monkeypatch, tmp_path)
-    assert _program("synthetic-tool-not-installed") == Path("synthetic-tool-not-installed")
+    found = _program("synthetic-tool-not-installed")
+    if sys.platform == "win32":
+        assert _is_missing_program(found, "synthetic-tool-not-installed")
+    else:
+        assert found == Path("synthetic-tool-not-installed")
 
 
 @windows_only
@@ -137,9 +145,10 @@ def test_the_codex_row_and_the_launch_use_the_same_file(
         assert row["status"] == "ok"
         assert started == native.resolve()
     else:
-        # Nothing startable: the row says so, and the launch gets the bare name (it fails).
+        # Nothing startable: the row says so, and the launch gets a missing absolute path (it
+        # fails without Windows searching the current folder for a codex.exe).
         assert row["status"] == "failed"
-        assert started == Path("codex")
+        assert _is_missing_program(started, "codex")
 
 
 @pytest.mark.parametrize(
@@ -190,7 +199,7 @@ def test_a_double_extension_shim_is_never_picked(tmp_path: Path, monkeypatch: py
     exe = _file(native / "claude.exe")
     _only_on_path(monkeypatch, shims, native)
     assert _program("claude") == exe.absolute()
-    assert _program("codex") == Path("codex")
+    assert _is_missing_program(_program("codex"), "codex")
 
 
 @windows_only
@@ -222,3 +231,36 @@ def test_a_configured_codex_without_a_startable_file_is_not_found_by_row_or_laun
     started = Path(str(launched[-1]))
     assert not started.is_file()
     assert started.suffix.lower() == ".exe"
+
+
+@windows_only
+def test_a_program_only_in_the_current_folder_is_not_found_or_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CreateProcess searches the current folder for a bare name; the lookup returns an absolute
+    # missing path instead, so neither the setup row nor the launch uses these files.
+    start = tmp_path / "start-folder"
+    _file(start / "codex.exe")
+    _file(start / "claude.exe")
+    monkeypatch.chdir(start)
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    _only_on_path(monkeypatch, tmp_path / "empty")
+    for name in ("codex", "claude"):
+        found = _program(name)
+        assert _is_missing_program(found, name)
+        assert found.parent != start
+
+
+@windows_only
+def test_a_folder_named_like_the_program_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "a" / "claude.exe").mkdir(parents=True)
+    exe = _file(tmp_path / "b" / "claude.exe")
+    _only_on_path(monkeypatch, tmp_path / "a", tmp_path / "b")
+    assert _program("claude") == exe.absolute()
+
+
+@windows_only
+def test_a_quoted_path_entry_is_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    exe = _file(tmp_path / "with space" / "claude.exe")
+    monkeypatch.setenv("PATH", f'"{exe.parent}"')
+    assert _program("claude") == exe.absolute()

@@ -431,9 +431,21 @@ def _on_path_exactly(file_name: str) -> Path | None:
     (it would accept `claude.exe.cmd`) and the current folder is not searched."""
     for folder in os.environ.get("PATH", "").split(os.pathsep):
         folder = folder.strip().strip('"')
-        if folder and (Path(folder) / file_name).is_file():
-            return (Path(folder) / file_name).absolute()
+        if not folder:
+            continue
+        try:
+            if (Path(folder) / file_name).is_file():
+                return (Path(folder) / file_name).absolute()
+        except OSError:
+            continue  # an unreadable folder or file: look further along PATH
     return None
+
+
+def _missing_program(stem: str) -> Path:
+    """An absolute path that does not exist, for a program that was not found. Given a bare name,
+    Windows' CreateProcess would search the current folder (and add .exe) where our lookup did not,
+    so the launch could start a program the setup check said was missing."""
+    return Path(tempfile.gettempdir()).absolute() / "bca-program-not-found" / f"{stem}.exe"
 
 
 def _program(name: str) -> Path:
@@ -446,9 +458,10 @@ def _program(name: str) -> Path:
     `codex.exe` npm installed with it is used instead. A configured path without an extension gets
     `.exe` (npm's extensionless `codex` is a shell script Windows cannot start). A `.cmd` or `.bat`
     someone set on purpose in BCA_CLAUDE_BIN or BCA_CODEX_BIN is used as given (the test launchers
-    are .cmd files). Elsewhere a bare name is looked up on PATH. Whatever comes back is either a
-    startable file, as an absolute path, or a name that does not exist, so the setup check
-    (is_file) and the launch always agree.
+    are .cmd files). Elsewhere a bare name is looked up on PATH. On Windows whatever comes back
+    is an absolute path, the startable file or one that does not exist: never a bare name, which
+    CreateProcess would search for in the current folder. So the setup check (is_file) and the
+    launch always agree.
     """
     path = Path(name)
     bare = path.parent == Path(".")
@@ -464,21 +477,22 @@ def _program(name: str) -> Path:
             return exe_on_path
         shim = _on_path_exactly(stem.name + ".cmd")
         native = _npm_native_codex(shim.parent) if shim is not None and is_codex else None
-        return native if native is not None else path
+        return native if native is not None else _missing_program(stem.name)
     if suffix == ".exe":
         return path.absolute()
     if suffix in {".cmd", ".bat"}:
         native = _npm_native_codex(path.parent) if is_codex else None
         return native if native is not None else path.absolute()
-    executable = stem.with_name(stem.name + ".exe")
+    executable = stem.with_name(stem.name + ".exe").absolute()
     if executable.is_file():
-        return executable.absolute()
+        return executable
     if is_codex and stem.with_name(stem.name + ".cmd").is_file():
         native = _npm_native_codex(stem.parent)
         if native is not None:
             return native
-    # Nothing Windows can start: the missing .exe, so the check and the launch both say not found.
-    return executable.absolute()
+    # Nothing Windows can start: the missing .exe (absolute, so no search), so the check and the
+    # launch both say not found.
+    return executable
 
 
 class ProductionBackend(ApiBackend):
