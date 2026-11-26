@@ -1827,7 +1827,8 @@ class ProductionBackend(ApiBackend):
                 else None,
                 "rebuild": int(match.group(2)) if match and match.group(2) else None,
             }
-            for p in (folder / "output").glob("*")
+            # Sorted by name: glob order differs between file systems (it did on macOS).
+            for p in sorted((folder / "output").glob("*"), key=lambda item: item.name)
             if self._finished_output(p)
         ]
         summary = folder.parent.parent / "summary.md"

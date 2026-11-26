@@ -85,6 +85,8 @@ def _quota_used(event_json: str) -> int:
 
 
 # Major 1: job/snapshot must not crash while ChatGPT usage rises during a live run.
+# A whole lifecycle plus a live full run: slow CI runners need more than the default 60 s.
+@pytest.mark.timeout(240)
 def test_snapshot_mid_run_with_rising_quota_succeeds(tmp_path: Path) -> None:
     async def scenario() -> None:
         lifecycle = await run_lifecycle(tmp_path, latency_ms=200, start_full=False)

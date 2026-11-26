@@ -36,6 +36,9 @@ def _normalise(value: Any, data_dir: Path, ids: dict[str, str]) -> Any:
         return [_normalise(item, data_dir, ids) for item in value]
     if isinstance(value, str):
         text = value.replace(str(data_dir), "<dataDir>")
+        if text.startswith("<dataDir>"):
+            # The same recording on every platform: Windows paths use backslashes.
+            text = text.replace("\\", "/")
         match = _UUID.fullmatch(text)
         if match:
             return ids.setdefault(text, f"uuid-{len(ids) + 1}")
