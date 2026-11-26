@@ -22,6 +22,8 @@ export const setupRequired = signal(false);
 export const settingsOpen = signal(false);
 export const setupItems = signal<SetupItem[]>([]);
 export const loadError = signal<string | null>(null);
+/** True once the first project list has arrived (or failed): until then, nothing says "no projects". */
+export const projectsLoaded = signal(false);
 export type Capability = 'available' | 'unknown' | 'missing';
 export const capabilities = signal<Record<string, Capability>>({});
 let removeNotification: (() => void) | undefined;
@@ -167,6 +169,7 @@ async function loadOnce(): Promise<void> {
     setupItems.value = await bridge.call('setup/checklist', {});
     projects.value = await bridge.call('projects/list', {});
     selectedProject.value ??= projects.value[0]?.project ?? null;
+    projectsLoaded.value = true;
     await refetchJobs(projects.value.map((project) => project.project));
     try {
       allowances.value = await bridge.call('allowance/status', {});
@@ -207,5 +210,7 @@ async function loadOnce(): Promise<void> {
       loadError.value = e.message;
       console.warn(`Unable to load engine data: ${e.message}`);
     }
+  } finally {
+    projectsLoaded.value = true;
   }
 }
