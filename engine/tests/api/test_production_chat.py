@@ -6,6 +6,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from itertools import count
 from pathlib import Path
 from typing import Any, cast
@@ -25,6 +26,7 @@ from bca.config import (
     RetentionConfig,
     SiteConfig,
 )
+from bca.procutil import pid_alive
 from bca.store import open_store
 from tests.fakes.fake_bq import FakeBqRunner
 
@@ -129,9 +131,7 @@ def test_chat_stop_mid_turn_keeps_toolhost_healthy(tmp_path: Path, monkeypatch: 
         await backend.call("chat/stop", {"project": "project-one"})
         child_pid = int(child_pid_file.read_text(encoding="utf-8"))
         for _ in range(100):
-            try:
-                os.kill(child_pid, 0)
-            except OSError:
+            if not pid_alive(child_pid):
                 break
             await asyncio.sleep(0.01)
         else:
@@ -224,9 +224,7 @@ def test_second_concurrent_turn_same_project_is_refused(
         assert pid_file.exists()
         hanging_pid = int(pid_file.read_text(encoding="utf-8"))
         for _ in range(100):
-            try:
-                os.kill(hanging_pid, 0)
-            except OSError:
+            if not pid_alive(hanging_pid):
                 break
             await asyncio.sleep(0.01)
         else:
@@ -346,8 +344,7 @@ def test_stdio_shutdown_during_turn_stops_claude(tmp_path: Path, monkeypatch: py
         await backend.call("shutdown", {})
         assert await turn == {"status": "stopped", "project": "project-one"}
         pid = int(pid_file.read_text(encoding="utf-8"))
-        with pytest.raises(OSError):
-            os.kill(pid, 0)
+        assert wait_until_gone(pid)
         assert not (tmp_path / "projects" / "project-one" / "chat" / "mcp.json").exists()
 
     run(scenario())
@@ -521,3 +518,14 @@ def test_end_to_end_chat_over_stdio(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     stdout, stderr = process.communicate(timeout=5)
     assert not stdout
     assert not stderr
+
+
+def wait_until_gone(pid: int, seconds: float = 5.0) -> bool:
+    """True once *pid* has exited. os.kill(pid, 0) is not a liveness check on Windows: signal 0
+    is CTRL_C_EVENT there, sent to a console process group, and it interrupted the test run."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return not pid_alive(pid)
