@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 from collections.abc import AsyncIterator
@@ -82,7 +83,7 @@ def build_turn_command(
     max_turns: int = 25,
     session: SessionRef | None = None,
 ) -> list[str]:
-    if not model.startswith("claude-") or "[" in model or model.endswith("plan"):
+    if not re.fullmatch(r"claude-[a-z0-9][a-z0-9.-]*", model) or model.endswith("plan"):
         raise ValueError("Claude model must be a fully qualified pinned subscription model name")
     if effort not in ALLOWED_EFFORTS:
         raise ValueError("unsupported effort")

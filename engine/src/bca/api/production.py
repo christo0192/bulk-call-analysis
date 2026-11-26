@@ -406,18 +406,60 @@ class JobManager:
             self.backend._codex_logins.discard(process)
 
 
-def _program(name: str) -> Path:
-    """A program to launch: a bare name is looked up on PATH, as a shell would.
+# npm installs Codex as a `codex.cmd` shim next to its package; the shim's codex.js only finds
+# and starts this native program, which the engine can start directly.
+_NPM_CODEX_NATIVE = {
+    "AMD64": ("@openai/codex-win32-x64", "x86_64-pc-windows-msvc"),
+    "ARM64": ("@openai/codex-win32-arm64", "aarch64-pc-windows-msvc"),
+}
 
-    Windows cannot start npm's `codex` shim by its bare name (the file is `codex.cmd`), so the
-    launch failed with "file not found" while the setup check, which uses the same lookup as
-    here, said Codex was installed. A name with a folder in it is used as given.
+
+def _npm_native_codex(shim_dir: Path) -> Path | None:
+    import platform
+
+    package, triple = _NPM_CODEX_NATIVE.get(platform.machine().upper(), _NPM_CODEX_NATIVE["AMD64"])
+    root = shim_dir / "node_modules" / "@openai" / "codex"
+    for vendor in (root / "node_modules" / package / "vendor", root / "vendor"):
+        native = vendor / triple / "bin" / "codex.exe"
+        if native.is_file():
+            return native.resolve()
+    return None
+
+
+def _program(name: str) -> Path:
+    """The program file to launch for `name` (a bare name, or a path from BCA_*_BIN).
+
+    The lookup never picks a `.cmd` or `.bat` on its own: Windows runs those through cmd.exe, where
+    text on the command line (a data folder named like "R&D") would be read as commands and could
+    cut off the flags that keep Claude contained. So on Windows a bare name finds `<name>.exe`
+    only, as Windows itself does, but as a full path; and when only npm's `codex.cmd` shim is
+    there, the native `codex.exe` npm installed with it is used instead. A path someone set on
+    purpose in BCA_CLAUDE_BIN or BCA_CODEX_BIN is used as given (the test launchers are .cmd files).
+    Elsewhere a bare name is looked up on PATH. Whatever is found is returned as an absolute path,
+    so the setup check and the launch look at the same file; if nothing is found the name comes
+    back unchanged and the launch fails with "not found", as the setup check also says.
     """
     path = Path(name)
-    if path.parent == Path("."):
-        found = shutil.which(name)
+    bare = path.parent == Path(".")
+    if os.name != "nt":
+        found = shutil.which(name) if bare else (name if path.is_file() else None)
+        return Path(found).absolute() if found is not None else path
+    stem = path.with_suffix("") if path.suffix.lower() in {".exe", ".cmd", ".bat"} else path
+    executable = stem.with_name(stem.name + ".exe")
+    if bare:
+        found = shutil.which(executable.name)
         if found is not None:
-            return Path(found)
+            return Path(found).absolute()
+        shim = shutil.which(stem.name + ".cmd")
+        shim_dir = Path(shim).parent if shim is not None else None
+    else:
+        if executable.is_file():
+            return executable.absolute()
+        shim_dir = stem.parent if stem.with_name(stem.name + ".cmd").is_file() else None
+    if shim_dir is not None and stem.name.lower() == "codex":
+        native = _npm_native_codex(shim_dir)
+        if native is not None:
+            return native
     return path
 
 
@@ -536,7 +578,8 @@ class ProductionBackend(ApiBackend):
             return True, "Name-masking model installed."
 
         def codex_copy() -> tuple[bool, str]:
-            if shutil.which(str(self._codex_binary())) is not None:
+            # The exact file the launch will start (see _program), so the two cannot disagree.
+            if self._codex_binary().is_file():
                 return True, "Codex program found."
             return False, "The Codex program was not found. Install it, then press Check again."
 
@@ -2116,7 +2159,8 @@ class ProductionBackend(ApiBackend):
         claude = params.get("claudeModel")
         if claude is not None and (
             not isinstance(claude, str)
-            or not claude.startswith("claude-")
+            # Letters, digits, dots and dashes only: it goes on Claude's command line.
+            or not re.fullmatch(r"claude-[a-z0-9][a-z0-9.-]*", claude)
             or claude in {"claude-", "claude-opus", "claude-x"}
             or "[" in claude
             or claude.endswith("plan")
