@@ -33,6 +33,7 @@ from bca.coordinator.runner import Clock, JobRunner, RunnerDeps
 from bca.luna.appserver import LOCKDOWN_OVERRIDES, CodexLaunch
 from bca.luna.appserver import start as start_app_server
 from bca.luna.quota import parse_rate_limits
+from bca.luna.rpc import RpcError as AppServerRpcError
 from bca.mask.masker import MaskingContext, mask_text
 from bca.mask.names import SpacyNer
 from bca.mcp.host import ToolHost, start_ipc_thread
@@ -547,7 +548,10 @@ class ProductionBackend(ApiBackend):
         self._chat_notify: Callable[[str, dict[str, object]], Awaitable[None]] | None = None
         self._login_processes: set[subprocess.Popen[str]] = set()
         self._codex_logins: set[subprocess.Popen[str]] = set()
-        self._codex_allowance_cache: tuple[float, dict[str, object]] | None = None
+        # None as the value means signed out: cached too, so a signed-out PC does not start Codex for
+        # every status call.
+        self._codex_allowance_cache: tuple[float, dict[str, object] | None] | None = None
+        self._codex_allowance_locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
         self._chat_sessions_store = SessionStore(self.app_data / "claude" / "sessions.json")
         self._closed = False
         self._stopping = False
@@ -1249,7 +1253,23 @@ class ProductionBackend(ApiBackend):
                 self._codex_logins.discard(process)
         return changed
 
+    def _codex_allowance_lock(self) -> asyncio.Lock:
+        """One lock per event loop: concurrent status calls share one Codex start. Two Codex
+        processes starting at once on one CODEX_HOME fail ("failed to initialize sqlite state")."""
+        loop = asyncio.get_running_loop()
+        lock = self._codex_allowance_locks.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            # Only the current loop's lock is kept (tests run each call in its own loop).
+            self._codex_allowance_locks = {loop: lock}
+        return lock
+
     async def _codex_allowance(self) -> dict[str, object] | None:
+        """The Codex allowance, None when signed out; raises when Codex cannot start or answer."""
+        async with self._codex_allowance_lock():
+            return await self._read_codex_allowance()
+
+    async def _read_codex_allowance(self) -> dict[str, object] | None:
         now = self.clock.now()
         if self._codex_login_changed():
             self._codex_allowance_cache = None
@@ -1259,7 +1279,20 @@ class ProductionBackend(ApiBackend):
         app_server = await self._launch(auth_dir)
         try:
             account = await app_server.client.request("account/read")
-            limits = await app_server.client.request("account/rateLimits/read")
+            if not account.get("account"):
+                self._codex_allowance_cache = (now, None)
+                return None
+            try:
+                limits = await app_server.client.request("account/rateLimits/read")
+            except AppServerRpcError as exc:
+                # "codex account authentication required to read rate limits" (or "chatgpt
+                # authentication required"): signed out. -32600 alone is JSON-RPC's generic
+                # invalid-request code, so any other error still surfaces.
+                if exc.code != -32600 or "authentication required" not in exc.message.lower():
+                    raise
+                logging.getLogger("bca.api").warning("Codex is not signed in: %s", exc.message)
+                self._codex_allowance_cache = (now, None)
+                return None
             model = self.config.models.luna_model if self.config else ModelsConfig().luna_model
             snapshot = parse_rate_limits(limits, model)
             windows = (
