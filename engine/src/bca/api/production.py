@@ -406,6 +406,21 @@ class JobManager:
             self.backend._codex_logins.discard(process)
 
 
+def _program(name: str) -> Path:
+    """A program to launch: a bare name is looked up on PATH, as a shell would.
+
+    Windows cannot start npm's `codex` shim by its bare name (the file is `codex.cmd`), so the
+    launch failed with "file not found" while the setup check, which uses the same lookup as
+    here, said Codex was installed. A name with a folder in it is used as given.
+    """
+    path = Path(name)
+    if path.parent == Path("."):
+        found = shutil.which(name)
+        if found is not None:
+            return Path(found)
+    return path
+
+
 class ProductionBackend(ApiBackend):
     """API backend backed by the persistent store and the real coordinator."""
 
@@ -521,7 +536,7 @@ class ProductionBackend(ApiBackend):
             return True, "Name-masking model installed."
 
         def codex_copy() -> tuple[bool, str]:
-            if shutil.which("codex") is not None:
+            if shutil.which(str(self._codex_binary())) is not None:
                 return True, "Codex program found."
             return False, "The Codex program was not found. Install it, then press Check again."
 
@@ -629,8 +644,7 @@ class ProductionBackend(ApiBackend):
                 # from the job directory with the scrubbed environment.
                 command = (sys.executable, str(Path(fake_codex.__file__)), "--scenario", str(scenario))
                 return await start_app_server(CodexLaunch(command, self.app_data / "codex", job_dir))
-            executable = Path(os.environ.get("BCA_CODEX_BIN", "codex"))
-            return await start_app_server(CodexLaunch(executable, self.app_data / "codex", job_dir))
+            return await start_app_server(CodexLaunch(self._codex_binary(), self.app_data / "codex", job_dir))
         except (OSError, ConnectionError, RuntimeError) as exc:
             raise AppServerUnavailableError("Codex app-server did not start") from exc
 
@@ -683,10 +697,10 @@ class ProductionBackend(ApiBackend):
         return profile
 
     def _claude_binary(self) -> Path:
-        return Path(os.environ.get("BCA_CLAUDE_BIN", "claude"))
+        return _program(os.environ.get("BCA_CLAUDE_BIN", "claude"))
 
     def _codex_binary(self) -> Path:
-        return Path(os.environ.get("BCA_CODEX_BIN", "codex"))
+        return _program(os.environ.get("BCA_CODEX_BIN", "codex"))
 
     def _project_dir(self, project: str) -> Path:
         rows = self.store.rows("SELECT 1 FROM projects WHERE id=?", (project,))
