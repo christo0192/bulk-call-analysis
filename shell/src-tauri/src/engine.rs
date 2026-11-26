@@ -1155,6 +1155,25 @@ pub fn minimal_environment() -> std::collections::HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A finished request's entry is removed by a task spawned when it ends, so it can still be
+    /// there for a moment after the caller has its answer (seen on Windows CI).
+    async fn wait_for_no_pending<W>(client: &std::sync::Arc<crate::rpc::Client<W>>)
+    where
+        W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        for _ in 0..200 {
+            if client.pending_len().await == 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            client.pending_len().await,
+            0,
+            "a pending request was never removed"
+        );
+    }
     use serde_json::json;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1265,7 +1284,7 @@ mod tests {
                     );
                 }
             }
-            assert_eq!(client.pending_len().await, 0);
+            wait_for_no_pending(&client).await;
 
             engine.notification_ctx().project_titles.clear();
             let (client_io, mut server_io) = tokio::io::duplex(8192);
@@ -1289,7 +1308,7 @@ mod tests {
             for task in tasks {
                 task.await.unwrap();
             }
-            assert_eq!(client.pending_len().await, 0);
+            wait_for_no_pending(&client).await;
             {
                 let ctx = engine.notification_ctx();
                 assert_eq!(

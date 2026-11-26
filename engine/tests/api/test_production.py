@@ -33,6 +33,7 @@ from bca.mask.masker import mask_lead_stream
 from bca.monitor.events import Event
 from bca.store import JobSpec, JobState, LeadSourceIds, open_store, save_spec
 from bca.store.spec import CapRule, UsableRule
+from tests.api.test_production_chat import wait_until_gone
 from tests.api.test_stdio_chat import _create_project, _send, _start
 from tests.coordinator.conftest import _synthetic_rows
 from tests.fakes.fake_bq import FakeBqRunner
@@ -1219,8 +1220,7 @@ def test_chat_send_during_shutdown_is_refused_and_no_claude_survives(
             await backend.call("chat/send", {"project": "project-one", "text": "late"})
         await turn
         pid = int(pid_file.read_text(encoding="utf-8"))
-        with pytest.raises(OSError):
-            os.kill(pid, 0)
+        assert wait_until_gone(pid)
 
     run(scenario())
 
@@ -1478,8 +1478,7 @@ def test_stdin_eof_during_chat_turn_exits_and_cleans_up(
         process.stdin.close()
         process.wait(timeout=5)
         pid = int(pid_file.read_text(encoding="utf-8"))
-        with pytest.raises(OSError):
-            os.kill(pid, 0)
+        assert wait_until_gone(pid)
         assert not (tmp_path / "projects" / "project-one" / "chat" / "mcp.json").exists()
     finally:
         if process.poll() is None:
@@ -1508,8 +1507,7 @@ def test_stdio_shutdown_during_hanging_chat_turn_replies_fast_and_cleans_up(
         process.wait(timeout=5)
 
         pid = int(pid_file.read_text(encoding="utf-8"))
-        with pytest.raises(OSError):
-            os.kill(pid, 0)
+        assert wait_until_gone(pid)
         assert not (tmp_path / "projects" / "project-one" / "chat" / "mcp.json").exists()
     finally:
         if process.poll() is None:
