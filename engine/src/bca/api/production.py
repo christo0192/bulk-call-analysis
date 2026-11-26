@@ -1321,7 +1321,10 @@ class ProductionBackend(ApiBackend):
         return {"codex": await self._codex_allowance_or_none(), "claude": claude_value}
 
     async def _start_codex_login(self) -> dict[str, object]:
-        env = childenv.build_child_env({"CODEX_HOME": str((self.app_data / "codex").resolve())})
+        codex_home = (self.app_data / "codex").resolve()
+        # Codex refuses to start when CODEX_HOME does not exist; the sign-in would fail silently.
+        codex_home.mkdir(parents=True, exist_ok=True)
+        env = childenv.build_child_env({"CODEX_HOME": str(codex_home)})
         kwargs: dict[str, Any] = {
             "env": env,
             "text": True,

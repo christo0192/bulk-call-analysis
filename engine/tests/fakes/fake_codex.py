@@ -416,6 +416,11 @@ def main() -> None:
     parser.add_argument("-c", dest="argv_overrides", action="append", default=[])
     parser.add_argument("--disable", dest="argv_disabled", action="append", default=[])
     args, _ = parser.parse_known_args()
+    # Like the real Codex: a CODEX_HOME that does not exist stops it before it serves anything.
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home and not Path(codex_home).is_dir():
+        print(f'Error: CODEX_HOME points to "{codex_home}", but that path does not exist', file=sys.stderr)
+        raise SystemExit(1)
     asyncio.run(run(args.scenario, args.argv_overrides, args.argv_disabled))
 
 
