@@ -126,6 +126,8 @@ async def start(
     launch: CodexLaunch, client_name: str = "bulk_call_analysis", version: str = "0.1.0"
 ) -> AppServer:
     command = build_command(launch)
+    # Codex refuses to start when CODEX_HOME does not exist ("that path does not exist").
+    launch.codex_home.mkdir(parents=True, exist_ok=True)
     stderr_path = launch.work_dir / "codex-app-server.log"
     stderr = stderr_path.open("ab")
     kwargs: dict[str, object] = {
