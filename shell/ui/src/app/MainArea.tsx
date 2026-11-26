@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { phase, projects, selectedJob, selectedProject } from '../state/store';
+import { phase, projects, projectsLoaded, selectedJob, selectedProject } from '../state/store';
 import { bridge } from '../engine/bridge';
 import { EngineError } from '../engine/client';
 import { openProjectFolder } from '../engine/shellCommands';
@@ -54,8 +54,13 @@ export function MainArea() {
   }, [phase.value]);
   if (!currentProject)
     return (
-      <main class="main">
-        <EmptyState />
+      <main class="main" aria-busy={!projectsLoaded.value}>
+        {projectsLoaded.value ? (
+          <EmptyState />
+        ) : (
+          // While the first project list loads: no "No projects yet", and no second New project.
+          <p class="empty">Loading projects…</p>
+        )}
       </main>
     );
   const state = current?.state ?? project?.status;

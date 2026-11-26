@@ -8,6 +8,7 @@ import {
   jobsByProject,
   newProjectOpen,
   projects,
+  projectsLoaded,
   selectedProject,
   settingsOpen,
   setupItems,
@@ -191,6 +192,7 @@ describe('every button has an accessible name', () => {
     checklist.unmount();
     setupRequired.value = false;
     projects.value = [];
+    projectsLoaded.value = true;
     frame(null);
     await screen.findByText('No projects yet');
     expect(unnamedButtons()).toEqual([]);

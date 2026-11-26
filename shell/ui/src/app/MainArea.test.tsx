@@ -2,11 +2,12 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { MainArea } from './MainArea';
 import {
-  jobsByProject,
-  projects,
-  selectedProject,
-  newProjectOpen,
   addProject,
+  jobsByProject,
+  newProjectOpen,
+  projects,
+  projectsLoaded,
+  selectedProject,
 } from '../state/store';
 import { mockBridge } from '../engine/mockBridge';
 import { EngineError } from '../engine/client';
@@ -32,6 +33,7 @@ it('renders setup view and rail', () => {
 });
 it('empty-state button opens the form signal', () => {
   selectedProject.value = null;
+  projectsLoaded.value = true;
   jobsByProject.value = {};
   render(<MainArea />);
   fireEvent.click(screen.getByRole('button', { name: 'New project' }));
@@ -135,4 +137,24 @@ it('a selected project without a job still shows the setup view', async () => {
   render(<MainArea />);
   await waitFor(() => expect(screen.getByTestId('setup-view')).toBeInTheDocument());
   expect(screen.queryByText('No projects yet')).toBeNull();
+});
+
+it('while the first project list loads, nothing says there are no projects', () => {
+  projects.value = [];
+  selectedProject.value = null;
+  projectsLoaded.value = false;
+  render(<MainArea />);
+  expect(screen.getByText('Loading projects…')).toBeInTheDocument();
+  expect(screen.queryByText('No projects yet')).toBeNull();
+  // The sidebar's "+ New project" is the only one; the empty state's button is not there yet.
+  expect(screen.queryByRole('button', { name: 'New project' })).toBeNull();
+});
+
+it('once the list has loaded and is empty, the empty state shows', () => {
+  projects.value = [];
+  selectedProject.value = null;
+  projectsLoaded.value = true;
+  render(<MainArea />);
+  expect(screen.getByText('No projects yet')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'New project' })).toBeInTheDocument();
 });
