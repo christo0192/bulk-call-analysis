@@ -659,3 +659,21 @@ def test_concurrent_status_calls_start_codex_once(tmp_path: Path) -> None:
     assert len(launches) == 1
     assert all(result == results[0] for result in results)
     assert results[0] is not None and results[0]["loggedIn"] is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        AppServerRpcError(-32600, "Invalid request: unknown method"),
+        AppServerRpcError(-32603, "internal error"),
+    ],
+)
+def test_other_rate_limit_errors_still_surface_and_are_not_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: AppServerRpcError
+) -> None:
+    state: dict[str, Any] = {"fail": {"account/rateLimits/read": error}}
+    backend = make_backend(tmp_path, launch_pool=_fake_launch(state))
+    _signed_out_claude(monkeypatch)
+    with pytest.raises(RpcError):
+        run(backend.call("auth/status", {}))
+    assert backend._codex_allowance_cache is None

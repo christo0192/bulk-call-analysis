@@ -1285,9 +1285,12 @@ class ProductionBackend(ApiBackend):
             try:
                 limits = await app_server.client.request("account/rateLimits/read")
             except AppServerRpcError as exc:
-                # -32600 "codex account authentication required": a stale or partial sign-in.
-                if exc.code != -32600:
+                # "codex account authentication required to read rate limits" (or "chatgpt
+                # authentication required"): signed out. -32600 alone is JSON-RPC's generic
+                # invalid-request code, so any other error still surfaces.
+                if exc.code != -32600 or "authentication required" not in exc.message.lower():
                     raise
+                logging.getLogger("bca.api").warning("Codex is not signed in: %s", exc.message)
                 self._codex_allowance_cache = (now, None)
                 return None
             model = self.config.models.luna_model if self.config else ModelsConfig().luna_model
