@@ -392,6 +392,11 @@ def test_login_methods_spawn_private_binaries_with_app_profile_env(
     assert str(tmp_path / "codex") in codex_env.get("CODEX_HOME", "")
     # Codex refuses to start when CODEX_HOME does not exist, so the sign-in must create it first.
     assert Path(codex_env["CODEX_HOME"]).is_dir()
+    # The sign-in stores credentials where the app-server reads them (keyring) and is ChatGPT only.
+    codex_command = calls[1][0]
+    assert codex_command[1] == "login"
+    assert "cli_auth_credentials_store=keyring" in codex_command
+    assert "forced_login_method=chatgpt" in codex_command
     for _command, kwargs in calls:
         env = cast(dict[str, str], kwargs["env"])
         assert not any(

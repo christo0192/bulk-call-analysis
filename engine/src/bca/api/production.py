@@ -30,7 +30,7 @@ from bca.claude.profile import ClaudeProfile
 from bca.claude.sessions import SessionStore
 from bca.config import ConfigError, LimitsConfig, ModelsConfig, RetentionConfig, SiteConfig, load_config
 from bca.coordinator.runner import Clock, JobRunner, RunnerDeps
-from bca.luna.appserver import CodexLaunch
+from bca.luna.appserver import LOCKDOWN_OVERRIDES, CodexLaunch
 from bca.luna.appserver import start as start_app_server
 from bca.luna.quota import parse_rate_limits
 from bca.mask.masker import MaskingContext, mask_text
@@ -1336,7 +1336,15 @@ class ProductionBackend(ApiBackend):
             kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
         else:
             kwargs["start_new_session"] = True
-        process = subprocess.Popen([str(self._codex_binary()), "login"], **kwargs)
+        # Sign in the same way the app-server reads it: credentials in the system keyring (no
+        # auth.json in the app folder) and ChatGPT sign-in only.
+        overrides = [
+            item
+            for key, value in LOCKDOWN_OVERRIDES
+            if key in {"cli_auth_credentials_store", "forced_login_method"}
+            for item in ("-c", f"{key}={value}")
+        ]
+        process = subprocess.Popen([str(self._codex_binary()), "login", *overrides], **kwargs)
         self._login_processes.add(process)
         self._codex_logins.add(process)
         # The cached read says "not signed in"; read again while and after the sign-in runs.
