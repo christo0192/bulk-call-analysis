@@ -406,6 +406,95 @@ class JobManager:
             self.backend._codex_logins.discard(process)
 
 
+# npm installs Codex as a `codex.cmd` shim next to its package; the shim's codex.js only finds
+# and starts this native program, which the engine can start directly.
+_NPM_CODEX_NATIVE = {
+    "AMD64": ("@openai/codex-win32-x64", "x86_64-pc-windows-msvc"),
+    "ARM64": ("@openai/codex-win32-arm64", "aarch64-pc-windows-msvc"),
+}
+
+
+def _npm_native_codex(shim_dir: Path) -> Path | None:
+    import platform
+
+    package, triple = _NPM_CODEX_NATIVE.get(platform.machine().upper(), _NPM_CODEX_NATIVE["AMD64"])
+    root = shim_dir / "node_modules" / "@openai" / "codex"
+    for vendor in (root / "node_modules" / package / "vendor", root / "vendor"):
+        native = vendor / triple / "bin" / "codex.exe"
+        if native.is_file():
+            return native.resolve()
+    return None
+
+
+def _on_path_exactly(file_name: str) -> Path | None:
+    """The first PATH folder holding exactly `file_name`. Unlike shutil.which, no PATHEXT is tried
+    (it would accept `claude.exe.cmd`) and the current folder is not searched."""
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        folder = folder.strip().strip('"')
+        if not folder:
+            continue
+        try:
+            if (Path(folder) / file_name).is_file():
+                return (Path(folder) / file_name).absolute()
+        except OSError:
+            continue  # an unreadable folder or file: look further along PATH
+    return None
+
+
+def _missing_program(stem: str) -> Path:
+    """An absolute path that does not exist, for a program that was not found. Given a bare name,
+    Windows' CreateProcess would search the current folder (and add .exe) where our lookup did not,
+    so the launch could start a program the setup check said was missing."""
+    return Path(tempfile.gettempdir()).absolute() / "bca-program-not-found" / f"{stem}.exe"
+
+
+def _program(name: str) -> Path:
+    """The program file to launch for `name` (a bare name, or a path from BCA_*_BIN).
+
+    The lookup never picks a `.cmd` or `.bat` on its own: Windows runs those through cmd.exe, where
+    text on the command line (a data folder named like "R&D") would be read as commands and could
+    cut off the flags that keep Claude contained. So on Windows a bare name finds exactly
+    `<name>.exe` in a PATH folder; when only npm's `codex.cmd` shim is there, the native
+    `codex.exe` npm installed with it is used instead. A configured path without an extension gets
+    `.exe` (npm's extensionless `codex` is a shell script Windows cannot start). A `.cmd` or `.bat`
+    someone set on purpose in BCA_CLAUDE_BIN or BCA_CODEX_BIN is used as given (the test launchers
+    are .cmd files). Elsewhere a bare name is looked up on PATH. On Windows whatever comes back
+    is an absolute path, the startable file or one that does not exist: never a bare name, which
+    CreateProcess would search for in the current folder. So the setup check (is_file) and the
+    launch always agree.
+    """
+    path = Path(name)
+    bare = path.parent == Path(".")
+    if os.name != "nt":
+        found = shutil.which(name) if bare else (name if path.is_file() else None)
+        return Path(found).absolute() if found is not None else path
+    suffix = path.suffix.lower()
+    stem = path.with_suffix("") if suffix in {".exe", ".cmd", ".bat"} else path
+    is_codex = stem.name.lower() == "codex"
+    if bare:
+        exe_on_path = _on_path_exactly(stem.name + ".exe")
+        if exe_on_path is not None:
+            return exe_on_path
+        shim = _on_path_exactly(stem.name + ".cmd")
+        native = _npm_native_codex(shim.parent) if shim is not None and is_codex else None
+        return native if native is not None else _missing_program(stem.name)
+    if suffix == ".exe":
+        return path.absolute()
+    if suffix in {".cmd", ".bat"}:
+        native = _npm_native_codex(path.parent) if is_codex else None
+        return native if native is not None else path.absolute()
+    executable = stem.with_name(stem.name + ".exe").absolute()
+    if executable.is_file():
+        return executable
+    if is_codex and stem.with_name(stem.name + ".cmd").is_file():
+        native = _npm_native_codex(stem.parent)
+        if native is not None:
+            return native
+    # Nothing Windows can start: the missing .exe (absolute, so no search), so the check and the
+    # launch both say not found.
+    return executable
+
+
 class ProductionBackend(ApiBackend):
     """API backend backed by the persistent store and the real coordinator."""
 
@@ -521,7 +610,8 @@ class ProductionBackend(ApiBackend):
             return True, "Name-masking model installed."
 
         def codex_copy() -> tuple[bool, str]:
-            if shutil.which("codex") is not None:
+            # The exact file the launch will start (see _program), so the two cannot disagree.
+            if self._codex_binary().is_file():
                 return True, "Codex program found."
             return False, "The Codex program was not found. Install it, then press Check again."
 
@@ -629,8 +719,7 @@ class ProductionBackend(ApiBackend):
                 # from the job directory with the scrubbed environment.
                 command = (sys.executable, str(Path(fake_codex.__file__)), "--scenario", str(scenario))
                 return await start_app_server(CodexLaunch(command, self.app_data / "codex", job_dir))
-            executable = Path(os.environ.get("BCA_CODEX_BIN", "codex"))
-            return await start_app_server(CodexLaunch(executable, self.app_data / "codex", job_dir))
+            return await start_app_server(CodexLaunch(self._codex_binary(), self.app_data / "codex", job_dir))
         except (OSError, ConnectionError, RuntimeError) as exc:
             raise AppServerUnavailableError("Codex app-server did not start") from exc
 
@@ -683,10 +772,10 @@ class ProductionBackend(ApiBackend):
         return profile
 
     def _claude_binary(self) -> Path:
-        return Path(os.environ.get("BCA_CLAUDE_BIN", "claude"))
+        return _program(os.environ.get("BCA_CLAUDE_BIN", "claude"))
 
     def _codex_binary(self) -> Path:
-        return Path(os.environ.get("BCA_CODEX_BIN", "codex"))
+        return _program(os.environ.get("BCA_CODEX_BIN", "codex"))
 
     def _project_dir(self, project: str) -> Path:
         rows = self.store.rows("SELECT 1 FROM projects WHERE id=?", (project,))
@@ -2102,7 +2191,8 @@ class ProductionBackend(ApiBackend):
         claude = params.get("claudeModel")
         if claude is not None and (
             not isinstance(claude, str)
-            or not claude.startswith("claude-")
+            # Letters, digits, dots and dashes only: it goes on Claude's command line.
+            or not re.fullmatch(r"claude-[a-z0-9][a-z0-9.-]*", claude)
             or claude in {"claude-", "claude-opus", "claude-x"}
             or "[" in claude
             or claude.endswith("plan")

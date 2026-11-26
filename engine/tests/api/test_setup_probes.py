@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import os
+import stat
 from pathlib import Path
 from typing import Any, cast
 
@@ -105,7 +107,15 @@ def test_unreadable_settings_file_is_not_called_missing(tmp_path: Path) -> None:
 def test_codex_row_says_whether_the_program_was_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, found: bool
 ) -> None:
-    monkeypatch.setattr("bca.api.production.shutil.which", lambda name: "codex" if found else None)
+    # A real file on a PATH of its own: the row checks the exact program the launch would start.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    if found:
+        program = bin_dir / ("codex.exe" if os.name == "nt" else "codex")
+        program.write_text("", encoding="utf-8")
+        program.chmod(program.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.delenv("BCA_CODEX_BIN", raising=False)
     item = _items(make_backend(tmp_path))["codex_copy"]
     assert item["status"] == ("ok" if found else "failed")
     assert item["detail"] == (
