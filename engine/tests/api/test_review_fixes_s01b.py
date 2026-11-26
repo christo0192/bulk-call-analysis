@@ -35,7 +35,7 @@ from bca.store import (
 )
 from bca.store.lifecycle import pause
 from bca.store.spec import ReviewFlagRule, ThresholdGroupRule
-from tests.api.t04_lifecycle import JOB, _wait_state, run_lifecycle
+from tests.api.t04_lifecycle import JOB
 from tests.api.test_production import _write_job, make_backend, write_valid_config
 from tests.api.test_quota_resume import _Clock
 from tests.fakes.fake_bq import FakeBqRunner
@@ -85,38 +85,27 @@ def _quota_used(event_json: str) -> int:
 
 
 # Major 1: job/snapshot must not crash while ChatGPT usage rises during a live run.
-# A whole lifecycle plus a live full run: slow CI runners need more than the default 60 s.
-@pytest.mark.timeout(240)
 def test_snapshot_mid_run_with_rising_quota_succeeds(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        lifecycle = await run_lifecycle(tmp_path, latency_ms=200, start_full=False)
-        backend = lifecycle.backend
-        scenario_path = tmp_path / "projects" / "project-one" / "jobs" / JOB / "fake-codex-scenario.json"
-        value = json.loads(scenario_path.read_text(encoding="utf-8"))
-        # The full run starts at 10% and every lead read adds 1%, as a filling 5-hour window does.
-        value.update({"latency_ms": 2000, "used_percent": 10, "quota_increment": 1})
-        scenario_path.write_text(json.dumps(value), encoding="utf-8", newline="\n")
-        await backend.call("job/startFull", {"job": JOB})
-        snapshot: dict[str, Any] | None = None
-        for _ in range(3000):
-            rows = backend.store.rows(
-                "SELECT data_json FROM job_events WHERE job_id=? AND kind='quota' ORDER BY id", (JOB,)
-            )
-            rising = sorted({_quota_used(str(row[0])) for row in rows} - {-1})
-            task = backend.jobs.tasks.get(JOB)
-            if len([used for used in rising if used > 10]) >= 2 and task is not None and not task.done():
-                snapshot = cast(dict[str, Any], await backend.call("job/snapshot", {"job": JOB}))
-                break
-            await asyncio.sleep(0.02)
-        assert snapshot is not None, "the run never reported rising usage while it was still running"
-        quota = snapshot["quota"]
-        used = quota["codex"]["primary"]["usedPercent"]
-        assert used > 10
-        projected = quota["projectedEndPercent"]
-        assert projected is None or used <= projected <= 100
-        await _wait_state(backend, {"done", "done_with_issues"})
-
-    run(scenario())
+    # The crash needed a runner with a live driver task and usage above the job's first quota
+    # point, which every real run reaches as the 5-hour window fills. (A timed live run proved
+    # flaky on slow runners, so this builds that state directly.)
+    backend = _live_snapshot_backend(tmp_path)
+    for index in range(6):
+        backend.store.add_lead(JOB, f"queued-{index}", "queued")
+    runner = backend.jobs.runner(JOB)
+    runner._eta.observed_since = 0
+    _quota_event(backend, 10, 1_000)
+    for ts in (1_100, 1_200):
+        runner._eta.completed(ts)
+    _quota_event(backend, 11, 1_300)
+    _quota_event(backend, 12, 1_600)
+    snapshot = run(_snapshot_while_running(backend))
+    quota = snapshot["quota"]
+    used = quota["codex"]["primary"]["usedPercent"]
+    assert used == 12
+    projected = quota["projectedEndPercent"]
+    assert projected is not None
+    assert used <= projected <= 100
 
 
 def _live_snapshot_backend(tmp_path: Path) -> ProductionBackend:
