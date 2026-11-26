@@ -127,6 +127,58 @@ test('keyboard only: dialogs keep focus inside, close on Escape and give focus b
   expect(noRing, 'Tab stops without a visible focus ring').toEqual([]);
 });
 
+test('a run that finishes while focus is in the chat moves focus to the heading', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: /Webinar objections/ }).click();
+  const composer = page.getByPlaceholder('Ask Claude about this job…');
+  await composer.focus();
+  await page.keyboard.type('Synthetic question');
+  // The engine says the run is done: the done view replaces it and the chat folds to its tab.
+  await page.evaluate(async () => {
+    const { mockBridge } = await import('/src/engine/mockBridge.ts');
+    mockBridge.emit({
+      jsonrpc: '2.0',
+      method: 'job/state',
+      params: { project: 'demo-run', job: 'synthetic-job-3', state: 'done' },
+    });
+  });
+  await expect(page.getByTestId('done-view')).toBeVisible();
+  await expect(composer).toBeHidden();
+  await expect(page.locator('main header h1')).toBeFocused();
+});
+
+test('keyboard only: the rebuild dialog keeps focus inside after Remove and Rebuild', async ({
+  page,
+}) => {
+  // In Chromium a focused button that is removed or disabled drops focus to the page; the
+  // dialog must put it somewhere sensible every time.
+  await page.goto('/');
+  await page.getByRole('button', { name: /Shipping questions/ }).click();
+  await page.getByRole('button', { name: 'Rebuild with new rules' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('button', { name: 'Close' })).toBeFocused();
+  const removes = dialog.getByRole('button', { name: 'Remove' });
+  await expect(removes).toHaveCount(2);
+  // Remove the first rule: the next rule's Remove takes its place and focus.
+  await removes.first().focus();
+  await page.keyboard.press('Enter');
+  await expect(removes).toHaveCount(1);
+  await expect(removes.first()).toBeFocused();
+  // Remove the last one: the Current rules heading.
+  await page.keyboard.press('Enter');
+  await expect(dialog.getByRole('heading', { name: 'Current rules' })).toBeFocused();
+  // Rebuild with no rules asks first; its answer takes focus.
+  await dialog.getByRole('button', { name: 'Rebuild', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await expect(dialog.getByRole('button', { name: 'Rebuild without rules' })).toBeFocused();
+  // The rebuild runs (the button is disabled meanwhile), is announced, and Open takes focus.
+  await page.keyboard.press('Enter');
+  await expect(dialog.getByRole('status')).toHaveText(/Rebuilt: results\.v2\.rebuild1\.xlsx/);
+  await expect(dialog.getByRole('button', { name: 'Open', exact: true })).toBeFocused();
+});
+
 test('reduced motion: nothing animates on the run view and the spinner shows …', async ({
   page,
 }) => {

@@ -26,19 +26,24 @@ export function MainArea() {
   const [shellError, setShellError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [planError, setPlanError] = useState<unknown>(null);
-  const [chat, setChat] = useState(
-    () => phase.value !== 'done' && localStorage.getItem(`chat:${currentProject}`) !== 'hidden',
-  );
+  // The chat drawer starts open or hidden afresh for each project and phase, and the person can
+  // change that. It follows a phase change in the same render as the view, so the focus check
+  // below sees both changes at once (a finished run hides the drawer along with the run view).
+  const chatKey = `${currentProject}:${phase.value}`;
+  const [chatChoice, setChatChoice] = useState<{ key: string; visible: boolean } | null>(null);
+  const chat =
+    chatChoice?.key === chatKey
+      ? chatChoice.visible
+      : phase.value !== 'done' && localStorage.getItem(`chat:${currentProject}`) !== 'hidden';
+  const setChat = (visible: boolean) => setChatChoice({ key: chatKey, visible });
+  // Forget a choice made for another project or phase, so coming back starts afresh.
   useEffect(
-    () =>
-      setChat(
-        phase.value !== 'done' &&
-          localStorage.getItem(`chat:${selectedProject.value}`) !== 'hidden',
-      ),
-    [currentProject, phase.value],
+    () => setChatChoice((choice) => (choice && choice.key !== chatKey ? null : choice)),
+    [chatKey],
   );
-  // A new phase replaces the view. If that took the focused button with it (Approve plan,
-  // Start full run), start again from the heading rather than from nowhere.
+  // A new phase replaces the view. If that took the focused control with it (Approve plan,
+  // Start full run, the chat box of a finished run), start again from the heading rather than
+  // from nowhere.
   const heading = useRef<HTMLHeadingElement>(null);
   const shownPhase = useRef(phase.value);
   useEffect(() => {
@@ -58,12 +63,11 @@ export function MainArea() {
     planError || state === 'failed' || state === 'cancelled'
       ? 'Rebuild is unavailable because this job or plan failed'
       : undefined;
-  const toggle = () =>
-    setChat((visible) => {
-      const next = !visible;
-      localStorage.setItem(`chat:${currentProject}`, next ? 'shown' : 'hidden');
-      return next;
-    });
+  const toggle = () => {
+    const next = !chat;
+    localStorage.setItem(`chat:${currentProject}`, next ? 'shown' : 'hidden');
+    setChat(next);
+  };
   const pause = () => {
     if (!current || actionPending || current.state === 'stalled') return;
     const method = current.state === 'paused' ? 'job/resume' : 'job/pause';

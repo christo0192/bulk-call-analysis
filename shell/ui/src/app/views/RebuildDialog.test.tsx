@@ -1,11 +1,11 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/preact';
-import { mockBridge } from '../../engine/bridge';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { mockBridge } from '../../engine/mockBridge';
 import { EngineError } from '../../engine/client';
 import recordedPlanFixture from '../../mock/fixtures/engine/job-plan.json';
 import { openProjectFile } from '../../engine/shellCommands';
 import { RebuildDialog } from './RebuildDialog';
-import type { PlanCard } from '../../engine/types';
+import type { RebuildResult, PlanCard } from '../../engine/types';
 
 // The shell command resolves to null on success, like the real Tauri command.
 vi.mock('../../engine/shellCommands', () => ({ openProjectFile: vi.fn(async () => null) }));
@@ -494,6 +494,110 @@ it('focus is trapped inside the dialog', () => {
   expect(document.activeElement).toBe(last);
 });
 
+const threeRules: PlanCard = {
+  ...planWithRules,
+  rules: [
+    ...planWithRules.rules,
+    {
+      kind: 'review_flag',
+      summary: 'Large discount',
+      definition: {
+        kind: 'review_flag',
+        name: 'large discount',
+        match: 'all',
+        conditions: [{ field: 'answer.discount_percent', op: 'gt', value: 20 }],
+      },
+    },
+  ],
+};
+
+/** The dialog has put focus on its first control, as it does a frame after opening. */
+const opened = (dialog: HTMLElement) =>
+  waitFor(() => expect(dialog).toContainElement(document.activeElement as HTMLElement));
+
+it('after Remove, focus moves to the next Remove button, the one above, then the heading', async () => {
+  const dialog = renderDialog(vi.fn(), threeRules);
+  await opened(dialog);
+  const removes = () => within(dialog).queryAllByRole('button', { name: 'Remove' });
+  removes()[0]!.focus();
+  fireEvent.click(removes()[0]!);
+  // The next rule moved up into the removed row's place.
+  await waitFor(() => expect(document.activeElement).toBe(removes()[0]));
+  expect(document.activeElement?.closest('.rule-row')).toHaveTextContent(
+    'Discount reason is present',
+  );
+  // The last row has none below it: the one above.
+  removes()[1]!.focus();
+  fireEvent.click(removes()[1]!);
+  await waitFor(() => expect(document.activeElement).toBe(removes()[0]));
+  expect(removes()).toHaveLength(1);
+  // No rules left: the Current rules heading.
+  fireEvent.click(removes()[0]!);
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(dialog).getByRole('heading', { name: 'Current rules' }),
+    ),
+  );
+});
+
+it('Rebuild with no rules moves focus to its question, and Keep editing back to Rebuild', async () => {
+  const dialog = renderDialog();
+  await opened(dialog);
+  const rebuild = within(dialog).getByRole('button', { name: 'Rebuild' });
+  rebuild.focus();
+  fireEvent.click(rebuild);
+  // Rebuild is now disabled; the answer to its question has focus.
+  expect(rebuild).toBeDisabled();
+  const confirm = within(dialog).getByRole('button', { name: 'Rebuild without rules' });
+  await waitFor(() => expect(document.activeElement).toBe(confirm));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Keep editing' }));
+  await waitFor(() => expect(document.activeElement).toBe(rebuild));
+  expect(rebuild).toBeEnabled();
+});
+
+it('a finished rebuild is announced and its Open button takes focus', async () => {
+  const dialog = renderDialog(vi.fn(), planWithRules);
+  await opened(dialog);
+  // The status region is there before the rebuild, so its news is announced.
+  const status = within(dialog).getByRole('status');
+  expect(status).toBeEmptyDOMElement();
+  const rebuild = within(dialog).getByRole('button', { name: 'Rebuild' });
+  rebuild.focus();
+  fireEvent.click(rebuild);
+  // Chromium drops focus from a button the moment it is disabled; happy-dom keeps it, so drop it.
+  expect(rebuild).toBeDisabled();
+  rebuild.blur();
+  await waitFor(() => expect(status).toHaveTextContent('Rebuilt: results.v2.rebuild1.xlsx'));
+  await waitFor(() =>
+    expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'Open' })),
+  );
+});
+
+it('a failed rebuild gives focus back to the button that was pressed', async () => {
+  mockBridge.setResponse('job/rebuildRules', async () => {
+    throw new EngineError(-32000, 'invalid', 'invalid_rules', { detail: 'Bad rule' });
+  });
+  // Rebuild...
+  const dialog = renderDialog(vi.fn(), planWithRules);
+  await opened(dialog);
+  const rebuild = within(dialog).getByRole('button', { name: 'Rebuild' });
+  rebuild.focus();
+  fireEvent.click(rebuild);
+  rebuild.blur();
+  await within(dialog).findByText('Bad rule');
+  await waitFor(() => expect(document.activeElement).toBe(rebuild));
+  cleanup();
+  // ...and Rebuild without rules.
+  const empty = renderDialog();
+  await opened(empty);
+  fireEvent.click(within(empty).getByRole('button', { name: 'Rebuild' }));
+  const confirm = within(empty).getByRole('button', { name: 'Rebuild without rules' });
+  fireEvent.click(confirm);
+  confirm.blur();
+  await within(empty).findByText('Bad rule');
+  await waitFor(() => expect(document.activeElement).toBe(confirm));
+});
+
 it('enum list options are sent exactly as listed', async () => {
   const currentPlan: PlanCard = {
     ...recordedPlan,
@@ -590,4 +694,59 @@ it('number enum options are sent as numbers', async () => {
       [{ field: 'answer.rating', op: 'in', value: [1, 3] }],
     ]);
   });
+});
+
+it('Keep editing after a rule error never pulls focus out of the field being typed in', async () => {
+  // Gate 1 of #34: the move back to Rebuild waited while Rebuild was disabled, then fired as soon
+  // as typing in Edges cleared the error, taking focus out of the field mid-word.
+  const dialog = renderDialog(vi.fn(), { ...planWithNumberColumn, rules: [] });
+  await opened(dialog);
+  const rebuild = within(dialog).getByRole('button', { name: 'Rebuild' });
+  rebuild.focus();
+  fireEvent.click(rebuild);
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(dialog).getByRole('button', { name: 'Rebuild without rules' }),
+    ),
+  );
+  fireEvent.input(within(dialog).getByLabelText('Edges'), { target: { value: '' } });
+  fireEvent.input(within(dialog).getByLabelText('Labels'), { target: { value: 'low' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+  expect(within(dialog).getByText(/not a finite number/)).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Keep editing' }));
+  expect(rebuild).toBeDisabled();
+  const edges = within(dialog).getByLabelText('Edges');
+  edges.focus();
+  fireEvent.input(edges, { target: { value: '1' } });
+  await waitFor(() => expect(rebuild).toBeEnabled());
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(document.activeElement).toBe(edges);
+});
+
+it('a rebuild that finishes while the person types elsewhere leaves focus where they are', async () => {
+  let finish: (value: RebuildResult) => void = () => undefined;
+  mockBridge.setResponse(
+    'job/rebuildRules',
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const dialog = renderDialog(vi.fn(), planWithRules);
+  await opened(dialog);
+  const rebuild = within(dialog).getByRole('button', { name: 'Rebuild' });
+  rebuild.focus();
+  fireEvent.click(rebuild);
+  rebuild.blur();
+  const name = within(dialog).getAllByRole('textbox')[0]!;
+  name.focus();
+  finish({
+    job: 'job-one',
+    name: 'results.xlsx',
+    path: 'jobs/job-one/output/results.xlsx',
+    rebuild: 1,
+  });
+  await within(dialog).findByText(/Rebuilt:/);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(document.activeElement).toBe(name);
 });

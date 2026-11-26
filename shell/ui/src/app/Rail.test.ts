@@ -3,7 +3,7 @@ import { h } from 'preact';
 import { expect, it } from 'vitest';
 import { formatKb, stepStatuses } from './Rail';
 import { Rail } from './Rail';
-import { mockBridge } from '../engine/bridge';
+import { mockBridge } from '../engine/mockBridge';
 
 it.each([
   [0, '1 KB'],

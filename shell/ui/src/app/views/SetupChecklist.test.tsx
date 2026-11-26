@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/pre
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
 import { SetupChecklist } from './SetupChecklist';
-import { mockBridge } from '../../engine/bridge';
+import { mockBridge } from '../../engine/mockBridge';
 import type { AuthStatus, SetupItem } from '../../engine/types';
 import { setupItems, setupRequired, settingsOpen } from '../../state/store';
 

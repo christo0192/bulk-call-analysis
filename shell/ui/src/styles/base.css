@@ -36,9 +36,10 @@ textarea:focus-visible {
   outline: 2px solid var(--acc);
   outline-offset: 2px;
 }
-/* Headings take focus only so that, after a view changes, keyboard and screen-reader users
-   start from them; no ring when that follows a mouse click. */
-h1[tabindex='-1']:focus:not(:focus-visible) {
+/* Headings take focus only so that, after a view changes (or the rebuild dialog's last rule is
+   removed), keyboard and screen-reader users start from them; no ring after a mouse click. */
+h1[tabindex='-1']:focus:not(:focus-visible),
+h3[tabindex='-1']:focus:not(:focus-visible) {
   outline: none;
 }
 .banner {

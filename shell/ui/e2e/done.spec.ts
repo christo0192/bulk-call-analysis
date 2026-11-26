@@ -15,7 +15,7 @@ test('done view opens results and rebuilds with a new bands rule', async ({ page
   // The dialog shows the file name only; it opens by the project-relative path.
   await expect(dialog).toContainText('Rebuilt: results.v2.rebuild1.xlsx');
   const rebuildCalls = await page.evaluate(async () => {
-    const { mockBridge } = await import('/src/engine/bridge.ts');
+    const { mockBridge } = await import('/src/engine/mockBridge.ts');
     return mockBridge.calls.filter((call) => call.method === 'job/rebuildRules');
   });
   expect(rebuildCalls).toHaveLength(1);
@@ -49,7 +49,7 @@ test('typed number lists keep every item in the real browser', async ({ page }) 
   await dialog.getByRole('button', { name: 'Rebuild' }).click();
   await expect(dialog).toContainText('Rebuilt:');
   const rebuildCalls = await page.evaluate(async () => {
-    const { mockBridge } = await import('/src/engine/bridge.ts');
+    const { mockBridge } = await import('/src/engine/mockBridge.ts');
     return mockBridge.calls.filter((call) => call.method === 'job/rebuildRules');
   });
   const rules = (rebuildCalls[0]?.params as { rules: { conditions?: unknown[] }[] }).rules;
@@ -73,7 +73,7 @@ test('an integer list typed in the real browser keeps every item', async ({ page
   await dialog.getByRole('button', { name: 'Rebuild' }).click();
   await expect(dialog).toContainText('Rebuilt:');
   const rebuildCalls = await page.evaluate(async () => {
-    const { mockBridge } = await import('/src/engine/bridge.ts');
+    const { mockBridge } = await import('/src/engine/mockBridge.ts');
     return mockBridge.calls.filter((call) => call.method === 'job/rebuildRules');
   });
   const rules = (rebuildCalls[0]?.params as { rules: unknown[] }).rules;

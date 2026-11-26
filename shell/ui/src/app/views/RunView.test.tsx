@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import running from '../../mock/fixtures/engine/job-snapshot-running.json';
 import { RunView, plainActivity, useThrottled } from './RunView';
-import { mockBridge } from '../../engine/bridge';
+import { mockBridge } from '../../engine/mockBridge';
 import { EngineError } from '../../engine/client';
 import type { JobSnapshot } from '../../engine/types';
 
@@ -306,6 +306,56 @@ it('activity lines use plain words for the engine step names', () => {
   expect(plainActivity('Lead 1002 failed: quota_interrupt')).toBe(
     'Lead 1002 failed: quota interrupt',
   );
+});
+
+it('the run view announces progress at most once in 10 seconds, then the newest value', async () => {
+  render(<RunView id="job-one" />);
+  await screen.findByText(/of 8 leads read/);
+  const live = document.querySelector('.run-view [aria-live="polite"]') as HTMLElement;
+  // The first reading goes out at once.
+  await waitFor(() => expect(live).toHaveTextContent('Read 2 of 8 leads.'));
+  vi.useFakeTimers();
+  // Every text the live region shows, in order.
+  const shown = [live.textContent];
+  const look = () => {
+    if (live.textContent !== shown.at(-1)) shown.push(live.textContent);
+  };
+  const hero = () => screen.getByText(/of 8 leads read/).closest('.run-hero') as HTMLElement;
+  // Four progress events over 8 seconds.
+  for (const done of [3, 4, 5, 6]) {
+    act(() =>
+      mockBridge.emit({
+        jsonrpc: '2.0',
+        method: 'job/progress',
+        params: {
+          job: 'job-one',
+          done,
+          inFlight: 2,
+          retrying: 0,
+          failed: 0,
+          heldBack: 0,
+          remaining: 8 - done - 2,
+          total: 8,
+        },
+      }),
+    );
+    look();
+    // The screen keeps up with every event...
+    expect(within(hero()).getByText(String(done))).toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    look();
+  }
+  // ...the announcement waits,
+  expect(live).toHaveTextContent('Read 2 of 8 leads.');
+  act(() => {
+    vi.advanceTimersByTime(2_000);
+  });
+  look();
+  // ...and then reads only the newest value: one change in 10 seconds, never 3, 4 or 5.
+  expect(live).toHaveTextContent('Read 6 of 8 leads.');
+  expect(shown).toEqual(['Read 2 of 8 leads.', 'Read 6 of 8 leads.']);
 });
 
 it('progress is announced at most every 10 seconds', () => {

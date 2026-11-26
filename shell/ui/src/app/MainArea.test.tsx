@@ -8,7 +8,7 @@ import {
   newProjectOpen,
   addProject,
 } from '../state/store';
-import { mockBridge } from '../engine/bridge';
+import { mockBridge } from '../engine/mockBridge';
 import { EngineError } from '../engine/client';
 import { openProjectFolder } from '../engine/shellCommands';
 
