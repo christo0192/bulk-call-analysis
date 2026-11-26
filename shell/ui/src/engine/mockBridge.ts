@@ -416,8 +416,16 @@ export class MockBridge implements EngineBridge {
         };
         this.runProgressTimer = setTimeout(advance, 2000);
       }
+      const recorded = (
+        banner ? bannerSnapshot() : isPaused ? pausedSnapshot : runningSnapshot
+      ) as Record<string, unknown>;
+      const activity = recorded.activity as Record<string, unknown> | undefined;
       return {
-        ...(banner ? bannerSnapshot() : isPaused ? pausedSnapshot : runningSnapshot),
+        ...recorded,
+        // The recordings carry a fixed 2023 time; a live mock run had activity a moment ago.
+        ...(activity && typeof activity.lastActivityTs === 'number'
+          ? { activity: { ...activity, lastActivityTs: Math.floor(Date.now() / 1000) - 4 } }
+          : {}),
         job: requested,
         project: job?.project ?? runningSnapshot.project,
         title:

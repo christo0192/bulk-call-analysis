@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import running from '../../mock/fixtures/engine/job-snapshot-running.json';
-import { RunView, plainActivity, useThrottled } from './RunView';
+import { RunView, activityAgo, plainActivity, useThrottled } from './RunView';
 import { mockBridge } from '../../engine/mockBridge';
 import { EngineError } from '../../engine/client';
 import type { JobSnapshot } from '../../engine/types';
@@ -38,11 +38,28 @@ it('eta known shows the range and finish time', async () => {
     expect(screen.getByText(/Somewhere between 1 h and 2 h/)).toBeInTheDocument(),
   );
 });
-it('last activity ticks every second and shows a dash when null', async () => {
-  vi.useFakeTimers({ shouldAdvanceTime: true });
+it('last activity shows a dash when the engine has seen no activity yet', async () => {
+  const base = running as unknown as JobSnapshot;
+  mockBridge.setResponse('job/snapshot', async () => ({
+    ...base,
+    activity: { ...base.activity, lastActivityTs: null },
+  }));
   render(<RunView id="job-one" />);
-  await vi.advanceTimersByTimeAsync(1000);
   await waitFor(() => expect(screen.getByText(/Last activity —/)).toBeInTheDocument());
+});
+
+it('last activity counts up every second from the engine time', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const base = running as unknown as JobSnapshot;
+  const now = Math.floor(Date.now() / 1000);
+  mockBridge.setResponse('job/snapshot', async () => ({
+    ...base,
+    activity: { ...base.activity, lastActivityTs: now - 5 },
+  }));
+  render(<RunView id="job-one" />);
+  await waitFor(() => expect(screen.getByText(/Last activity [5-7] s ago/)).toBeInTheDocument());
+  await vi.advanceTimersByTimeAsync(3000);
+  await waitFor(() => expect(screen.getByText(/Last activity (8|9|10) s ago/)).toBeInTheDocument());
 });
 it('progress notification updates counts in place', async () => {
   render(<RunView id="job-one" />);
@@ -387,4 +404,17 @@ it('progress is announced at most every 10 seconds', () => {
   } finally {
     vi.useRealTimers();
   }
+});
+
+it('last activity reads in minutes, hours, then days', () => {
+  const now = 1_800_000_000_000;
+  const at = (secondsAgo: number) => now / 1000 - secondsAgo;
+  expect(activityAgo(null, now)).toBe('—');
+  expect(activityAgo(at(5), now)).toBe('5 s ago');
+  expect(activityAgo(at(125), now)).toBe('2 min ago');
+  expect(activityAgo(at(3 * 3600 + 60), now)).toBe('3 h ago');
+  expect(activityAgo(at(3 * 24 * 3600), now)).toBe('3 days ago');
+  expect(activityAgo(at(3 * 365 * 24 * 3600), now)).toBe(
+    `${new Intl.NumberFormat().format(1095)} days ago`,
+  );
 });

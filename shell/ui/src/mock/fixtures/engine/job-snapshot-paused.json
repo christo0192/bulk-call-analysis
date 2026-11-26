@@ -9,6 +9,7 @@
   "resumeAt": null,
   "planApprovedAt": 1700000000,
   "sampleApprovedAt": 1700000000,
+  "approvedAt": 1700000000,
   "progress": {
     "job": "job-one",
     "project": "project-one",

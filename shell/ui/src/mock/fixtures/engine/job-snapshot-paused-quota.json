@@ -9,6 +9,7 @@
   "resumeAt": 1700000000,
   "planApprovedAt": 1700000000,
   "sampleApprovedAt": 1700000000,
+  "approvedAt": 1700000000,
   "progress": {
     "job": "job-one",
     "project": "project-one",
@@ -32,7 +33,12 @@
     "failedByReason": {}
   },
   "eta": { "low": null, "high": null, "seeded": true, "known": false },
-  "activity": { "lastActivityTs": null, "inFlight": 0, "workers": 1, "throughputPerMin": 1.0 },
+  "activity": {
+    "lastActivityTs": 1700000000,
+    "inFlight": 0,
+    "workers": 1,
+    "throughputPerMin": 1.0
+  },
   "quota": {
     "codex": {
       "limitId": "codex",
