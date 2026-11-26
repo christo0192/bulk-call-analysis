@@ -210,7 +210,10 @@ class Condition:
     value: Scalar | list[Scalar] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        data = asdict(self)
+        if self.op in ("is_null", "not_null"):
+            data.pop("value")
+        return data
 
     @classmethod
     def from_dict(cls, value: object) -> Condition:

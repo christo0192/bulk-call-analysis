@@ -52,7 +52,9 @@ def _config_marker() -> None:
     (directory / "fake-codex-start.marker").write_text("started\n", encoding="utf-8", newline="\n")
 
 
-def _scenario(path: Path) -> dict[str, Any]:
+def _scenario(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.is_file():
+        return {}
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("fake Codex scenario must be an object")
@@ -72,7 +74,7 @@ def _lead_from_params(params: dict[str, Any]) -> str:
     return match.group(1) if match else "default"
 
 
-async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -> None:
+async def run(path: Path | None, argv_overrides: list[str], argv_disabled: list[str]) -> None:
     _config_marker()
     scenario = _scenario(path)
     env_report = scenario.get("env_report")
@@ -83,16 +85,16 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
             ),
             encoding="utf-8",
         )
-    log_path = Path(str(path) + ".methods.json")
+    log_path = Path(str(path or Path.cwd() / "fake-codex-scenario.json") + ".methods.json")
     prompt_path = Path.cwd() / "fake-codex-prompts.jsonl"
     log_file = log_path.open("w", encoding="utf-8")
-    rerouted_once_path = Path(str(path) + ".rerouted-once.json")
+    rerouted_once_path = Path(str(path or Path.cwd() / "fake-codex-scenario.json") + ".rerouted-once.json")
     rerouted_once: set[str] = set()
     if rerouted_once_path.exists():
         value = json.loads(rerouted_once_path.read_text(encoding="utf-8"))
         if isinstance(value, list):
             rerouted_once = {str(lead) for lead in value}
-    answered_once_path = Path(str(path) + ".answered-once.json")
+    answered_once_path = Path(str(path or Path.cwd() / "fake-codex-scenario.json") + ".answered-once.json")
     answered_once: set[str] = set()
     if answered_once_path.exists():
         value = json.loads(answered_once_path.read_text(encoding="utf-8"))
@@ -409,7 +411,7 @@ async def run(path: Path, argv_overrides: list[str], argv_disabled: list[str]) -
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", type=Path, required=True)
+    parser.add_argument("--scenario", type=Path)
     parser.add_argument("app_server", nargs="?")
     parser.add_argument("-c", dest="argv_overrides", action="append", default=[])
     parser.add_argument("--disable", dest="argv_disabled", action="append", default=[])

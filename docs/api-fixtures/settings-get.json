@@ -1,0 +1,1 @@
+{"connectorPath":"<dataDir>/connector.json","keyPath":"<dataDir>/connector.json","connectorDir":null,"keyLocated":false,"workerCount":4,"workerCountMode":"fixed","retentionDays":30,"claudeModel":"claude-opus-5-5","codexModel":"gpt-5.6-luna"}

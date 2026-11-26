@@ -19,16 +19,16 @@ from bca.bq.pull import build_bundle, pull_transcripts, run_preflight
 from bca.bq.runner import BqRunner
 from bca.config import SiteConfig
 from bca.luna.pool import LeadTask, LunaPool, PoolCallbacks
-from bca.luna.quota import Decision, QuotaGuard, QuotaSnapshot
+from bca.luna.quota import Decision, QuotaGuard, QuotaSnapshot, Window
 from bca.mask.leakscan import scan_lead
 from bca.mask.masker import MaskingContext, load_harvest, mask_lead_stream
 from bca.mask.names import Span, harvest_seen_twice
 from bca.monitor.eta import EtaEstimator
 from bca.monitor.events import Event, EventBus, EventKind
 from bca.monitor.liveness import Liveness
-from bca.monitor.progress import counts
+from bca.monitor.progress import counts, progress_sample_scope
 from bca.monitor.sleep import SleepDetector
-from bca.outputs.excel import build_workbook
+from bca.outputs.excel import build_sample_workbook, build_workbook
 from bca.outputs.quotes import QuoteCheck, check_answer, repair_prompt
 from bca.outputs.verify import verify_job
 from bca.stop import StopRequested
@@ -83,6 +83,16 @@ MaskerFactory = Callable[..., MaskingContext]
 MAX_UNCOUNTED_FAILURES = 4
 LOGGER = logging.getLogger(__name__)
 __all__ = ["scan_lead"]
+
+
+def _quota_window(window: Window | None) -> dict[str, object] | None:
+    if window is None:
+        return None
+    return {
+        "usedPercent": window.used_percent,
+        "windowDurationMins": window.window_minutes,
+        "resetsAt": window.resets_at,
+    }
 
 
 @dataclass(frozen=True)
@@ -512,7 +522,22 @@ class _Callbacks(PoolCallbacks):
                     "UPDATE jobs SET quota_baseline=? WHERE id=?",
                     (str(snapshot.credits_balance), self.runner.job_id),
                 )
-        self.runner._publish("quota", {"decision": decision.kind, "reason": decision.reason})
+        data: dict[str, object] = {
+            "decision": decision.kind,
+            "reason": decision.reason,
+            "limitId": snapshot.limit_id,
+            "primary": _quota_window(snapshot.primary),
+            "secondary": _quota_window(snapshot.secondary),
+            "creditsBalance": str(snapshot.credits_balance) if snapshot.credits_balance is not None else None,
+            "hasCredits": snapshot.has_credits,
+            "spendControlReached": snapshot.spend_control_reached,
+            "rateLimitReachedType": snapshot.rate_limit_reached_type,
+            "ordinaryUsageAllowed": snapshot.ordinary_usage_allowed,
+            "planType": snapshot.plan_type,
+            "takenAt": snapshot.taken_at,
+        }
+        self.runner.deps.store.append_event(self.runner.job_id, "quota", data)
+        self.runner._publish("quota", data)
 
     async def on_reroute(self, task: LeadTask, from_model: str, to_model: str, reason: str) -> None:
         attempt = self.runner._attempts.get(task.attempt_id)
@@ -559,7 +584,8 @@ class JobRunner:
         self._bundles: dict[str, tuple[int, None]] = {}
         self._bundle_metadata: dict[str, tuple[int, int, int]] = {}
         self._quote_failures: dict[str, tuple[dict[str, Any], list[QuoteCheck]]] = {}
-        self._eta = EtaEstimator()
+        # Completions are counted from now: a runner rebuilt after a restart starts empty.
+        self._eta = EtaEstimator(observed_since=self._ts())
         self._liveness = Liveness(lambda: deps.concurrency, deps.config.limits.lead_timeout_s)
         self._sleep = SleepDetector(clock=deps.clock)
         self._masking_task: asyncio.Task[None] | None = None
@@ -687,12 +713,7 @@ class JobRunner:
         )
 
     def _publish_progress(self) -> None:
-        state = self._state()
-        if state is JobState.paused:
-            rows = self.deps.store.rows("SELECT resume_state FROM jobs WHERE id=?", (self.job_id,))
-            sample = bool(rows and rows[0][0] == JobState.sample_running.value)
-        else:
-            sample = state is JobState.sample_running
+        sample = progress_sample_scope(self.deps.store, self.job_id)
         progress = counts(self.deps.store, self.job_id, sample=sample)
         project_rows = self.deps.store.rows("SELECT project_id FROM jobs WHERE id=?", (self.job_id,))
         remaining = progress.remaining
@@ -708,7 +729,7 @@ class JobRunner:
                 "failed": sum(progress.failed.values()),
                 "held_back": progress.held_back,
                 "total": progress.total,
-                "phase": "sample" if sample else "full",
+                "phase": "sample" if sample is True else "full",
             },
         )
         self._publish("eta", eta.public())
@@ -1619,6 +1640,17 @@ class JobRunner:
         if self._state() is not JobState.sample_running:
             return
         assert not counts(self.deps.store, self.job_id).in_flight
+        try:
+            await self._worker(
+                build_sample_workbook,
+                self.deps.store,
+                self.job_id,
+                self.spec,
+                self.deps.job_dir / "output",
+                self.spec.spec_version,
+            )
+        except Exception:
+            LOGGER.exception("sample workbook build failed for job %s", self.job_id)
         self._transition(JobState.sample_ready)
 
     def on_sample_approved(self, expected_spec_version: int) -> None:
@@ -1855,6 +1887,11 @@ class JobRunner:
         ]
         path, _number = rebuild(
             self.deps.store, self.job_id, new_rules, self.deps.job_dir / "output", self.spec.spec_version
+        )
+        path.with_suffix(".rules.json").write_text(
+            json.dumps([cast(Any, rule).to_dict() for rule in new_rules], sort_keys=True),
+            encoding="utf-8",
+            newline="\n",
         )
         after = [
             tuple(row)

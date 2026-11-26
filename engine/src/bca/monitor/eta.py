@@ -40,10 +40,14 @@ class Eta:
 
 
 class EtaEstimator:
-    def __init__(self, window_s: float = 1200) -> None:
+    def __init__(self, window_s: float = 1200, observed_since: float | None = None) -> None:
         if window_s <= 0:
             raise ValueError("window_s must be positive")
         self.window_s = window_s
+        # When this estimator began seeing every completion. Quota points from before then (an
+        # engine restart mid-run reads them from the store) have no matching completions here, so
+        # they are left out of the per-lead rate; None keeps every point.
+        self.observed_since = observed_since
         self._completed: list[float] = []
         self._paused: list[tuple[float, float]] = []
         self._sleep: list[tuple[float, float]] = []
@@ -100,6 +104,28 @@ class EtaEstimator:
             high = (remaining + repair_pass_leads) / low_rate
         return Eta(low, max(low, high), seeded)
 
+    def percent_per_lead(self, snapshot_history: Iterable[QuotaPoint]) -> float | None:
+        """Allowance percent used per completed lead since the last window reset, or None if unknown."""
+        return self._percent_per_lead(sorted(snapshot_history, key=lambda point: point.taken_at))
+
+    def _percent_per_lead(self, points: list[QuotaPoint]) -> float | None:
+        # Usage and completions must cover the same span.
+        if self.observed_since is not None:
+            points = [point for point in points if point.taken_at >= self.observed_since]
+        if len(points) < 2:
+            return None
+        decrease = max(
+            (index for index, (a, b) in enumerate(pairwise(points)) if b.used_percent < a.used_percent),
+            default=-1,
+        )
+        first, last = points[decrease + 1], points[-1]
+        if last.used_percent <= first.used_percent:
+            return None
+        completions = sum(first.taken_at <= ts <= last.taken_at for ts in self._completed)
+        if completions == 0:
+            return None
+        return (last.used_percent - first.used_percent) / completions
+
     def with_quota(
         self,
         eta: Eta,
@@ -111,20 +137,10 @@ class EtaEstimator:
         points = sorted(snapshot_history, key=lambda point: point.taken_at)
         if len(points) < 2 or remaining <= 0:
             return eta
-        decrease = max(
-            (index for index, (a, b) in enumerate(pairwise(points)) if b.used_percent < a.used_percent),
-            default=-1,
-        )
-        first_index = decrease + 1
-        first, last = points[first_index], points[-1]
-        if last.used_percent <= first.used_percent:
+        percent_per_lead = self._percent_per_lead(points)
+        if percent_per_lead is None:
             return eta
-        completions = sum(first.taken_at <= ts <= last.taken_at for ts in self._completed)
-        if completions == 0:
-            return eta
-        percent_per_lead = (last.used_percent - first.used_percent) / completions
-        if percent_per_lead <= 0:
-            return eta
+        last = points[-1]
         capacity = max(0.0, (stop_percent - last.used_percent) / percent_per_lead)
         fraction = min(1.0, capacity / remaining)
         current = last.taken_at if now is None else now

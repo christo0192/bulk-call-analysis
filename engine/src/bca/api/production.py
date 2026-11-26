@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -14,17 +15,20 @@ import sys
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
 from bca import childenv
+from bca.bq.leads import parse_id_list
 from bca.claude import launch as claude_launch
 from bca.claude.auth import auth_status as claude_auth_status
 from bca.claude.auth import start_login as start_claude_login
 from bca.claude.profile import ClaudeProfile
 from bca.claude.sessions import SessionStore
-from bca.config import ConfigError, ModelsConfig, SiteConfig, load_config
+from bca.config import ConfigError, LimitsConfig, ModelsConfig, RetentionConfig, SiteConfig, load_config
 from bca.coordinator.runner import Clock, JobRunner, RunnerDeps
 from bca.luna.appserver import CodexLaunch
 from bca.luna.appserver import start as start_app_server
@@ -34,7 +38,7 @@ from bca.mask.names import SpacyNer
 from bca.mcp.host import ToolHost, start_ipc_thread
 from bca.mcp.ipc import new_ipc_address
 from bca.monitor.events import Event, EventBus
-from bca.monitor.progress import counts
+from bca.monitor.progress import counts, progress_sample_scope
 from bca.monitor.sleep import SleepDetector
 from bca.paths import job_dir
 from bca.setup.appdirs import directories
@@ -54,10 +58,29 @@ from bca.store import (
     transition,
 )
 from bca.store.lifecycle import public_state
+from bca.store.reconcile import reconcile
+from bca.store.spec import Condition, InScopeRule, JobSpec, ReviewFlagRule, ThresholdGroupRule
 
 from .server import ApiBackend, RpcError
 
 _SLUG = re.compile(r"^[a-z][a-z0-9-]{2,62}[a-z0-9]$")
+_TOOL_SUMMARIES = {
+    "bq_query": "Ran a read-only query",
+    "bq_dry_run": "Checked a query",
+    "bq_list_datasets": "Listed datasets",
+    "bq_list_tables": "Listed tables",
+    "bq_describe_table": "Described a table",
+    "bq_information_schema": "Read schema information",
+    "propose_job": "Proposed a job",
+    "job_status": "Checked job status",
+    "sample_results": "Read sample results",
+    "lead_transcript": "Read a lead transcript",
+    "result_aggregates": "Read result aggregates",
+    "brief_read": "Read the project brief",
+    "brief_update": "Updated the project brief",
+    "data_notes": "Read data notes",
+    "write_file": "Wrote a project file",
+}
 
 
 class _RealClock:
@@ -95,6 +118,42 @@ class ClaudeTurnError(RuntimeError):
         self.reason = reason
         self.resets_at = resets_at
         self.detail = detail
+
+
+_FAILURE_TEXT = {
+    "failed": "The job failed.",
+    "cancelled": "The job was cancelled.",
+    "pull_failed": "The job could not pull its data.",
+    "background_task_failed": "The job stopped after an unexpected error.",
+    "recovery_failed": "The job could not resume after the engine restarted.",
+    "engine_shutdown": "The engine stopped before the job finished.",
+}
+_OPERATOR_WORDS = {
+    "eq": "is",
+    "ne": "is not",
+    "in": "is one of",
+    "not_in": "is not one of",
+    "lt": "<",
+    "le": "<=",
+    "gt": ">",
+    "ge": ">=",
+    "is_null": "is empty",
+    "not_null": "is not empty",
+    "contains": "contains",
+}
+# A failed chat turn is stored in history.jsonl; keep its text to fixed words, never the raw error.
+_TURN_FAILED_TEXT = {
+    "claude_turn_failed": "Turn failed: Claude could not finish this reply.",
+    "claude_limit_reached": "Turn failed: the Claude allowance is used up for now.",
+    "claude_extra_usage_on": "Turn failed: Claude extra usage is turned on.",
+}
+_STALL_TEXT = {
+    "pull_failed": "Pulling the transcripts failed.",
+    "recovery_failed": "The job could not recover after a restart.",
+    "masking_failed": "Masking the transcripts failed.",
+    "no leads resolved from the lead source": "No leads matched the lead source.",
+    "background task failed": "A background step failed.",
+}
 
 
 def _safe_error(exc: Exception) -> RpcError:
@@ -220,7 +279,7 @@ class JobManager:
     async def start(self, job_id: str, operation: Callable[[JobRunner], Awaitable[None]]) -> None:
         old = self.tasks.get(job_id)
         if old is not None and not old.done():
-            raise RpcError(-32001, "Job is already running", {"job": job_id})
+            raise RpcError(-32001, "Job is already running", {"job": job_id, "reason": "job_running"})
 
         async def invoke() -> None:
             rows = self.backend.store.rows("SELECT project_id FROM jobs WHERE id=?", (job_id,))
@@ -344,6 +403,7 @@ class JobManager:
                     with contextlib.suppress(OSError):
                         process.kill()
             self.backend._login_processes.discard(process)
+            self.backend._codex_logins.discard(process)
 
 
 class ProductionBackend(ApiBackend):
@@ -361,13 +421,15 @@ class ProductionBackend(ApiBackend):
         clock: Clock | None = None,
         event_bus: EventBus | None = None,
         ner: Any | None = None,
-        concurrency: int = 4,
+        concurrency: int | None = None,
     ) -> None:
         configured_data_dir = os.environ.get("BCA_DATA_DIR")
         self.app_data = (
             app_data or (Path(configured_data_dir) if configured_data_dir else directories().app_data)
         ).expanduser()
         self.app_data.mkdir(parents=True, exist_ok=True)
+        # An explicit argument wins; otherwise the worker count saved in Settings survives a restart.
+        self.concurrency = concurrency if concurrency is not None else self._saved_worker_count()
         self.config_path = self.app_data / "site.toml"
         self._config_supplied = config is not None
         self.config: SiteConfig = cast(SiteConfig, config)
@@ -379,7 +441,6 @@ class ProductionBackend(ApiBackend):
         self.event_bus = event_bus or EventBus()
         self.clock = clock or _RealClock()
         self.store.transition_listener = self._publish_transition
-        self.concurrency = concurrency
         self._provided_bq, self._provided_launch, self._provided_masker = bq, launch_pool, masking_context
         self._provided_ner = ner
         self._bq = bq
@@ -392,11 +453,16 @@ class ProductionBackend(ApiBackend):
         self._chat_sessions: dict[str, claude_launch.SessionRef] = {}
         self._chat_mcp_configs: dict[str, Path] = {}
         self._chat_stop_requests: set[asyncio.Task[dict[str, object]]] = set()
+        self._chat_turns: dict[str, str] = {}
+        self._chat_entry_ids: dict[str, int] = {}
         self._chat_notify: Callable[[str, dict[str, object]], Awaitable[None]] | None = None
         self._login_processes: set[subprocess.Popen[str]] = set()
+        self._codex_logins: set[subprocess.Popen[str]] = set()
+        self._codex_allowance_cache: tuple[float, dict[str, object]] | None = None
         self._chat_sessions_store = SessionStore(self.app_data / "claude" / "sessions.json")
         self._closed = False
         self._stopping = False
+        self._resume_watcher_task: asyncio.Task[None] | None = None
         if self.config is not None:
             self.jobs.recover()
             self._recovered = True
@@ -468,6 +534,58 @@ class ProductionBackend(ApiBackend):
             "codex_copy": codex_copy,
             "spacy": spacy,
         }
+
+    def _start_resume_watcher(self) -> None:
+        if self._resume_watcher_task is None or self._resume_watcher_task.done():
+            self._resume_watcher_task = asyncio.create_task(self._resume_watcher(), name="bca-quota-resume")
+
+    async def _resume_watcher(self) -> None:
+        while not self._stopping:
+            try:
+                sleep = getattr(self.clock, "sleep", None)
+                if callable(sleep):
+                    await sleep(30)
+                else:
+                    await asyncio.sleep(30)
+                now = self.clock.now()
+                rows = self.store.rows(
+                    "SELECT id, resume_at FROM jobs WHERE state='paused' AND pause_reason=? "
+                    "AND resume_at IS NOT NULL AND resume_at<=?",
+                    (PauseReason.quota.value, int(now)),
+                )
+                for row in rows:
+                    job_id, due_at = str(row[0]), int(row[1])
+                    task = self.jobs.tasks.get(job_id)
+                    if self._stopping or (task is not None and not task.done()):
+                        continue
+
+                    async def automatic(
+                        runner: JobRunner, job_id: str = job_id, due_at: int = due_at
+                    ) -> None:
+                        try:
+                            await runner.resume("automatic")
+                        except (PermissionError, TransitionError, RuntimeError):
+                            retry_at = int(self.clock.now() + 600)
+                            with self.store.transaction() as cur:
+                                cur.execute(
+                                    "UPDATE jobs SET resume_at=?, updated_at=? "
+                                    "WHERE id=? AND state='paused' AND pause_reason='quota' AND resume_at=?",
+                                    (retry_at, datetime.now(UTC).isoformat(), job_id, due_at),
+                                )
+                                refused = cur.rowcount == 1
+                            if not refused:
+                                # The job left this quota pause, so the resumed run raised: let the
+                                # job manager stall it, as it does for an operator resume.
+                                raise
+
+                    try:
+                        await self.jobs.start(job_id, automatic)
+                    except Exception:
+                        logging.getLogger("bca.api").exception("Quota resume failed for job %s", job_id)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logging.getLogger("bca.api").exception("Quota resume watcher failed")
 
     def _require_config(self) -> SiteConfig:
         self._reload_config()
@@ -573,10 +691,94 @@ class ProductionBackend(ApiBackend):
     def _project_dir(self, project: str) -> Path:
         rows = self.store.rows("SELECT 1 FROM projects WHERE id=?", (project,))
         if not rows:
-            raise RpcError(-32001, "Project not found", {"project": project})
+            raise RpcError(-32001, "Project not found", {"project": project, "reason": "project_not_found"})
         path = (self.app_data / "projects" / project).resolve()
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def _settings_path(self) -> Path:
+        return self.app_data / "settings.json"
+
+    def _saved_settings(self) -> dict[str, object]:
+        try:
+            value = json.loads(self._settings_path().read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _positive_int(value: object, upper: int | None = None) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return None
+        return value if upper is None or value <= upper else None
+
+    def _saved_worker_count(self) -> int:
+        return self._positive_int(self._saved_settings().get("workerCount")) or 4
+
+    def _retention(self) -> RetentionConfig:
+        """The retention every consumer applies: the days saved in Settings, else the site config."""
+        base = self.config.retention if self.config is not None else RetentionConfig()
+        days = self._positive_int(self._saved_settings().get("retentionDays"), 3650)
+        if days is None:
+            return base
+        # Settings says "keep masked transcripts and chats for N days": one number for both.
+        return dataclasses.replace(base, masked_cache_days=days, chat_days=days)
+
+    def _save_settings(self, values: dict[str, object]) -> None:
+        path = self._settings_path()
+        fd, name = tempfile.mkstemp(prefix=".settings-", dir=self.app_data)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(values, handle, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(name, path)
+        finally:
+            Path(name).unlink(missing_ok=True)
+
+    def _chat_history_path(self, project: str) -> Path:
+        path = self._project_dir(project) / "chat" / "history.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _append_chat_entry(self, project: str, entry: dict[str, object]) -> int:
+        path = self._chat_history_path(project)
+        last = self._chat_entry_ids.get(project, 0)
+        if last == 0 and path.is_file():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict) and isinstance(value.get("id"), int):
+                    last = max(last, int(value["id"]))
+        next_id = last + 1
+        value = {"id": next_id, "ts": int(self.clock.now()), **entry}
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.flush()
+        self._chat_entry_ids[project] = next_id
+        return next_id
+
+    @staticmethod
+    def _file_kind(name: str) -> str:
+        lowered = name.lower()
+        if "sample" in lowered:
+            return "sample"
+        if "result" in lowered or lowered.endswith(".xlsx"):
+            return "results"
+        if "summary" in lowered:
+            return "summary"
+        if "report" in lowered:
+            return "report"
+        if "plan" in lowered or lowered.startswith("spec."):
+            return "plan"
+        if "brief" in lowered:
+            return "brief"
+        if "sample" in lowered:
+            return "sample"
+        return "other"
 
     @staticmethod
     def _masked(value: object, context: MaskingContext) -> object:
@@ -600,8 +802,12 @@ class ProductionBackend(ApiBackend):
         reseeded: bool = False,
     ) -> dict[str, object]:
         project_dir = self._project_dir(project)
+        turn_id = self._chat_turns.get(project, str(uuid4()))
         context = self._make_masker()(project_dir)
         masked_text = cast(str, self._masked(text_value, context))
+        self._append_chat_entry(project, {"turn": turn_id, "role": "user", "text": masked_text})
+        tool_names: dict[str, str] = {}
+        last_tool_name = "tool"
         address, _family = new_ipc_address()
         authkey = os.urandom(32)
         host = ToolHost(
@@ -620,7 +826,11 @@ class ProductionBackend(ApiBackend):
         brief_path = project_dir / "brief.md"
         brief = brief_path.read_text(encoding="utf-8") if brief_path.is_file() else ""
         brief = mask_text(brief, context).text
-        playbook_text = "You are assisting with the selected project.\n"
+        playbook_text = (
+            "You are assisting with the selected project. When the operator attaches an id list, "
+            "their message names the file (for example ids-3.txt). Use a lead source of kind ids "
+            "with that file name.\n"
+        )
         playbook_version = hashlib.sha256(playbook_text.encode("utf-8")).hexdigest()[:16]
         playbook = chat_dir / f"playbook-{playbook_version}.md"
         playbook.write_text(playbook_text, encoding="utf-8", newline="\n")
@@ -691,8 +901,81 @@ class ProductionBackend(ApiBackend):
                 if event.kind == "system" and event.data.get("subtype") == "init" and not session.resumed:
                     self._chat_sessions_store.save(project, session.session_id, playbook_version)
                 safe_event = cast(dict[str, object], self._masked(event.data, context))
+                if event.kind == "assistant":
+                    text = safe_event.get("result") or safe_event.get("text")
+                    if not isinstance(text, str):
+                        message = safe_event.get("message")
+                        content = message.get("content") if isinstance(message, dict) else None
+                        if isinstance(content, list):
+                            text = "".join(
+                                str(block["text"])
+                                for block in content
+                                if isinstance(block, dict)
+                                and block.get("type") == "text"
+                                and isinstance(block.get("text"), str)
+                            )
+                    if isinstance(text, str):
+                        self._append_chat_entry(project, {"turn": turn_id, "role": "assistant", "text": text})
+                elif event.kind in {"tool_use", "tool_result"}:
+                    message = safe_event.get("message")
+                    content = message.get("content") if isinstance(message, dict) else None
+                    block = (
+                        next(
+                            (item for item in content if isinstance(item, dict)),
+                            {},
+                        )
+                        if isinstance(content, list)
+                        else {}
+                    )
+                    tool_id = str(block.get("id") or block.get("tool_use_id") or "")
+                    tool_name = str(
+                        block.get("name")
+                        or safe_event.get("name")
+                        or safe_event.get("tool_name")
+                        or tool_names.get(tool_id, last_tool_name)
+                    )
+                    if event.kind == "tool_use" and tool_id:
+                        tool_names[tool_id] = tool_name
+                    if event.kind == "tool_use":
+                        last_tool_name = tool_name
+                    for prefix in ("mcp__app__", "mcp__bq__"):
+                        tool_name = tool_name.removeprefix(prefix)
+                    failed = bool(
+                        block.get("is_error")
+                        or block.get("isError")
+                        or safe_event.get("is_error")
+                        or safe_event.get("isError")
+                    )
+                    status = "started" if event.kind == "tool_use" else ("failed" if failed else "done")
+                    summary = _TOOL_SUMMARIES.get(tool_name, f"Ran {tool_name}")
+                    self._append_chat_entry(
+                        project,
+                        {
+                            "turn": turn_id,
+                            "role": "tool",
+                            "name": tool_name,
+                            "status": status,
+                            "summary": summary,
+                        },
+                    )
+                elif event.kind == "rate_limit":
+                    allowance = {
+                        "checkedAt": int(self.clock.now()),
+                        "rateLimitInfo": safe_event.get("rate_limit_info"),
+                    }
+                    path = self.app_data / "claude" / "allowance.json"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = path.with_name(".allowance.json.tmp")
+                    temporary.write_text(
+                        json.dumps(allowance, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n"
+                    )
+                    temporary.replace(path)
+                entry_id = self._chat_entry_ids.get(project, 0)
                 if self._chat_notify is not None:
-                    await self._chat_notify(project, {"kind": event.kind, "data": safe_event})
+                    await self._chat_notify(
+                        project,
+                        {"kind": event.kind, "data": safe_event, "turn": turn_id, "entryId": entry_id},
+                    )
             if asyncio.current_task() in self._chat_stop_requests:
                 return {"status": "stopped", "project": project}
             return {"status": "completed", "project": project}
@@ -738,11 +1021,21 @@ class ProductionBackend(ApiBackend):
         old = self._chat_tasks.get(project)
         if old is not None and not old.done():
             raise RpcError(-32001, "Chat turn is already running", {"project": project})
+        turn_id = str(uuid4())
+        self._chat_turns[project] = turn_id
         task = asyncio.create_task(self._chat_turn(project, text_value))
         self._chat_tasks[project] = task
         try:
             return await task
         except ClaudeTurnError as exc:
+            self._append_chat_entry(
+                project,
+                {
+                    "turn": self._chat_turns.get(project, ""),
+                    "role": "status",
+                    "text": _TURN_FAILED_TEXT.get(exc.reason, "Turn failed."),
+                },
+            )
             data: dict[str, object] = {
                 "project": project,
                 "reason": exc.reason,
@@ -754,6 +1047,9 @@ class ProductionBackend(ApiBackend):
                 data["resetsAt"] = exc.resets_at
             raise RpcError(-32001, "Claude turn failed", data) from exc
         except asyncio.CancelledError:
+            self._append_chat_entry(
+                project, {"turn": self._chat_turns.get(project, ""), "role": "status", "text": "Turn stopped"}
+            )
             if task in self._chat_stop_requests:
                 return {"status": "stopped", "project": project}
             raise
@@ -761,6 +1057,7 @@ class ProductionBackend(ApiBackend):
             if self._chat_tasks.get(project) is task:
                 self._chat_tasks.pop(project, None)
             self._chat_stop_requests.discard(task)
+            self._chat_turns.pop(project, None)
 
     async def _chat_stop(self, project: str) -> dict[str, object]:
         task = self._chat_tasks.get(project)
@@ -780,24 +1077,159 @@ class ProductionBackend(ApiBackend):
     async def _auth_status(self) -> dict[str, object]:
         profile = self._claude_profile()
         claude = await asyncio.to_thread(claude_auth_status, self._claude_binary(), profile)
+        codex = await self._codex_allowance()
+        windows = codex.get("windows") if codex else None
+        first_window = windows[0] if isinstance(windows, list) and windows else None
+        return {
+            "claude": {"loggedIn": claude.ok},
+            "codex": {
+                "loggedIn": bool(codex and codex.get("loggedIn")),
+                "planType": codex.get("planType") if codex else None,
+                "usagePercent": first_window.get("usedPercent") if isinstance(first_window, dict) else None,
+            },
+        }
+
+    @staticmethod
+    def _epoch(value: object) -> int:
+        try:
+            from datetime import datetime
+
+            return int(datetime.fromisoformat(str(value)).timestamp())
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    def _project_jobs(self, project: str) -> list[dict[str, object]]:
+        rows = self.store.rows(
+            "SELECT id,title,state,spec_version,created_at,updated_at FROM jobs "
+            "WHERE project_id=? ORDER BY created_at DESC, rowid DESC",
+            (project,),
+        )
+        return [
+            {
+                "job": str(r[0]),
+                "title": str(r[1] or ""),
+                "state": public_state(str(r[2])),
+                "step": str(r[2]),
+                "createdAt": self._epoch(r[4]),
+                "updatedAt": self._epoch(r[5]),
+                "specVersion": int(cast(str, r[3])),
+            }
+            for r in rows
+        ]
+
+    def _chat_history(self, project: str, params: dict[str, object]) -> dict[str, object]:
+        self._project_dir(project)
+        before = params.get("before")
+        limit = params.get("limit", 100)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise RpcError(
+                -32602, "Invalid params", {"field": "limit", "reason": "must be between 1 and 500"}
+            )
+        if before is not None and (not isinstance(before, int) or isinstance(before, bool)):
+            raise RpcError(-32602, "Invalid params", {"field": "before", "reason": "must be an integer"})
+        path = self._chat_history_path(project)
+        entries: list[dict[str, object]] = []
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    isinstance(value, dict)
+                    and isinstance(value.get("id"), int)
+                    and (before is None or value["id"] < before)
+                ):
+                    entries.append(value)
+        entries.sort(key=lambda item: cast(int, item["id"]))
+        cutoff = self.clock.now() - float(self._retention().chat_days * 86400)
+        entries = [
+            item
+            for item in entries
+            if not isinstance(item.get("ts"), (int, float)) or cast(float, item["ts"]) >= cutoff
+        ]
+        more = len(entries) > limit
+        return {"entries": entries[-limit:], "more": more}
+
+    def _codex_login_changed(self) -> bool:
+        """True while a ChatGPT sign-in runs, and once after it ends: a cached read is stale then."""
+        changed = False
+        for process in tuple(self._codex_logins):
+            changed = True
+            if process.poll() is not None:
+                self._codex_logins.discard(process)
+        return changed
+
+    async def _codex_allowance(self) -> dict[str, object] | None:
+        now = self.clock.now()
+        if self._codex_login_changed():
+            self._codex_allowance_cache = None
+        if self._codex_allowance_cache and now - self._codex_allowance_cache[0] < 300:
+            return self._codex_allowance_cache[1]
         auth_dir = self.app_data / "auth-status"
-        auth_dir.mkdir(parents=True, exist_ok=True)
         app_server = await self._launch(auth_dir)
         try:
             account = await app_server.client.request("account/read")
             limits = await app_server.client.request("account/rateLimits/read")
             model = self.config.models.luna_model if self.config else ModelsConfig().luna_model
             snapshot = parse_rate_limits(limits, model)
-            return {
-                "claude": {"loggedIn": claude.ok},
-                "codex": {
-                    "loggedIn": bool(account.get("account")),
-                    "planType": snapshot.plan_type,
-                    "usagePercent": snapshot.primary.used_percent if snapshot.primary else None,
-                },
+            windows = (
+                [
+                    {
+                        "name": "5h",
+                        "usedPercent": snapshot.primary.used_percent,
+                        "windowDurationMins": snapshot.primary.window_minutes,
+                        "resetsAt": snapshot.primary.resets_at,
+                    }
+                ]
+                if snapshot.primary
+                else []
+            )
+            if snapshot.secondary:
+                windows.append(
+                    {
+                        "name": "weekly",
+                        "usedPercent": snapshot.secondary.used_percent,
+                        "windowDurationMins": snapshot.secondary.window_minutes,
+                        "resetsAt": snapshot.secondary.resets_at,
+                    }
+                )
+            value = {
+                "loggedIn": bool(account.get("account")),
+                "planType": snapshot.plan_type,
+                "windows": windows,
+                "creditsBalance": str(snapshot.credits_balance)
+                if snapshot.credits_balance is not None
+                else None,
+                "spendControlReached": snapshot.spend_control_reached,
+                "stopAtPercent": (self.config.limits if self.config else LimitsConfig()).codex_stop_percent,
+                "checkedAt": int(now),
             }
+            safe_value = cast(dict[str, object], value)
+            self._codex_allowance_cache = (now, safe_value)
+            return safe_value
         finally:
             await app_server.stop()
+
+    async def _codex_allowance_or_none(self) -> dict[str, object] | None:
+        """The Codex allowance, or None when Codex cannot start or answer (shown as unknown)."""
+        try:
+            return await self._codex_allowance()
+        except Exception:
+            logging.getLogger("bca.api").warning("Codex allowance read failed", exc_info=True)
+            return None
+
+    async def _allowance_status(self) -> dict[str, object]:
+        claude_value: dict[str, object] | None = None
+        path = self.app_data / "claude" / "allowance.json"
+        if path.is_file():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(value, dict):
+                    claude_value = value
+            except (OSError, json.JSONDecodeError):
+                claude_value = None
+        return {"codex": await self._codex_allowance_or_none(), "claude": claude_value}
 
     async def _start_codex_login(self) -> dict[str, object]:
         env = childenv.build_child_env({"CODEX_HOME": str((self.app_data / "codex").resolve())})
@@ -812,7 +1244,11 @@ class ProductionBackend(ApiBackend):
             kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
         else:
             kwargs["start_new_session"] = True
-        self._login_processes.add(subprocess.Popen([str(self._codex_binary()), "login"], **kwargs))
+        process = subprocess.Popen([str(self._codex_binary()), "login"], **kwargs)
+        self._login_processes.add(process)
+        self._codex_logins.add(process)
+        # The cached read says "not signed in"; read again while and after the sign-in runs.
+        self._codex_allowance_cache = None
         return {"started": True, "vendor": "codex"}
 
     def _job_status(self, job_id: str) -> dict[str, object]:
@@ -821,12 +1257,13 @@ class ProductionBackend(ApiBackend):
         )
         if not row:
             return {"job": job_id, "state": "unknown"}
-        progress = counts(self.store, job_id)
+        progress = counts(self.store, job_id, sample=progress_sample_scope(self.store, job_id))
+        state = str(row[0][1])
         return {
             "job": job_id,
             "project": str(row[0][0]),
-            "state": public_state(str(row[0][1])),
-            "step": str(row[0][1]),
+            "state": public_state(state),
+            "step": state,
             "specVersion": int(row[0][2]),
             "pauseReason": row[0][3],
             "resumeAt": row[0][4],
@@ -837,7 +1274,692 @@ class ProductionBackend(ApiBackend):
                 "failed": sum(progress.failed.values()),
                 "heldBack": progress.held_back,
             },
+            "stall": self._job_stall(job_id, state),
         }
+
+    def _job_stall(self, job_id: str, state: str) -> dict[str, str] | None:
+        if state != JobState.stalled.value:
+            return None
+        rows = self.store.rows(
+            "SELECT data_json FROM job_events WHERE job_id=? AND kind='state' ORDER BY id DESC LIMIT 1",
+            (job_id,),
+        )
+        reason = "job stalled"
+        if rows:
+            try:
+                event = json.loads(str(rows[0][0]))
+            except json.JSONDecodeError:
+                event = {}
+            if isinstance(event, dict) and isinstance(event.get("reason"), str) and event["reason"]:
+                reason = event["reason"]
+        return {"reason": reason, "text": _STALL_TEXT.get(reason, "The job stopped and needs attention.")}
+
+    def _read_job_spec(self, job_id: str) -> tuple[Path, JobSpec, int, str]:
+        row = self.store.rows("SELECT project_id FROM jobs WHERE id=?", (job_id,))
+        if not row:
+            raise RpcError(-32001, "Job not found", {"reason": "job_not_found", "job": job_id})
+        project = str(row[0][0])
+        folder = job_dir(self.app_data, project, job_id)
+        try:
+            spec, version = load_latest_spec(folder)
+        except (OSError, ValueError) as exc:
+            raise RpcError(-32001, "Job specification is unavailable", {"reason": "spec_not_found"}) from exc
+        return folder, spec, version, project
+
+    @staticmethod
+    def _rule_value_text(value: object) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, float):
+            return f"{value:g}"
+        if isinstance(value, list):
+            return ", ".join(ProductionBackend._rule_value_text(item) for item in value)
+        if value is None:
+            return "empty"
+        return str(value)
+
+    @staticmethod
+    def _rule_conditions_text(match: str, conditions: tuple[Condition, ...]) -> str:
+        parts = []
+        for condition in conditions:
+            words = _OPERATOR_WORDS.get(condition.op, condition.op)
+            if condition.op in ("is_null", "not_null"):
+                parts.append(f"{condition.field} {words}")
+            else:
+                parts.append(
+                    f"{condition.field} {words} {ProductionBackend._rule_value_text(condition.value)}"
+                )
+        return (" or " if match == "any" else " and ").join(parts)
+
+    @staticmethod
+    def _rule_summary(rule: object) -> dict[str, object]:
+        kind = str(getattr(rule, "kind", ""))
+        definition = cast(Any, rule).to_dict()
+        if isinstance(rule, InScopeRule):
+            conditions = ProductionBackend._rule_conditions_text(rule.match, rule.conditions)
+            return {
+                "kind": kind,
+                "summary": f"In scope if {conditions}",
+                "definition": definition,
+            }
+        if isinstance(rule, ThresholdGroupRule):
+            edges = [f"{edge:g}" for edge in rule.edges]
+            # The evaluator puts an edge value in the lower band when inclusive_upper is set.
+            below, above = ("<=", ">") if rule.inclusive_upper else ("<", ">=")
+            ranges = [f"{below} {edges[0]}"] if edges else ["any value"]
+            ranges += [f"{above} {edges[i]} and {below} {edges[i + 1]}" for i in range(len(edges) - 1)]
+            if edges:
+                ranges.append(f"{above} {edges[-1]}")
+            bands = [
+                f"{rule.labels[i]} ({text})" if i < len(rule.labels) else text
+                for i, text in enumerate(ranges)
+            ]
+            return {
+                "kind": kind,
+                "name": rule.name,
+                "summary": f"Bands for {rule.field}: {', '.join(bands)}",
+                "definition": definition,
+            }
+        if isinstance(rule, ReviewFlagRule):
+            conditions = ProductionBackend._rule_conditions_text(rule.match, rule.conditions)
+            return {
+                "kind": kind,
+                "name": rule.name,
+                "summary": f"Flag if {conditions}",
+                "definition": definition,
+            }
+        return {"kind": kind, "summary": "Configured rule", "definition": definition}
+
+    def _current_rules(self, folder: Path, spec: JobSpec, version: int) -> tuple[object, ...]:
+        def rebuild_number(path: Path) -> int:
+            match = re.search(r"\.rebuild(\d+)\.rules\.json$", path.name)
+            return int(match.group(1)) if match else -1
+
+        paths = sorted(
+            (folder / "output").glob(f"results.v{version}.rebuild*.rules.json"),
+            key=rebuild_number,
+        )
+        if paths:
+            try:
+                value = json.loads(paths[-1].read_text(encoding="utf-8"))
+                if isinstance(value, list):
+                    from bca.store.spec import _rule
+
+                    return tuple(_rule(item) for item in value)
+                raise ValueError("rules file must contain an array")
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RpcError(
+                    -32001, "Rebuild rules are unavailable", {"reason": "rules_unreadable"}
+                ) from exc
+        rows = self.store.rows(
+            "SELECT data_json FROM job_events WHERE job_id=? AND kind='rules_rebuilt' "
+            "ORDER BY id DESC LIMIT 1",
+            (spec.job_id,),
+        )
+        if rows:
+            try:
+                value = json.loads(str(rows[0][0]))
+                raw = value.get("rules") if isinstance(value, dict) else None
+                if isinstance(raw, list):
+                    from bca.store.spec import _rule
+
+                    return tuple(_rule(item) for item in raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        return spec.rules
+
+    @staticmethod
+    def _preflight(folder: Path, version: int) -> dict[str, object]:
+        path = folder / f"preflight.v{version}.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RpcError(-32001, "Preflight is unavailable", {"reason": "preflight_not_found"}) from exc
+        if not isinstance(value, dict):
+            raise RpcError(-32001, "Preflight is invalid", {"reason": "invalid_preflight"})
+        return cast(dict[str, object], value)
+
+    def _job_plan(self, job_id: str, params: dict[str, object]) -> dict[str, object]:
+        folder, spec, version, _ = self._read_job_spec(job_id)
+        requested = params.get("specVersion")
+        if requested is not None and requested != version:
+            raise RpcError(-32001, "Spec version is stale", {"reason": "stale_spec_version"})
+        preflight = self._preflight(folder, version)
+        buckets = cast(dict[str, object], preflight.get("buckets", {}))
+        selected = sum(
+            value if isinstance(value, int) else int(value)
+            for value in buckets.values()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        )
+        count_names = {
+            "selected": "selected",
+            "usable": "usable",
+            "noTranscript": "no_transcript",
+            "transcriptionFailed": "transcription_failed",
+            "tooShort": "too_short",
+            "notFound": "not_found",
+        }
+        counts_value = {
+            public_name: int(cast(int | float, buckets.get(source_name, 0)))
+            for public_name, source_name in count_names.items()
+        }
+        counts_value["selected"] = selected
+        capped = preflight.get("capped_leads", 0)
+        counts_value["capped"] = int(capped) if isinstance(capped, (int, float)) else 0
+        intake = cast(dict[str, object], preflight.get("id_intake", {}))
+        duplicates = intake.get("duplicates", 0)
+        malformed = intake.get("malformed", 0)
+        counts_value["duplicates"] = int(duplicates) if isinstance(duplicates, (int, float)) else 0
+        counts_value["malformed"] = int(malformed) if isinstance(malformed, (int, float)) else 0
+        properties = cast(dict[str, object], spec.output_schema.get("properties", {}))
+        columns: list[dict[str, object]] = []
+        for name, raw_value in properties.items():
+            if not isinstance(raw_value, dict):
+                continue
+            value = cast(dict[str, object], raw_value)
+            type_value = value.get("type", "string")
+            public_type = (
+                next((item for item in type_value if item != "null"), "string")
+                if isinstance(type_value, list)
+                else type_value
+            )
+            columns.append(
+                {
+                    "name": name,
+                    "type": str(public_type),
+                    "nullable": isinstance(type_value, list) and "null" in type_value,
+                    "values": value.get("enum") if isinstance(value.get("enum"), list) else None,
+                    **(
+                        {"description": value["description"]}
+                        if isinstance(value.get("description"), str)
+                        else {}
+                    ),
+                }
+            )
+        source: dict[str, object] = {"kind": spec.lead_source.kind}
+        if spec.lead_source.kind == "sql":
+            source["sql"] = spec.lead_source.sql
+        else:
+            source["idCount"] = spec.lead_source.count
+        dry_bytes = preflight.get("dry_run_bytes", 0)
+        return {
+            "job": job_id,
+            "project": spec.project_id,
+            "specVersion": version,
+            "title": spec.title,
+            "question": spec.question,
+            "leadSource": source,
+            "callsScope": {
+                "mode": spec.calls_scope,
+                "windowStart": spec.window_start,
+                "windowEnd": spec.window_end,
+            },
+            "counts": counts_value,
+            "scanBytes": int(dry_bytes) if isinstance(dry_bytes, (int, float)) else 0,
+            "outputColumns": columns,
+            "rules": [self._rule_summary(rule) for rule in self._current_rules(folder, spec, version)],
+            "sampleSize": spec.sample_size,
+            "estimate": None,
+            "approved": bool(
+                self.store.rows("SELECT plan_approved_at FROM jobs WHERE id=?", (job_id,))[0][0]
+            ),
+            "approvedAt": self.store.rows("SELECT plan_approved_at FROM jobs WHERE id=?", (job_id,))[0][0],
+        }
+
+    def _mask_sample_value(self, folder: Path, value: object) -> object:
+        if isinstance(value, str):
+            return mask_text(value, self._make_masker()(folder)).text
+        if isinstance(value, dict):
+            return {str(k): self._mask_sample_value(folder, v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._mask_sample_value(folder, item) for item in value]
+        return value
+
+    def _job_sample(self, job_id: str) -> dict[str, object]:
+        folder, spec, version, _ = self._read_job_spec(job_id)
+        rows = self.store.rows(
+            "SELECT l.lead_id,l.status,r.answer_json,r.quotes_ok,r.flags_json "
+            "FROM leads l LEFT JOIN results r ON r.job_id=l.job_id AND r.lead_id=l.lead_id "
+            "WHERE l.job_id=? AND l.in_sample=1 ORDER BY l.lead_id",
+            (job_id,),
+        )
+        result_rows: list[dict[str, object]] = []
+        for row in rows:
+            answer = json.loads(str(row[2])) if row[2] is not None else {}
+            flags = json.loads(str(row[4])) if row[4] is not None else []
+            if not isinstance(answer, dict):
+                answer = {}
+            if not isinstance(flags, list):
+                flags = []
+            masked = cast(dict[str, object], self._mask_sample_value(folder, answer))
+            quotes = [
+                {
+                    "field": field.field,
+                    "text": masked.get(field.field, ""),
+                    "ok": bool(row[3])
+                    and not any(str(flag).startswith(f"quote:{field.field}:") for flag in flags),
+                }
+                for field in spec.quote_fields
+            ]
+            result_rows.append(
+                {
+                    "lead": str(row[0]),
+                    "answer": masked,
+                    "quotes": quotes,
+                    "flags": flags,
+                    "status": "repairing"
+                    if str(row[1]) == "queued" and any("quote:" in str(flag) for flag in flags)
+                    else str(row[1]),
+                }
+            )
+        read = sum(item["status"] in {"done", "repairing"} for item in result_rows)
+        return {
+            "job": job_id,
+            "specVersion": version,
+            "total": len(result_rows),
+            "read": read,
+            "quotesVerified": sum(
+                all(bool(q["ok"]) for q in cast(list[dict[str, object]], item["quotes"]))
+                for item in result_rows
+            ),
+            "quotesRepaired": 0,
+            "quotesFlagged": sum(bool(item["flags"]) for item in result_rows),
+            "heldBack": sum(item["status"] == "held_back" for item in result_rows),
+            "failed": sum(item["status"] == "failed" for item in result_rows),
+            "rows": result_rows,
+            "columns": list(cast(dict[str, object], spec.output_schema.get("properties", {}))),
+            "file": (folder / "output" / f"sample.v{version}.xlsx")
+            .relative_to(folder.parent.parent)
+            .as_posix()
+            if (folder / "output" / f"sample.v{version}.xlsx").is_file()
+            else None,
+        }
+
+    def _job_snapshot(self, job_id: str) -> dict[str, object]:
+        folder, spec, version, project = self._read_job_spec(job_id)
+        row = self.store.rows(
+            "SELECT state,pause_reason,resume_at,resume_state,plan_approved_at,sample_approved_at "
+            "FROM jobs WHERE id=?",
+            (job_id,),
+        )[0]
+        sample_scope = progress_sample_scope(self.store, job_id)
+        progress = counts(self.store, job_id, sample=sample_scope)
+        sample_counts = counts(self.store, job_id, sample=True)
+        whole = counts(self.store, job_id, sample=None)
+        state = str(row[0])
+        step_names = (
+            "plan approved",
+            "leads selected",
+            "transcripts pulled",
+            "sample masked",
+            "sample read",
+            "sample approved",
+            "masking",
+            "full run",
+            "quote check and repair",
+            "Excel built",
+            "verified",
+            "summary written",
+        )
+        step_state = {
+            "plan_proposed": 0,
+            "plan_approved": 0,
+            "pulling": 2,
+            "masking_sample": 3,
+            "sample_running": 4,
+            "sample_ready": 5,
+            "sample_approved": 6,
+            "full_running": 7,
+            "quote_check": 8,
+            "building_output": 9,
+            "verifying": 10,
+            "done": 12,
+            "done_with_issues": 12,
+        }
+        effective_state = state
+        if state in {JobState.paused.value, JobState.stalled.value} and row[3]:
+            effective_state = str(row[3])
+        elif state in {JobState.failed.value, JobState.cancelled.value}:
+            for event_row in self.store.rows(
+                "SELECT data_json FROM job_events WHERE job_id=? AND kind='state' ORDER BY id DESC",
+                (job_id,),
+            ):
+                try:
+                    event = json.loads(str(event_row[0]))
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict) and str(event.get("to")) not in {
+                    JobState.failed.value,
+                    JobState.cancelled.value,
+                }:
+                    effective_state = str(event.get("to", effective_state))
+                    break
+        active = step_state.get(effective_state, -1)
+        state_events: dict[str, int] = {}
+        for event_row in self.store.rows(
+            "SELECT data_json,ts FROM job_events WHERE job_id=? AND kind='state'", (job_id,)
+        ):
+            try:
+                event_data = json.loads(str(event_row[0]))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event_data, dict) and isinstance(event_data.get("to"), str):
+                state_events[event_data["to"]] = self._epoch(event_row[1])
+        plan_approved_at = self._epoch(row[4]) if row[4] is not None else None
+        sample_approved_at = self._epoch(row[5]) if row[5] is not None else None
+        # A passed gate shows when the operator approved it, not when it started waiting.
+        gate_approved_at = {0: plan_approved_at, 5: sample_approved_at}
+        steps = []
+        for index, name in enumerate(step_names):
+            status = "done" if index < active else "active" if index == active else "todo"
+            if index in {0, 5} and status == "active":
+                status = "waiting_for_you"
+            step_ts = next((state_events.get(key) for key in step_state if step_state[key] == index), None)
+            approved_ts = gate_approved_at.get(index)
+            if status == "done" and approved_ts is not None:
+                step_ts = approved_ts
+            steps.append(
+                {
+                    "id": name.replace(" ", "_"),
+                    "label": name,
+                    "status": status,
+                    "ts": step_ts,
+                    "detail": (
+                        f"{sample_counts.done}/{sample_counts.total}"
+                        if index == 4 and status in {"active", "done"}
+                        else f"{whole.done}/{whole.total}"
+                        if index == 7 and status in {"active", "done"}
+                        else None
+                    ),
+                }
+            )
+        activity = [
+            {"ts": self._epoch(r[1]), "kind": str(r[2]), "text": str(r[3])}
+            for r in self.store.rows(
+                "SELECT ts,ts,kind,text FROM job_activity WHERE job_id=? ORDER BY id DESC LIMIT 20", (job_id,)
+            )
+        ]
+        rec_path = folder / "output" / f"reconciliation.v{version}.json"
+        reconciliation = json.loads(rec_path.read_text(encoding="utf-8")) if rec_path.is_file() else None
+        eta: dict[str, object] | None = None
+        activity_value: dict[str, object] = {
+            "lastActivityTs": activity[0]["ts"] if activity else None,
+            "inFlight": progress.in_flight,
+            "workers": self.concurrency,
+            "throughputPerMin": None,
+        }
+        quota: dict[str, object] = {"codex": None, "claude": None, "projectedEndPercent": None}
+        runner = self.jobs.runners.get(job_id)
+        task = self.jobs.tasks.get(job_id)
+        if runner is not None and task is not None and not task.done():
+            now = self.clock.now()
+            live = counts(self.store, job_id, sample=sample_scope)
+            estimate = runner._eta.estimate(now, live.remaining, self.concurrency)
+            quota_rows = self.store.rows(
+                "SELECT data_json FROM job_events WHERE job_id=? AND kind='quota' ORDER BY id", (job_id,)
+            )
+            quota_history: list[SimpleNamespace] = []
+            last_quota: dict[str, object] = {}
+            for quota_row in quota_rows:
+                try:
+                    item = json.loads(str(quota_row[0]))
+                    if isinstance(item, dict):
+                        last_quota = item
+                    primary = item.get("primary") if isinstance(item, dict) else None
+                    if isinstance(item, dict) and isinstance(primary, dict):
+                        quota_history.append(
+                            SimpleNamespace(
+                                used_percent=int(primary.get("usedPercent", 0)),
+                                resets_at=primary.get("resetsAt"),
+                                taken_at=float(item.get("takenAt", now)),
+                            )
+                        )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            if quota_history:
+                latest = quota_history[-1]
+                quota_guard = runner._quota_guard
+                # The same percent-per-completed-lead rate the ETA uses (None until leads finish
+                # while usage rises): the job ends near used + leads still to read x that rate.
+                rate = runner._eta.percent_per_lead(quota_history)
+                if rate is not None:
+                    leads_left = live.remaining + live.retrying + live.in_flight
+                    quota["projectedEndPercent"] = min(100, round(latest.used_percent + leads_left * rate))
+                estimate = runner._eta.with_quota(
+                    estimate, quota_history, live.remaining, quota_guard.stop_percent, now
+                )
+                quota["codex"] = self._quota_public(last_quota)
+                cast(dict[str, object], quota["codex"])["stopAtPercent"] = quota_guard.stop_percent
+            eta = estimate.public()
+            activity_value.update(
+                {
+                    "lastActivityTs": runner._last_activity_ts,
+                    "inFlight": live.in_flight,
+                    "workers": getattr(runner._phase_pool, "concurrency", self.concurrency),
+                    "throughputPerMin": self._throughput(runner, now),
+                }
+            )
+        return {
+            "job": job_id,
+            "project": project,
+            "title": spec.title,
+            "state": public_state(state),
+            "step": state,
+            "specVersion": version,
+            "pauseReason": row[1],
+            "resumeAt": row[2],
+            "planApprovedAt": plan_approved_at,
+            "sampleApprovedAt": sample_approved_at,
+            # The app's start card reads approvedAt: the time the sample was approved.
+            **({"approvedAt": sample_approved_at} if sample_approved_at is not None else {}),
+            "progress": {
+                "job": job_id,
+                "project": project,
+                "phase": "sample" if sample_scope is True else "full",
+                "done": progress.done,
+                "inFlight": progress.in_flight,
+                "retrying": progress.retrying,
+                "failed": sum(progress.failed.values()),
+                "heldBack": progress.held_back,
+                "remaining": progress.remaining,
+                "total": progress.total,
+            },
+            "counts": {
+                "selected": whole.total
+                + whole.no_transcript
+                + whole.transcription_failed
+                + whole.too_short
+                + whole.not_found,
+                "usable": whole.total,
+                "noTranscript": whole.no_transcript,
+                "transcriptionFailed": whole.transcription_failed,
+                "tooShort": whole.too_short,
+                "notFound": whole.not_found,
+                "capped": whole.capped,
+                "failedByReason": whole.failed,
+            },
+            "eta": eta,
+            "activity": activity_value,
+            "quota": quota,
+            "steps": steps,
+            "recent": list(reversed(activity)),
+            "reconciliation": reconciliation,
+            "failure": self._job_failure(job_id, state),
+            "stall": self._job_stall(job_id, state),
+        }
+
+    def _job_failure(self, job_id: str, state: str) -> dict[str, str] | None:
+        if state not in {JobState.failed.value, JobState.cancelled.value}:
+            return None
+        reason = state
+        text_reason = state
+        rows = self.store.rows(
+            "SELECT data_json FROM job_events WHERE job_id=? AND kind='state' ORDER BY id DESC LIMIT 1",
+            (job_id,),
+        )
+        if rows:
+            try:
+                event = json.loads(str(rows[0][0]))
+            except json.JSONDecodeError:
+                event = {}
+            if isinstance(event, dict) and isinstance(event.get("reason"), str) and event["reason"]:
+                text_reason = str(event["reason"])
+        return {
+            "reason": reason,
+            "text": _FAILURE_TEXT.get(
+                text_reason, _FAILURE_TEXT.get(reason, "The job ended because of an unspecified failure.")
+            ),
+        }
+
+    def _job_outputs(self, job_id: str) -> dict[str, object]:
+        folder, spec, version, _ = self._read_job_spec(job_id)
+        row = self.store.rows(
+            "SELECT state,finished_at,created_at,full_started_at FROM jobs WHERE id=?", (job_id,)
+        )[0]
+        project_root = folder.parent.parent
+        files = [
+            {
+                "name": p.name,
+                "path": p.relative_to(project_root).as_posix(),
+                "kind": self._file_kind(p.name),
+                "specVersion": int(match.group(1))
+                if (match := re.search(r"\.v(\d+)(?:\.rebuild(\d+))?\.", p.name))
+                else None,
+                "rebuild": int(match.group(2)) if match and match.group(2) else None,
+            }
+            # Sorted by name: glob order differs between file systems (it did on macOS).
+            for p in sorted((folder / "output").glob("*"), key=lambda item: item.name)
+            if self._finished_output(p)
+        ]
+        summary = folder.parent.parent / "summary.md"
+        if summary.is_file():
+            files.append(
+                {
+                    "name": "summary.md",
+                    "path": "summary.md",
+                    "kind": "markdown",
+                    "specVersion": None,
+                    "rebuild": None,
+                }
+            )
+        path = folder / "output" / f"reconciliation.v{version}.json"
+        reconciliation = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+        if isinstance(reconciliation, dict):
+            reconciliation = self._public_reconciliation(reconciliation)
+        rec = reconcile(self.store, job_id, final=False)
+        issues: list[dict[str, object]] = []
+        for kind, statuses, text in (
+            ("held_back", ("held_back",), "Leads held back by masking or data quality"),
+            ("failed", ("failed",), "Leads failed after retries"),
+        ):
+            lead_rows = self.store.rows(
+                "SELECT lead_id FROM leads WHERE job_id=? AND status IN (?) ORDER BY lead_id",
+                (job_id, statuses[0]),
+            )
+            if lead_rows:
+                issues.append(
+                    {
+                        "kind": kind,
+                        "count": len(lead_rows),
+                        "text": text,
+                        "leads": [str(item[0]) for item in lead_rows[:50]],
+                    }
+                )
+        quote_rows = self.store.rows(
+            "SELECT lead_id FROM results WHERE job_id=? AND flags_json LIKE '%quote:%' ORDER BY lead_id",
+            (job_id,),
+        )
+        if quote_rows:
+            issues.append(
+                {
+                    "kind": "quote_flag",
+                    "count": len(quote_rows),
+                    "text": "Quotes require review",
+                    "leads": [str(item[0]) for item in quote_rows[:50]],
+                }
+            )
+        capped_rows = self.store.rows(
+            "SELECT lead_id FROM leads WHERE job_id=? AND calls_dropped_cap>0 ORDER BY lead_id", (job_id,)
+        )
+        if capped_rows:
+            issues.append(
+                {
+                    "kind": "capped",
+                    "count": len(capped_rows),
+                    "text": "Leads had calls capped",
+                    "leads": [str(item[0]) for item in capped_rows[:50]],
+                }
+            )
+        finished = self._epoch(row[1]) if row[1] else None
+        started = self._epoch(row[3]) if row[3] else self._epoch(row[2])
+        failure = self._job_failure(job_id, str(row[0]))
+        return {
+            "job": job_id,
+            "specVersion": spec.spec_version,
+            "state": public_state(str(row[0])),
+            "finishedAt": finished,
+            "durationSeconds": max(0, finished - started) if finished is not None and started else None,
+            "asleepSeconds": None,
+            "files": files,
+            "reconciliation": reconciliation or {"selected": rec.distinct_ids_in, "addsUp": rec.ok},
+            "issues": issues,
+            "headline": None,
+            "failure": failure,
+        }
+
+    @staticmethod
+    def _finished_output(path: Path) -> bool:
+        """A workbook or note the operator can open: not a temp file or an empty reserved name."""
+        if path.name.startswith(".") or path.suffix.lower() not in {".xlsx", ".md"}:
+            return False
+        try:
+            return path.is_file() and path.stat().st_size > 0
+        except OSError:
+            return False
+
+    @staticmethod
+    def _public_reconciliation(value: dict[str, object]) -> dict[str, object]:
+        raw_terms = value.get("terms")
+        terms = raw_terms if isinstance(raw_terms, dict) else {}
+        return {
+            "selected": value.get("selected_distinct_ids", 0),
+            "read": terms.get("done", 0),
+            "noTranscript": terms.get("no_transcript", 0),
+            "transcriptionFailed": terms.get("transcription_failed", 0),
+            "tooShort": terms.get("too_short", 0),
+            "notFound": terms.get("not_found", 0),
+            "heldBack": terms.get("held_back", 0),
+            "failed": terms.get("failed", 0),
+            "notStarted": terms.get("not_started", 0),
+            "addsUp": value.get("adds_up", False),
+        }
+
+    @staticmethod
+    def _quota_public(value: dict[str, object]) -> dict[str, object]:
+        return {
+            key: value.get(key)
+            for key in (
+                "limitId",
+                "primary",
+                "secondary",
+                "creditsBalance",
+                "hasCredits",
+                "spendControlReached",
+                "rateLimitReachedType",
+                "ordinaryUsageAllowed",
+                "planType",
+                "stopAtPercent",
+            )
+        }
+
+    @staticmethod
+    def _throughput(runner: JobRunner, now: float) -> float | None:
+        points = [point for point in runner._eta._completed if now - point <= 1800]
+        if len(points) < 2:
+            return None
+        active = runner._eta._excluded(points[0], points[-1])
+        elapsed = points[-1] - points[0] - active
+        return (len(points) - 1) / elapsed * 60 if elapsed > 0 else None
 
     def _job_state(self, job_id: str) -> JobState:
         row = self.store.rows("SELECT state FROM jobs WHERE id=?", (job_id,))
@@ -902,27 +2024,32 @@ class ProductionBackend(ApiBackend):
     def _settings(self) -> dict[str, object]:
         cfg = self.config
         key = cfg.bigquery.key_path
+        saved = self._saved_settings()
+        saved_worker = saved.get("workerCount", self.concurrency)
         return {
             "connectorPath": str(key) if key else None,
+            "keyPath": str(key) if key else None,
+            "connectorDir": str(cfg.bigquery.connector_dir) if cfg.bigquery.connector_dir else None,
             "keyLocated": bool(key and key.is_file()),
-            "workerCount": self.concurrency,
-            "retentionDays": cfg.retention.masked_cache_days,
+            "workerCount": 4 if saved_worker is None else saved_worker,
+            "workerCountMode": "auto" if saved_worker is None else "fixed",
+            "retentionDays": self._retention().masked_cache_days,
             "claudeModel": cfg.models.claude_model,
             "codexModel": cfg.models.luna_model,
         }
 
     @staticmethod
     def _is_internal_project_file(relative: Path) -> bool:
-        parts = relative.parts
-        name = relative.name
+        # Windows file names ignore case, so CHAT/History.jsonl is the chat history too.
+        parts = tuple(part.lower() for part in relative.parts)
+        name = parts[-1] if parts else ""
         if "chat" in parts or name == "harvested_names.json":
             return True
         if len(parts) >= 3 and parts[0] == "jobs" and parts[2] in {"raw", "masked"}:
             return True
         if name.startswith(".bca-") or name.endswith((".db", ".sqlite", ".sqlite3")):
             return True
-        lowered = name.lower()
-        return lowered.endswith(".log") and ("codex" in lowered or "app-server" in lowered)
+        return name.endswith(".log") and ("codex" in name or "app-server" in name)
 
     def _write_settings(self, changes: dict[tuple[str, str], str]) -> None:
         if not self.config_path.is_file():
@@ -959,6 +2086,7 @@ class ProductionBackend(ApiBackend):
     def _validate_settings(params: dict[str, object]) -> None:
         allowed = {
             "connectorPath",
+            "keyPath",
             "workerCount",
             "retentionDays",
             "claudeModel",
@@ -968,7 +2096,7 @@ class ProductionBackend(ApiBackend):
         unknown = sorted(set(params) - allowed)
         if unknown:
             raise RpcError(-32602, "Invalid params", {"fields": unknown, "reason": "unknown field"})
-        for key in ("connectorPath", "claudeModel", "codexModel"):
+        for key in ("connectorPath", "keyPath", "claudeModel", "codexModel"):
             if key in params and (not isinstance(params[key], str) or not params[key]):
                 raise RpcError(-32602, "Invalid params", {"field": key, "reason": "must be non-empty"})
         claude = params.get("claudeModel")
@@ -988,11 +2116,15 @@ class ProductionBackend(ApiBackend):
             raise RpcError(-32602, "Invalid params", {"field": "codexModel", "reason": "invalid model id"})
         for key in ("workerCount", "retentionDays"):
             value = params.get(key)
-            if key in params and (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < 1
-                or (key == "retentionDays" and value > 3650)
+            if (
+                key in params
+                and value is not None
+                and (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 1
+                    or (key == "retentionDays" and value > 3650)
+                )
             ):
                 raise RpcError(-32602, "Invalid params", {"field": key, "reason": "must be positive"})
 
@@ -1000,6 +2132,7 @@ class ProductionBackend(ApiBackend):
         try:
             self._reload_config()
             if self.config is not None:
+                self._start_resume_watcher()
                 self.jobs.schedule_recovery()
             if self._stopping and method != "shutdown":
                 raise RpcError(-32001, "Engine is stopping", {"reason": "stopping"})
@@ -1022,6 +2155,10 @@ class ProductionBackend(ApiBackend):
             if method == "shutdown":
                 self._stopping = True
                 await self.jobs.shutdown()
+                if self._resume_watcher_task is not None:
+                    self._resume_watcher_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._resume_watcher_task
                 self.store.close()
                 self._closed = True
                 return {"stopping": True, "exitCode": 0}
@@ -1036,7 +2173,27 @@ class ProductionBackend(ApiBackend):
                 return [item.__dict__ for item in items]
             if method == "setup/runChecks":
                 checklist = Checklist(self.app_data)
-                return {"items": [item.__dict__ for item in checklist.run_checks(self._setup_probes())]}
+                try:
+                    claude_probe = await asyncio.to_thread(
+                        claude_auth_status, self._claude_binary(), self._claude_profile()
+                    )
+                except OSError:
+                    claude_probe = None
+                # Any failure of the Codex read is a failed sign-in row, not a failed checklist.
+                codex_probe = await self._codex_allowance_or_none()
+                # The plain-words probes, plus the two sign-in rows read above.
+                probes = {
+                    **self._setup_probes(),
+                    "claude_login": lambda: (
+                        bool(claude_probe and claude_probe.ok),
+                        "Signed in" if claude_probe and claude_probe.ok else "Not signed in yet",
+                    ),
+                    "chatgpt_login": lambda: (
+                        bool(codex_probe and codex_probe.get("loggedIn")),
+                        "Signed in" if codex_probe and codex_probe.get("loggedIn") else "Not signed in yet",
+                    ),
+                }
+                return {"items": [item.__dict__ for item in checklist.run_checks(probes)]}
             if method == "setup/markManual":
                 item = cast(str, params["item"])
                 if item not in MANUAL:
@@ -1062,15 +2219,21 @@ class ProductionBackend(ApiBackend):
                         },
                     )
                 self._validate_settings(params)
+                saved = self._saved_settings()
+                if "workerCount" in params:
+                    saved["workerCount"] = params["workerCount"]
+                if "retentionDays" in params:
+                    saved["retentionDays"] = params["retentionDays"]
+                if "workerCount" in params or "retentionDays" in params:
+                    self._save_settings(saved)
                 changes: dict[tuple[str, str], str] = {}
                 if "claudeModel" in params:
                     changes[("models", "claude_model")] = json.dumps(params["claudeModel"])
                 if "codexModel" in params:
                     changes[("models", "luna_model")] = json.dumps(params["codexModel"])
-                if "connectorPath" in params:
-                    changes[("bigquery", "key_path")] = json.dumps(params["connectorPath"])
-                if "retentionDays" in params:
-                    changes[("retention", "masked_cache_days")] = str(params["retentionDays"])
+                key_path = params.get("keyPath", params.get("connectorPath"))
+                if key_path is not None:
+                    changes[("bigquery", "key_path")] = json.dumps(key_path)
                 if changes:
                     self._write_settings(changes)
                 try:
@@ -1091,18 +2254,41 @@ class ProductionBackend(ApiBackend):
                         "Invalid configuration",
                         {"field": field, "reason": str(exc).split(": ", 1)[-1]},
                     ) from exc
-                if "workerCount" in params:
+                if "workerCount" in params and params["workerCount"] is not None:
                     self.concurrency = cast(int, params["workerCount"])
+                elif params.get("workerCount", object()) is None:
+                    self.concurrency = 4
                 self.config_error = None
                 self.jobs.recover()
                 self.jobs.schedule_recovery()
                 return self._settings()
             if method == "projects/list":
                 self._require_config()
-                return [
-                    {"project": str(r[0]), "title": str(r[1])}
-                    for r in self.store.rows("SELECT id,title FROM projects ORDER BY id")
-                ]
+                result = []
+                for r in self.store.rows("SELECT id,title,created_at FROM projects ORDER BY created_at DESC"):
+                    jobs = self._project_jobs(str(r[0]))
+                    result.append(
+                        {
+                            "project": str(r[0]),
+                            "title": str(r[1]),
+                            "createdAt": self._epoch(r[2]),
+                            "activeJob": next(
+                                (
+                                    j
+                                    for j in jobs
+                                    if j["state"] not in {"done", "done_with_issues", "failed", "cancelled"}
+                                ),
+                                None,
+                            ),
+                            "lastJob": jobs[0] if jobs else None,
+                        }
+                    )
+                return result
+            if method == "projects/jobs":
+                self._require_config()
+                project = _slug(params.get("project"), "project")
+                self._project_dir(project)
+                return {"jobs": self._project_jobs(project)}
             if method == "projects/create":
                 self._require_config()
                 project = _slug(params.get("project"), "project")
@@ -1125,11 +2311,71 @@ class ProductionBackend(ApiBackend):
                 root = (self.app_data / "projects" / project).resolve()
                 if not root.is_dir():
                     raise RpcError(-32001, "Project not found", {"project": project})
-                return [
-                    {"name": p.relative_to(root).as_posix(), "size": p.stat().st_size}
+                files = [
+                    {
+                        "name": p.relative_to(root).as_posix(),
+                        "size": p.stat().st_size,
+                        "modified": float(p.stat().st_mtime),
+                        "kind": self._file_kind(p.name),
+                    }
                     for p in root.rglob("*")
                     if p.is_file() and not self._is_internal_project_file(p.relative_to(root))
                 ]
+                return sorted(files, key=lambda item: cast(float, item["modified"]), reverse=True)
+            if method == "files/path":
+                project = _slug(params.get("project"), "project")
+                name = params.get("name")
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or Path(name).is_absolute()
+                    or ".." in Path(name).parts
+                    or any(part.startswith(".") for part in Path(name).parts)
+                ):
+                    raise RpcError(-32602, "Invalid params", {"field": "name", "reason": "invalid_name"})
+                root = self._project_dir(project)
+                path = (root / Path(*name.split("/"))).resolve()
+                if not path.is_file() or self._is_internal_project_file(path.relative_to(root)):
+                    raise RpcError(-32001, "File not found", {"reason": "file_not_found"})
+                return {"path": str(path), "projectDir": str(root)}
+            if method == "ids/attach":
+                project = _slug(params.get("project"), "project")
+                raw = params.get("text")
+                if not isinstance(raw, str) or len(raw.encode("utf-8")) > 5 * 1024 * 1024:
+                    raise RpcError(-32602, "Invalid params", {"reason": "too_large"})
+                intake = parse_id_list(raw)
+                if len(intake.ids) > 200_000:
+                    raise RpcError(-32602, "Invalid params", {"reason": "too_large"})
+                if not intake.ids:
+                    raise RpcError(-32602, "Invalid params", {"reason": "no_ids"})
+                root = self._project_dir(project) / "inputs"
+                root.mkdir(parents=True, exist_ok=True)
+                n = (
+                    max(
+                        [
+                            int(p.stem.removeprefix("ids-"))
+                            for p in root.glob("ids-*.txt")
+                            if p.stem.removeprefix("ids-").isdigit()
+                        ]
+                        or [0]
+                    )
+                    + 1
+                )
+                target = root / f"ids-{n}.txt"
+                temp = target.with_name(f".{target.name}.tmp")
+                temp.write_text("\n".join(intake.ids) + "\n", encoding="utf-8", newline="\n")
+                temp.replace(target)
+                return {
+                    "name": target.name,
+                    "raw": intake.raw_count,
+                    "distinct": len(intake.ids),
+                    "duplicates": intake.duplicates,
+                    "malformed": len(intake.malformed),
+                }
+            if method == "chat/history":
+                return self._chat_history(cast(str, params["project"]), params)
+            if method == "allowance/status":
+                return await self._allowance_status()
             if method.startswith("chat/") or method.startswith("auth/"):
                 if method.startswith("chat/"):
                     self._require_config()
@@ -1201,13 +2447,25 @@ class ProductionBackend(ApiBackend):
             if method == "job/status":
                 self._require_config()
                 return self._job_status(cast(str, params["job"]))
+            if method == "job/plan":
+                self._require_config()
+                return self._job_plan(cast(str, params["job"]), params)
+            if method == "job/sample":
+                self._require_config()
+                return self._job_sample(cast(str, params["job"]))
+            if method == "job/snapshot":
+                self._require_config()
+                return self._job_snapshot(cast(str, params["job"]))
+            if method == "job/outputs":
+                self._require_config()
+                return self._job_outputs(cast(str, params["job"]))
             job = cast(str, params.get("job", ""))
             self._require_config()
             if method == "job/approvePlan":
                 expected = cast(int, params["expectedSpecVersion"])
                 old = self.jobs.tasks.get(job)
                 if old is not None and not old.done():
-                    raise RpcError(-32001, "Job is already running", {"job": job})
+                    raise RpcError(-32001, "Job is already running", {"job": job, "reason": "job_running"})
                 try:
                     approve_plan(self.store, job, "operator", expected)
                 except TransitionError as exc:
@@ -1291,7 +2549,13 @@ class ProductionBackend(ApiBackend):
                 path = await asyncio.to_thread(runner.rebuild_with_rules, rules)
                 match = re.search(r"\.rebuild(\d+)\.xlsx$", str(path))
                 rebuild_number = int(match.group(1)) if match else 0
-                return {"job": job, "path": str(path), "rebuild": rebuild_number}
+                project_root = runner.deps.job_dir.parent.parent
+                return {
+                    "job": job,
+                    "name": path.name,
+                    "path": path.relative_to(project_root).as_posix(),
+                    "rebuild": rebuild_number,
+                }
             raise RpcError(-32601, "Method not found")
         except RpcError:
             raise

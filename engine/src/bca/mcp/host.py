@@ -707,6 +707,13 @@ class ToolHost:
             ids_file = Path(str(cast(Any, spec.lead_source).ids_file))
             if ids_file.is_absolute() or ids_file.name != str(ids_file) or ".." in ids_file.parts:
                 raise ToolHostError("invalid lead source path")
+            if not (job_dir / ids_file).is_file():
+                source = self.project_dir / "inputs" / ids_file.name
+                if source.is_file():
+                    job_dir.mkdir(parents=True, exist_ok=True)
+                    temporary = job_dir / f".{ids_file.name}.tmp"
+                    temporary.write_bytes(source.read_bytes())
+                    temporary.replace(job_dir / ids_file.name)
         lead_source_dry_run_bytes = 0
         if hasattr(spec.lead_source, "sql"):
             lead_source_dry_run_bytes = self.runner.dry_run(str(cast(Any, spec.lead_source).sql)).bytes
@@ -757,6 +764,8 @@ class ToolHost:
             )
             saved_path = save_spec(spec, job_dir)
             version = int(saved_path.stem.removeprefix("spec.v"))
+            with self.store.transaction() as cur:
+                cur.execute("UPDATE jobs SET title=? WHERE id=?", (spec.title, spec.job_id))
             preflight_path = job_dir / f"preflight.v{version}.json"
             preflight_data = {
                 "buckets": preflight.buckets,
@@ -774,7 +783,7 @@ class ToolHost:
             temporary.write_text(json.dumps(preflight_data, indent=2) + "\n", encoding="utf-8", newline="\n")
             temporary.replace(preflight_path)
             if created:
-                self.store.create_job(spec.job_id, spec.project_id, version, "draft")
+                self.store.create_job(spec.job_id, spec.project_id, version, "draft", spec.title)
                 record_lead_intake(self.store, spec.job_id, intake)
                 for lead_id, bucket in preflight.per_lead.items():
                     if bucket != "usable":

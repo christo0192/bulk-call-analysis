@@ -285,7 +285,8 @@ def test_settings_model_change_requires_confirmation(tmp_path: Path) -> None:
 def test_projects_create_and_list_use_store(tmp_path: Path) -> None:
     backend = make_backend(tmp_path)
     run(backend.call("projects/create", {"project": "project-one", "title": "Synthetic"}))
-    assert run(backend.call("projects/list", {})) == [{"project": "project-one", "title": "Synthetic"}]
+    listed = run(backend.call("projects/list", {}))
+    assert [(item["project"], item["title"]) for item in listed] == [("project-one", "Synthetic")]
 
 
 def test_projects_reject_non_strict_slug(tmp_path: Path) -> None:
@@ -310,10 +311,10 @@ def test_files_list_is_scoped_to_project(tmp_path: Path) -> None:
     (root / "store.sqlite3").write_bytes(b"sqlite")
     (root / "codex-app-server.log").write_text("internal", encoding="utf-8")
     result = run(backend.call("files/list", {"project": "project-one"}))
-    assert result == [
-        {"name": "inside.txt", "size": 2},
-        {"name": "jobs/job-one/output/results.xlsx", "size": 4},
-    ]
+    assert {(item["name"], item["size"]) for item in result} == {
+        ("inside.txt", 2),
+        ("jobs/job-one/output/results.xlsx", 4),
+    }
 
 
 def test_files_list_rejects_traversal(tmp_path: Path) -> None:
@@ -904,7 +905,8 @@ def test_stdio_pull_failure_stalls_job_and_engine_stays_usable(tmp_path: Path) -
             time.sleep(0.1)
         assert state == "stalled"
         send(process, 900, "projects/list", {})
-        assert read_response(process, 900)["result"] == [{"project": "project-one", "title": "Synthetic"}]
+        listed = cast(list[dict[str, object]], read_response(process, 900)["result"])
+        assert [(item["project"], item["title"]) for item in listed] == [("project-one", "Synthetic")]
     finally:
         send(process, 901, "shutdown", {})
         read_response(process, 901)

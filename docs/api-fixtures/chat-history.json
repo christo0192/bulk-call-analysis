@@ -1,0 +1,1 @@
+{"entries":[{"id":1,"ts":1700000000,"turn":"uuid-1","role":"user","text":"How many leads are there?"},{"id":2,"ts":1700000000,"turn":"uuid-1","role":"tool","name":"bq_query","status":"started","summary":"Ran a read-only query"},{"id":3,"ts":1700000000,"turn":"uuid-1","role":"tool","name":"bq_query","status":"done","summary":"Ran a read-only query"}],"more":false}
