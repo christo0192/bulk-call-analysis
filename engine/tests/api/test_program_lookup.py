@@ -179,3 +179,46 @@ def test_a_pinned_claude_model_name_is_still_accepted(tmp_path: Path) -> None:
         "claude-opus-5-5",
     )
     assert "claude-opus-5-5" in command
+
+
+@windows_only
+def test_a_double_extension_shim_is_never_picked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # shutil.which("claude.exe") also tries claude.exe.CMD (PATHEXT); the lookup must not.
+    shims, native = tmp_path / "a", tmp_path / "b"
+    _file(shims / "claude.exe.cmd", "@echo off\r\n")
+    _file(shims / "codex.exe.bat", "@echo off\r\n")
+    exe = _file(native / "claude.exe")
+    _only_on_path(monkeypatch, shims, native)
+    assert _program("claude") == exe.absolute()
+    assert _program("codex") == Path("codex")
+
+
+@windows_only
+@pytest.mark.parametrize("with_cmd", [True, False])
+def test_a_configured_codex_without_a_startable_file_is_not_found_by_row_or_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_cmd: bool
+) -> None:
+    # npm's extensionless `codex` is a shell script Windows cannot start (WinError 193): with no
+    # codex.exe and no npm package beside it, the setup row and the launch must both say not found.
+    folder = tmp_path / "broken-npm"
+    _file(folder / "codex", "#!/bin/sh\n")
+    if with_cmd:
+        _file(folder / "codex.cmd", "@echo off\r\n")
+    monkeypatch.setenv("BCA_CODEX_BIN", str(folder / "codex"))
+    monkeypatch.delenv("BCA_TEST_FAKES", raising=False)
+    _only_on_path(monkeypatch, tmp_path / "empty")
+    launched: list[object] = []
+
+    async def record(launch: Any) -> Any:
+        launched.append(launch.exe)
+        raise OSError("synthetic: not started in this test")
+
+    monkeypatch.setattr(production, "start_app_server", record)
+    backend = make_backend(tmp_path / "data")
+    checks = asyncio.run(backend.call("setup/runChecks", {}))
+    row = next(item for item in cast(dict[str, Any], checks)["items"] if item["name"] == "codex_copy")
+    assert row["status"] == "failed"
+    assert launched
+    started = Path(str(launched[-1]))
+    assert not started.is_file()
+    assert started.suffix.lower() == ".exe"

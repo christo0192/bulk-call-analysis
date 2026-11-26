@@ -426,41 +426,59 @@ def _npm_native_codex(shim_dir: Path) -> Path | None:
     return None
 
 
+def _on_path_exactly(file_name: str) -> Path | None:
+    """The first PATH folder holding exactly `file_name`. Unlike shutil.which, no PATHEXT is tried
+    (it would accept `claude.exe.cmd`) and the current folder is not searched."""
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        folder = folder.strip().strip('"')
+        if folder and (Path(folder) / file_name).is_file():
+            return (Path(folder) / file_name).absolute()
+    return None
+
+
 def _program(name: str) -> Path:
     """The program file to launch for `name` (a bare name, or a path from BCA_*_BIN).
 
     The lookup never picks a `.cmd` or `.bat` on its own: Windows runs those through cmd.exe, where
     text on the command line (a data folder named like "R&D") would be read as commands and could
-    cut off the flags that keep Claude contained. So on Windows a bare name finds `<name>.exe`
-    only, as Windows itself does, but as a full path; and when only npm's `codex.cmd` shim is
-    there, the native `codex.exe` npm installed with it is used instead. A path someone set on
-    purpose in BCA_CLAUDE_BIN or BCA_CODEX_BIN is used as given (the test launchers are .cmd files).
-    Elsewhere a bare name is looked up on PATH. Whatever is found is returned as an absolute path,
-    so the setup check and the launch look at the same file; if nothing is found the name comes
-    back unchanged and the launch fails with "not found", as the setup check also says.
+    cut off the flags that keep Claude contained. So on Windows a bare name finds exactly
+    `<name>.exe` in a PATH folder; when only npm's `codex.cmd` shim is there, the native
+    `codex.exe` npm installed with it is used instead. A configured path without an extension gets
+    `.exe` (npm's extensionless `codex` is a shell script Windows cannot start). A `.cmd` or `.bat`
+    someone set on purpose in BCA_CLAUDE_BIN or BCA_CODEX_BIN is used as given (the test launchers
+    are .cmd files). Elsewhere a bare name is looked up on PATH. Whatever comes back is either a
+    startable file, as an absolute path, or a name that does not exist, so the setup check
+    (is_file) and the launch always agree.
     """
     path = Path(name)
     bare = path.parent == Path(".")
     if os.name != "nt":
         found = shutil.which(name) if bare else (name if path.is_file() else None)
         return Path(found).absolute() if found is not None else path
-    stem = path.with_suffix("") if path.suffix.lower() in {".exe", ".cmd", ".bat"} else path
-    executable = stem.with_name(stem.name + ".exe")
+    suffix = path.suffix.lower()
+    stem = path.with_suffix("") if suffix in {".exe", ".cmd", ".bat"} else path
+    is_codex = stem.name.lower() == "codex"
     if bare:
-        found = shutil.which(executable.name)
-        if found is not None:
-            return Path(found).absolute()
-        shim = shutil.which(stem.name + ".cmd")
-        shim_dir = Path(shim).parent if shim is not None else None
-    else:
-        if executable.is_file():
-            return executable.absolute()
-        shim_dir = stem.parent if stem.with_name(stem.name + ".cmd").is_file() else None
-    if shim_dir is not None and stem.name.lower() == "codex":
-        native = _npm_native_codex(shim_dir)
+        exe_on_path = _on_path_exactly(stem.name + ".exe")
+        if exe_on_path is not None:
+            return exe_on_path
+        shim = _on_path_exactly(stem.name + ".cmd")
+        native = _npm_native_codex(shim.parent) if shim is not None and is_codex else None
+        return native if native is not None else path
+    if suffix == ".exe":
+        return path.absolute()
+    if suffix in {".cmd", ".bat"}:
+        native = _npm_native_codex(path.parent) if is_codex else None
+        return native if native is not None else path.absolute()
+    executable = stem.with_name(stem.name + ".exe")
+    if executable.is_file():
+        return executable.absolute()
+    if is_codex and stem.with_name(stem.name + ".cmd").is_file():
+        native = _npm_native_codex(stem.parent)
         if native is not None:
             return native
-    return path
+    # Nothing Windows can start: the missing .exe, so the check and the launch both say not found.
+    return executable.absolute()
 
 
 class ProductionBackend(ApiBackend):
