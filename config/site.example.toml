@@ -14,6 +14,9 @@ reject_bytes = 10737418240
 transcripts_table = "your_dataset.your_transcripts_view"
 calls_table = "your_dataset.your_calls_view"
 lead_id_column = "lead_id"
+# If the two tables name the lead id differently, name each one; both fall back to lead_id_column.
+# calls_lead_id_column = "contact_id"
+# transcripts_lead_id_column = "crm_lead_id"
 call_id_column = "call_id"
 transcript_text_column = "transcript_text"
 call_start_column = "call_start"

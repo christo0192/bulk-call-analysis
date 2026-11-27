@@ -28,20 +28,35 @@ def _normalise(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().casefold()
 
 
+_TIMESTAMP = r"\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\]"
+# A speaker line: "[0:01:02] Customer: text", or the timestamp after the label, as in
+# "Speaker Prospect - 1 [0:00:01.119]: text". Both patterns stay linear on long lines: the label
+# runs to the first colon (or bracket) and starts with a non-space, so no two parts can match the
+# same run of spaces (a pattern where they could took 24 s on a line of 50,000 spaces).
+_LABEL_THEN_TIMESTAMP = re.compile(rf"([^:\[]*){_TIMESTAMP}\s*:\s*(.*)")
+_SPEAKER_LINE = re.compile(rf"\s*(?:{_TIMESTAMP}\s*)?([^:\s][^:]*):\s*(.*)")
+# A numbered label ("Speaker Prospect - 1", "Agent 2") belongs to its configured label.
+_SPEAKER_NUMBER = re.compile(r"\s*-?\s*\d+$")
+
+
+def _speaker_in(label: str, allowed: set[str]) -> bool:
+    return label in allowed or _SPEAKER_NUMBER.sub("", label) in allowed
+
+
 def check_quote(
     quote: str, call_text: str, speaker: Speaker, speaker_labels: Mapping[str, list[str] | tuple[str, ...]]
 ) -> QuoteCheck:
     expected = _normalise(quote)
-    lines: list[tuple[str, str]] = []
-    current: tuple[str, str] | None = None
+    # Each speaker turn is normalised once, when it is complete: normalising the text gathered so
+    # far on every continuation line made a long unlabelled call quadratic (minutes per quote).
+    turns: list[tuple[str, list[str]]] = []
     for raw in call_text.splitlines():
-        match = re.match(r"\s*(?:\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\]\s*)?([^:]+):\s*(.*)", raw)
+        match = _LABEL_THEN_TIMESTAMP.match(raw) or _SPEAKER_LINE.match(raw)
         if match:
-            current = (_normalise(match.group(1)), _normalise(match.group(2)))
-            lines.append(current)
-        elif current and raw.strip():
-            current = (current[0], _normalise(current[1] + " " + raw))
-            lines[-1] = current
+            turns.append((_normalise(match.group(1)), [match.group(2)]))
+        elif turns and raw.strip():
+            turns[-1][1].append(raw)
+    lines = [(label, _normalise(" ".join(parts))) for label, parts in turns]
     allowed = (
         {_normalise(label) for label in speaker_labels.get(speaker, ())}
         if speaker != "any"
@@ -51,7 +66,7 @@ def check_quote(
     def contains(text: str) -> bool:
         return bool(expected and re.search(rf"(?<!\w){re.escape(expected)}(?!\w)", text))
 
-    if any(label in allowed and contains(text) for label, text in lines):
+    if any(_speaker_in(label, allowed) and contains(text) for label, text in lines):
         return QuoteCheck(True, "exact match")
     all_text = " ".join(text for _, text in lines)
     if contains(all_text) and speaker != "any":

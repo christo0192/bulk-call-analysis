@@ -44,6 +44,18 @@ class RecipeConfig:
     advisor_column: str | None = None
     transcript_status_column: str | None = None
     speaker_labels: dict[str, tuple[str, ...]] = None  # type: ignore[assignment]
+    # The two tables can name the lead id differently (for example the call log's `contact_id`
+    # and the transcripts' `crm_lead_id`); each falls back to lead_id_column.
+    calls_lead_id_column: str | None = None
+    transcripts_lead_id_column: str | None = None
+
+    @property
+    def calls_lead_id(self) -> str:
+        return self.calls_lead_id_column or self.lead_id_column
+
+    @property
+    def transcripts_lead_id(self) -> str:
+        return self.transcripts_lead_id_column or self.lead_id_column
 
 
 @dataclass(frozen=True)
@@ -192,6 +204,8 @@ def load_config(path: Path) -> SiteConfig:
             "transcripts_table",
             "calls_table",
             "lead_id_column",
+            "calls_lead_id_column",
+            "transcripts_lead_id_column",
             "call_id_column",
             "transcript_text_column",
             "call_start_column",
@@ -241,7 +255,12 @@ def load_config(path: Path) -> SiteConfig:
         "call_duration_column",
     ):
         _identifier(_str(recipe, "recipe", key), f"recipe.{key}", _COLUMN)
-    for key in ("advisor_column", "transcript_status_column"):
+    for key in (
+        "advisor_column",
+        "transcript_status_column",
+        "calls_lead_id_column",
+        "transcripts_lead_id_column",
+    ):
         value = _optional_str(recipe, "recipe", key)
         if value is not None:
             _identifier(value, f"recipe.{key}", _COLUMN)
@@ -287,6 +306,8 @@ def load_config(path: Path) -> SiteConfig:
             _optional_str(recipe, "recipe", "advisor_column"),
             _optional_str(recipe, "recipe", "transcript_status_column"),
             speaker_labels,
+            _optional_str(recipe, "recipe", "calls_lead_id_column"),
+            _optional_str(recipe, "recipe", "transcripts_lead_id_column"),
         ),
         ModelsConfig(
             _str(models, "models", "claude_model", "claude-opus-5-5"),

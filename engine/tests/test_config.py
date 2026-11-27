@@ -153,3 +153,29 @@ def test_find_config_order(tmp_path: Path, system: str) -> None:
     message = str(error.value)
     assert str(config_path) in message
     assert str(user_path) in message
+
+
+def test_each_table_can_name_its_own_lead_id_column(tmp_path: Path) -> None:
+    path = example(tmp_path)
+    original = path.read_text()
+    assert load_config(path).recipe.calls_lead_id == "lead_id"
+    assert load_config(path).recipe.transcripts_lead_id == "lead_id"
+    calls_line = 'calls_lead_id_column = "contact_id"'
+    transcripts_line = 'transcripts_lead_id_column = "crm_lead_id"'
+    both = original.replace("# " + calls_line, calls_line).replace("# " + transcripts_line, transcripts_line)
+    path.write_text(both)
+    recipe = load_config(path).recipe
+    assert (recipe.calls_lead_id, recipe.transcripts_lead_id) == ("contact_id", "crm_lead_id")
+    path.write_text(original.replace("# " + calls_line, calls_line))
+    recipe = load_config(path).recipe
+    assert (recipe.calls_lead_id, recipe.transcripts_lead_id) == ("contact_id", "lead_id")
+
+
+@pytest.mark.parametrize("key", ["calls_lead_id_column", "transcripts_lead_id_column"])
+@pytest.mark.parametrize("value", ['"lead id"', '"x`; DROP"', '""', "3"])
+def test_a_per_table_lead_id_column_must_be_a_column_name(tmp_path: Path, key: str, value: str) -> None:
+    path = example(tmp_path)
+    line = 'lead_id_column = "lead_id"' + chr(10)
+    path.write_text(path.read_text().replace(line, line + f"{key} = {value}" + chr(10), 1))
+    with pytest.raises(ConfigError, match=rf"recipe\.{key}"):
+        load_config(path)
