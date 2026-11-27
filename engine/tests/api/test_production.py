@@ -1422,7 +1422,7 @@ init = {
     "mcp_servers": [{"name": "bq", "status": "connected"}, {"name": "app", "status": "connected"}],
     "plugins": [],
     "fast_mode_state": "off",
-    "claude_code_version": "2.1.327",
+    "claude_code_version": PINNED_CLAUDE_VERSION,
 }
 if "--resume" in sys.argv:
     print("No conversation found with session ID ...", file=sys.stderr)

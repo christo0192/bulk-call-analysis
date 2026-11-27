@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from .version import PINNED_CLAUDE_VERSION
+
 EventKind = Literal[
     "system",
     "assistant_delta",
@@ -119,7 +121,7 @@ def check_init(init: Event, expected: str) -> list[str]:
         problems.append("permission mode is not dontAsk")
     if init.kind != "system" or data.get("subtype") != "init":
         problems.append("first event is not system/init")
-    if data.get("claude_code_version") != "2.1.327":
+    if data.get("claude_code_version") != PINNED_CLAUDE_VERSION:
         problems.append("unexpected Claude Code version")
     if data.get("fast_mode_state", "off") != "off":
         problems.append("fast mode is enabled")

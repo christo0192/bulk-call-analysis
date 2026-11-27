@@ -18,6 +18,7 @@ from bca.childenv import build_child_env
 
 from .profile import ENV_DISABLE_MEMORY, ClaudeProfile
 from .stream import Event, Limited, RateLimitGuard, TurnError, check_init, parse_line, result_error
+from .version import PINNED_CLAUDE_VERSION as PINNED_CLAUDE_VERSION
 from .winjob import assign_kill_on_close, close_job, terminate_job
 
 FLAG_PROMPT = "-p"
@@ -46,7 +47,6 @@ ENV_MCP_SERVERS = "ENABLE_CLAUDEAI_MCP_SERVERS"
 ENV_DISABLE_FAST = "CLAUDE_CODE_DISABLE_FAST_MODE"
 ENV_DISABLE_WORKFLOWS = "CLAUDE_CODE_DISABLE_WORKFLOWS"
 ENV_DISABLE_MDS = "CLAUDE_CODE_DISABLE_CLAUDE_MDS"
-PINNED_CLAUDE_VERSION = "2.1.327"
 ALLOWED_EFFORTS = {"low", "medium", "high"}
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bca.claude.stream import Event, Limited, RateLimitGuard, StreamParser, Warning, check_init, result_error
+from bca.claude.version import PINNED_CLAUDE_VERSION
 
 
 def good() -> Event:
@@ -12,7 +13,7 @@ def good() -> Event:
             "apiKeySource": "none",
             "model": "m",
             "permissionMode": "dontAsk",
-            "claude_code_version": "2.1.327",
+            "claude_code_version": PINNED_CLAUDE_VERSION,
             "fast_mode_state": "off",
             "tools": ["mcp__bq__x", "mcp__app__x", "EndConversation"],
             "mcp_servers": [{"name": "bq", "status": "connected"}, {"name": "app", "status": "connected"}],

@@ -26,8 +26,10 @@ from bca.bq.leads import parse_id_list
 from bca.claude import launch as claude_launch
 from bca.claude.auth import auth_status as claude_auth_status
 from bca.claude.auth import start_login as start_claude_login
+from bca.claude.binary import BinaryManager, BinaryVerificationError
 from bca.claude.profile import ClaudeProfile
 from bca.claude.sessions import SessionStore
+from bca.claude.version import PINNED_CLAUDE_VERSION
 from bca.config import ConfigError, LimitsConfig, ModelsConfig, RetentionConfig, SiteConfig, load_config
 from bca.coordinator.runner import Clock, JobRunner, RunnerDeps
 from bca.luna.appserver import LOCKDOWN_OVERRIDES, CodexLaunch
@@ -613,6 +615,12 @@ class ProductionBackend(ApiBackend):
                 return False, "The name-masking model is not installed. Run the app's start script again."
             return True, "Name-masking model installed."
 
+        def claude_copy() -> tuple[bool, str]:
+            if self._test_fakes_allowed():
+                return True, "available"
+            path, detail = self._claude_program()
+            return path.is_file(), detail
+
         def codex_copy() -> tuple[bool, str]:
             # The exact file the launch will start (see _program), so the two cannot disagree.
             if self._codex_binary().is_file():
@@ -624,7 +632,7 @@ class ProductionBackend(ApiBackend):
             "venv": lambda: (True, sys.executable),
             "connector": connector,
             "key": key,
-            "claude_copy": lambda: (True, "available"),
+            "claude_copy": claude_copy,
             "codex_copy": codex_copy,
             "spacy": spacy,
         }
@@ -776,7 +784,36 @@ class ProductionBackend(ApiBackend):
         return profile
 
     def _claude_binary(self) -> Path:
-        return _program(os.environ.get("BCA_CLAUDE_BIN", "claude"))
+        return self._claude_program()[0]
+
+    def _claude_program(self) -> tuple[Path, str]:
+        """The Claude Code program every launch uses, and a plain-words status for the setup row.
+
+        The app runs its own verified copy of the pinned version, made once from the official
+        install on this PC, so Claude's own updates cannot change the version the turn guard
+        accepts. BCA_CLAUDE_BIN names another program (tests and development).
+        """
+        configured = os.environ.get("BCA_CLAUDE_BIN")
+        if configured:
+            path = _program(configured)
+            found = path.is_file()
+            return path, "Claude Code found." if found else f"The Claude Code program was not found: {path}"
+        manager = BinaryManager(self.app_data / "programs", PINNED_CLAUDE_VERSION)
+        ready = f"Claude Code {PINNED_CLAUDE_VERSION} ready."
+        try:
+            return manager.path(), ready
+        except BinaryVerificationError:
+            pass
+        try:
+            return manager.install_from_local(), ready
+        except (BinaryVerificationError, OSError) as exc:
+            logging.getLogger("bca.api").warning(
+                "Claude Code %s is not available: %s", PINNED_CLAUDE_VERSION, exc
+            )
+            return manager.destination / manager._filename(), (
+                f"The app runs Claude Code {PINNED_CLAUDE_VERSION}, which was not found on this PC. "
+                f"Install it with: claude install {PINNED_CLAUDE_VERSION}. Then press Check again."
+            )
 
     def _codex_binary(self) -> Path:
         return _program(os.environ.get("BCA_CODEX_BIN", "codex"))
