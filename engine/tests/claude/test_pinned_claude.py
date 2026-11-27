@@ -207,3 +207,112 @@ def test_a_configured_program_is_used_as_is(
     backend = make_backend(tmp_path / "data")
     assert backend._claude_binary() == other.absolute()
     assert not (tmp_path / "data" / "programs").exists()
+
+
+def _unusable(program: Path) -> bool:
+    return program.is_absolute() and not program.exists()
+
+
+def test_a_planted_program_without_a_digest_is_never_returned(home: Path, tmp_path: Path) -> None:
+    # Nothing official installed, and a file planted where the app keeps its copy.
+    backend = make_backend(tmp_path / "data")
+    planted = tmp_path / "data" / "programs" / "claude" / PINNED_CLAUDE_VERSION / "claude.exe"
+    planted.parent.mkdir(parents=True)
+    planted.write_bytes(b"planted")
+    program, usable, _detail = backend._claude_program()
+    assert not usable and _unusable(program) and program != planted
+    row = _claude_row(backend)
+    assert row["status"] == "failed"
+
+
+def test_a_copy_changed_after_the_official_file_went_is_never_returned(home: Path, tmp_path: Path) -> None:
+    official = _official(home)
+    backend = make_backend(tmp_path / "data")
+    program, usable, _detail = backend._claude_program()
+    assert usable
+    official.unlink()
+    stat = program.stat()
+    program.write_bytes(b"changed afterwards")
+    os.utime(program, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    again, usable, detail = backend._claude_program()
+    assert not usable and _unusable(again)
+    assert f"claude install {PINNED_CLAUDE_VERSION}" in detail
+
+
+def test_an_official_file_failing_the_signature_check_is_never_returned(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    official = _official(home)
+    backend = make_backend(tmp_path / "data")
+    _program, usable, _detail = backend._claude_program()
+    assert usable
+    # The official file is rewritten in place (the app's copy is the same file) with bytes that
+    # fail the signature check: the changed copy must not be launched.
+    stat = official.stat()
+    official.write_bytes(b"unsigned bytes")
+    os.utime(official, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+    def refuse(self: BinaryManager, path: Path) -> None:
+        raise BinaryVerificationError("Claude binary signature is not valid")
+
+    monkeypatch.setattr(BinaryManager, "_verify_signature", refuse)
+    again, usable, detail = backend._claude_program()
+    assert not usable and _unusable(again)
+    assert "did not pass the app's checks" in detail
+    assert _claude_row(backend)["status"] == "failed"
+
+
+def test_a_failed_attempt_is_not_repeated_at_once(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts: list[int] = []
+    real = BinaryManager.install_from_local
+
+    def counting(self: BinaryManager) -> Path:
+        attempts.append(1)
+        return real(self)
+
+    monkeypatch.setattr(BinaryManager, "install_from_local", counting)
+    backend = make_backend(tmp_path / "data")
+    for _ in range(3):
+        assert not backend._claude_program()[1]
+    assert len(attempts) == 1
+    # After the pause, and once the version is installed, the next call tries again and succeeds.
+    _official(home)
+    monkeypatch.setattr(backend, "_CLAUDE_RETRY_S", 0.0)
+    assert backend._claude_program()[1]
+    assert len(attempts) == 2
+
+
+def test_copies_of_earlier_pinned_versions_are_removed(home: Path, tmp_path: Path) -> None:
+    _official(home)
+    old = tmp_path / "app" / "claude" / "2.1.327"
+    old.mkdir(parents=True)
+    (old / "claude.exe").write_bytes(b"old pinned copy")
+    BinaryManager(tmp_path / "app", PINNED_CLAUDE_VERSION).install_from_local()
+    assert [folder.name for folder in (tmp_path / "app" / "claude").iterdir()] == [PINNED_CLAUDE_VERSION]
+
+
+def test_a_file_changed_during_its_check_is_not_recorded_as_verified(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    official = _official(home)
+
+    def changes_meanwhile(self: BinaryManager, path: Path) -> None:
+        # The signature check takes seconds; the file is rewritten in place meanwhile.
+        stat = official.stat()
+        official.write_bytes(b"rewritten during the check")
+        os.utime(official, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+    monkeypatch.setattr(BinaryManager, "_verify_signature", changes_meanwhile)
+    manager = BinaryManager(tmp_path / "app", PINNED_CLAUDE_VERSION)
+    with pytest.raises(BinaryVerificationError, match="changed while it was being checked"):
+        manager.install_from_local()
+    with pytest.raises(BinaryVerificationError, match="digest changed"):
+        manager.path()
+
+
+def test_no_test_runs_the_installed_claude_by_default() -> None:
+    # The autouse fixture in tests/conftest.py points every test at a program that does not exist.
+    configured = Path(os.environ["BCA_CLAUDE_BIN"])
+    assert configured.name == "claude.exe" and not configured.exists()

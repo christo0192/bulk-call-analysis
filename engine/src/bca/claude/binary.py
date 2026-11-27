@@ -65,7 +65,9 @@ class BinaryManager:
         if _verified.get(stamp) != expected:
             if _sha256(path) != expected:
                 raise BinaryVerificationError(f"Claude binary digest changed: {path}")
-            _verified[stamp] = expected
+            # Cached only if the file did not change while it was hashed.
+            if _stamp(path) == stamp:
+                _verified[stamp] = expected
         return path
 
     def _filename(self) -> str:
@@ -106,7 +108,8 @@ class BinaryManager:
             raise
         return path
 
-    def install_from_local(self) -> Path:
+    def official_path(self) -> Path:
+        """Where the official installer keeps this version (~/.local/share/claude/versions)."""
         base = self.versions_dir or (
             Path(os.environ.get("USERPROFILE", str(Path.home())))
             if platform.system() == "Windows"
@@ -117,7 +120,10 @@ class BinaryManager:
             if self.versions_dir
             else base / ".local" / "share" / "claude" / "versions" / self.version
         )
-        source = source if source.is_file() else source / self._filename()
+        return source if source.is_file() else source / self._filename()
+
+    def install_from_local(self) -> Path:
+        source = self.official_path()
         if not source.is_file():
             raise BinaryVerificationError(f"official Claude version is missing: {source}")
         self.destination.mkdir(parents=True, exist_ok=True)
@@ -139,12 +145,25 @@ class BinaryManager:
             shutil.copy2(source, temp)
             if not (self._platform_name() or "").startswith("win32-"):
                 os.chmod(temp, 0o755)
+        # Taken before the file is hashed: the signature check takes seconds, and a file changed
+        # meanwhile must not be recorded as verified.
+        before = _stamp(temp)[1:]
         accepted = self._accept(temp)
         digest = temp.with_suffix(temp.suffix + ".sha256")
         os.replace(accepted, target)
         os.replace(digest, target.with_suffix(target.suffix + ".sha256"))
+        if _stamp(target)[1:] != before:
+            raise BinaryVerificationError("Claude Code changed while it was being checked")
         _verified[_stamp(target)] = target.with_suffix(target.suffix + ".sha256").read_text().strip()
+        self._remove_other_versions()
         return target
+
+    def _remove_other_versions(self) -> None:
+        """Copies of earlier pinned versions are never run again; each is about 400 MB once the
+        official file is gone, so they are removed (one still in use is left for next time)."""
+        for folder in self.destination.parent.iterdir():
+            if folder.is_dir() and folder.name != self.version:
+                shutil.rmtree(folder, ignore_errors=True)
 
     def install_from_download(self, url_template: str, manifest_url: str) -> Path:
         self.destination.mkdir(parents=True, exist_ok=True)

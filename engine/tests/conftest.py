@@ -18,6 +18,14 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.fixture(autouse=True)
+def no_real_claude(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """No test runs the Claude Code installed on the machine: without this, a backend built with no
+    BCA_CLAUDE_BIN would link and start the developer's real program. A test that needs a program
+    sets BCA_CLAUDE_BIN itself (or removes it, as the pinned-copy tests do with a fake home)."""
+    monkeypatch.setenv("BCA_CLAUDE_BIN", str(tmp_path / "no-real-claude" / "claude.exe"))
+
+
+@pytest.fixture(autouse=True)
 def clean_bca_logging() -> Generator[None, None, None]:
     yield
     logger = logging.getLogger("bca")

@@ -19,6 +19,7 @@ import bca.coordinator.runner as runner_module
 from bca.api.production import JobManager, ProductionBackend
 from bca.api.server import ApiService, JsonRpcServer, RpcError
 from bca.bq.runner import DryRun
+from bca.claude.version import PINNED_CLAUDE_VERSION
 from bca.config import (
     BigQueryConfig,
     LimitsConfig,
@@ -1407,7 +1408,10 @@ def _missing_conversation_launcher(tmp_path: Path) -> Path:
     script = tmp_path / "missing-conversation.py"
     script.write_text(
         f"#!{sys.executable}\n"
-        """import json, sys
+        # The generated script cannot import the pin, so its value is written into it.
+        f"PINNED_CLAUDE_VERSION = {PINNED_CLAUDE_VERSION!r}"
+        + chr(10)
+        + """import json, sys
 if sys.argv[1:4] == ["auth", "status", "--json"]:
     print(json.dumps({"loggedIn": True, "authMethod": "claude.ai"}), flush=True)
     raise SystemExit(0)

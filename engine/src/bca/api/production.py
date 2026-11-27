@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -555,6 +556,10 @@ class ProductionBackend(ApiBackend):
         self._codex_allowance_cache: tuple[float, dict[str, object] | None] | None = None
         self._codex_allowance_locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
         self._chat_sessions_store = SessionStore(self.app_data / "claude" / "sessions.json")
+        # The Claude program is resolved behind a lock (its first check takes seconds), and a
+        # failed attempt is not repeated for a short while.
+        self._claude_lock = threading.Lock()
+        self._claude_failure: tuple[float, str] | None = None
         self._closed = False
         self._stopping = False
         self._resume_watcher_task: asyncio.Task[None] | None = None
@@ -618,8 +623,8 @@ class ProductionBackend(ApiBackend):
         def claude_copy() -> tuple[bool, str]:
             if self._test_fakes_allowed():
                 return True, "available"
-            path, detail = self._claude_program()
-            return path.is_file(), detail
+            _path, usable, detail = self._claude_program()
+            return usable, detail
 
         def codex_copy() -> tuple[bool, str]:
             # The exact file the launch will start (see _program), so the two cannot disagree.
@@ -784,36 +789,56 @@ class ProductionBackend(ApiBackend):
         return profile
 
     def _claude_binary(self) -> Path:
+        """Blocking (the first check of the program takes seconds): call it in a worker thread."""
         return self._claude_program()[0]
 
-    def _claude_program(self) -> tuple[Path, str]:
-        """The Claude Code program every launch uses, and a plain-words status for the setup row.
+    _CLAUDE_RETRY_S = 30.0
 
-        The app runs its own verified copy of the pinned version, made once from the official
-        install on this PC, so Claude's own updates cannot change the version the turn guard
-        accepts. BCA_CLAUDE_BIN names another program (tests and development).
+    def _claude_program(self) -> tuple[Path, bool, str]:
+        """The Claude Code program every launch uses, whether it is usable, and a plain-words status
+        for the setup row. Blocking: call it in a worker thread.
+
+        The app runs its own verified copy of the pinned version, made from the official install on
+        this PC, so Claude's own updates cannot change the version the turn guard accepts. A copy
+        that fails its checks is never returned: the launch then gets a path that does not exist.
+        BCA_CLAUDE_BIN names another program (tests and development).
         """
         configured = os.environ.get("BCA_CLAUDE_BIN")
         if configured:
             path = _program(configured)
             found = path.is_file()
-            return path, "Claude Code found." if found else f"The Claude Code program was not found: {path}"
+            detail = "Claude Code found." if found else f"The Claude Code program was not found: {path}"
+            return path, found, detail
         manager = BinaryManager(self.app_data / "programs", PINNED_CLAUDE_VERSION)
         ready = f"Claude Code {PINNED_CLAUDE_VERSION} ready."
-        try:
-            return manager.path(), ready
-        except BinaryVerificationError:
-            pass
-        try:
-            return manager.install_from_local(), ready
-        except (BinaryVerificationError, OSError) as exc:
-            logging.getLogger("bca.api").warning(
-                "Claude Code %s is not available: %s", PINNED_CLAUDE_VERSION, exc
-            )
-            return manager.destination / manager._filename(), (
-                f"The app runs Claude Code {PINNED_CLAUDE_VERSION}, which was not found on this PC. "
-                f"Install it with: claude install {PINNED_CLAUDE_VERSION}. Then press Check again."
-            )
+        with self._claude_lock:
+            try:
+                return manager.path(), True, ready
+            except BinaryVerificationError:
+                pass
+            failure = self._claude_failure
+            if failure is not None and time.monotonic() - failure[0] < self._CLAUDE_RETRY_S:
+                return _missing_program("claude"), False, failure[1]
+            try:
+                program = manager.install_from_local()
+            except (BinaryVerificationError, OSError) as exc:
+                logging.getLogger("bca.api").warning(
+                    "Claude Code %s is not usable: %s", PINNED_CLAUDE_VERSION, exc
+                )
+                if manager.official_path().is_file():
+                    detail = (
+                        f"Claude Code {PINNED_CLAUDE_VERSION} on this PC did not pass the app's checks. "
+                        f"Reinstall it with: claude install {PINNED_CLAUDE_VERSION}. Then press Check again."
+                    )
+                else:
+                    detail = (
+                        f"The app runs Claude Code {PINNED_CLAUDE_VERSION}, which was not found on this PC. "
+                        f"Install it with: claude install {PINNED_CLAUDE_VERSION}. Then press Check again."
+                    )
+                self._claude_failure = (time.monotonic(), detail)
+                return _missing_program("claude"), False, detail
+            self._claude_failure = None
+            return program, True, ready
 
     def _codex_binary(self) -> Path:
         return _program(os.environ.get("BCA_CODEX_BIN", "codex"))
@@ -1015,8 +1040,9 @@ class ProductionBackend(ApiBackend):
         self._chat_mcp_configs[project] = mcp_config
         try:
             start_ipc_thread(host, address, authkey)
+            program = await asyncio.to_thread(self._claude_binary)
             async for event in claude_launch.run_turn(
-                self._claude_binary(),
+                program,
                 profile,
                 mcp_config,
                 playbook,
@@ -1206,7 +1232,7 @@ class ProductionBackend(ApiBackend):
 
     async def _auth_status(self) -> dict[str, object]:
         profile = self._claude_profile()
-        claude = await asyncio.to_thread(claude_auth_status, self._claude_binary(), profile)
+        claude = await asyncio.to_thread(lambda: claude_auth_status(self._claude_binary(), profile))
         codex = await self._codex_allowance()
         windows = codex.get("windows") if codex else None
         first_window = windows[0] if isinstance(windows, list) and windows else None
@@ -2346,7 +2372,7 @@ class ProductionBackend(ApiBackend):
                 checklist = Checklist(self.app_data)
                 try:
                     claude_probe = await asyncio.to_thread(
-                        claude_auth_status, self._claude_binary(), self._claude_profile()
+                        lambda: claude_auth_status(self._claude_binary(), self._claude_profile())
                     )
                 except OSError:
                     claude_probe = None
@@ -2555,9 +2581,8 @@ class ProductionBackend(ApiBackend):
                 if method == "chat/stop":
                     return await self._chat_stop(cast(str, params["project"]))
                 if method == "auth/claudeLogin":
-                    self._login_processes.add(
-                        start_claude_login(self._claude_binary(), self._claude_profile())
-                    )
+                    program = await asyncio.to_thread(self._claude_binary)
+                    self._login_processes.add(start_claude_login(program, self._claude_profile()))
                     return {"started": True, "vendor": "claude"}
                 if method == "auth/codexLogin":
                     return await self._start_codex_login()
