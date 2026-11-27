@@ -21,6 +21,13 @@ def _window(scope: str, window: tuple[str, str] | None, column: str) -> str:
     return f" AND DATE({column}) BETWEEN @window_start AND @window_end"
 
 
+def _transcript_rank(status: str | None, length: str) -> str:
+    """The transcript row a call keeps, in the count and the pull alike: a completed one first,
+    then the longest."""
+    completed_first = f"IF({status} = 'completed', 0, 1), " if status else ""
+    return f"{completed_first}{length} DESC NULLS LAST"
+
+
 def lead_source_sql(user_sql: str) -> tuple[str, dict[str, object], QueryPlan]:
     user_sql = user_sql.strip().removesuffix(";").rstrip()
     return (
@@ -47,8 +54,9 @@ def preflight_sql(
         else ""
     )
     status_count = (
+        # A 'no_transcript' row says no transcript was made, the same as no row at all.
         ", COUNTIF(transcript_status IS NOT NULL AND "
-        "transcript_status != 'completed') AS transcription_failed"
+        "transcript_status NOT IN ('completed', 'no_transcript')) AS transcription_failed"
         if recipe.transcript_status_column
         else ", NULL AS transcription_failed"
     )
@@ -78,8 +86,9 @@ def preflight_sql(
         f"AS usable_calls{status_count}{over_rule}"
     )
     lead = f"CAST(c.`{recipe.calls_lead_id}` AS STRING)"
-    # One row per call, as the pull keeps it (the longest transcript, then the longest call log
-    # row): a call log that repeats a call, or a call with several transcript rows, must not
+    rank = _transcript_rank("transcript_status" if recipe.transcript_status_column else None, "chars")
+    # One row per call, as the pull keeps it (the transcript _transcript_rank picks, then the
+    # longest call log row): a call log that repeats a call, or a call with several transcript rows, must not
     # count that call more than once.
     sql = f"""WITH selected AS (SELECT lead_id FROM UNNEST(@lead_ids) AS lead_id),
 calls AS (SELECT {lead} AS lead_id,
@@ -90,7 +99,7 @@ ON c.`{recipe.call_id_column}` = t.`{recipe.call_id_column}`
 WHERE {lead} IN UNNEST(@lead_ids)
 {_window(scope, window, f"c.`{recipe.call_start_column}`")}
 QUALIFY ROW_NUMBER() OVER (PARTITION BY {lead}, c.`{recipe.call_id_column}`
-ORDER BY chars DESC NULLS LAST, duration DESC NULLS LAST) = 1),
+ORDER BY {rank}, duration DESC NULLS LAST) = 1),
 agg_base AS (SELECT lead_id, COUNT(DISTINCT call_id) AS calls,
 SUM(COALESCE(chars, 0)) AS transcript_chars,
 COUNTIF(chars IS NOT NULL AND chars > 0) AS transcript_calls,
@@ -123,6 +132,8 @@ def pull_sql(
     # Past the transcripts CTE, `t` is that CTE, where the status is already `transcript_status`.
     picked_status = ", t.transcript_status" if recipe.transcript_status_column else ""
     lead = f"CAST(t.`{recipe.transcripts_lead_id}` AS STRING)"
+    status_column = f"t.`{recipe.transcript_status_column}`" if recipe.transcript_status_column else None
+    rank = _transcript_rank(status_column, f"LENGTH(t.`{recipe.transcript_text_column}`)")
     sql = f"""WITH transcripts AS (SELECT {lead} AS lead_id,
 t.`{recipe.call_id_column}` AS call_id, t.`{recipe.transcript_text_column}` AS transcript_text{status}
 FROM `{recipe.transcripts_table}` t WHERE {lead} IN UNNEST(@lead_ids)
@@ -131,7 +142,7 @@ AND EXISTS (SELECT 1 FROM `{recipe.calls_table}` c0
 WHERE c0.`{recipe.call_id_column}` = t.`{recipe.call_id_column}`
 {_window(scope, window, f"c0.`{recipe.call_start_column}`")})
 QUALIFY ROW_NUMBER() OVER (PARTITION BY t.`{recipe.call_id_column}`
-ORDER BY LENGTH(t.`{recipe.transcript_text_column}`) DESC) = 1)
+ORDER BY {rank}) = 1)
 SELECT t.lead_id, t.call_id, t.transcript_text, c.`{recipe.call_start_column}` AS call_start,
 c.`{recipe.call_duration_column}` AS duration{advisor}{picked_status}
 FROM transcripts t LEFT JOIN `{recipe.calls_table}` c ON c.`{recipe.call_id_column}` = t.call_id

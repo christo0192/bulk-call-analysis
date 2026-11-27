@@ -121,3 +121,48 @@ def test_queries_name_only_columns_in_scope() -> None:
     final = pull.split(") = 1)\nSELECT")[1]
     assert "t.transcript_status" in final
     assert "t.`status`" not in final and "t.`text`" not in final
+
+
+def test_count_and_pull_keep_a_completed_transcript_before_a_longer_other_one() -> None:
+    # A call can have a longer failed row with partial text next to a completed one: both queries
+    # keep the completed row, so the count and the download agree on which transcript a call has.
+    configured = RecipeConfig(
+        "transcripts",
+        "calls",
+        "lead_id",
+        "call_id",
+        "text",
+        "started",
+        "duration",
+        "ms",
+        transcript_status_column="status",
+    )
+    preflight, _, _ = preflight_sql(configured, UsableRule(10, ("completed",), None, None), "all", None)
+    assert (
+        "ORDER BY IF(transcript_status = 'completed', 0, 1), chars DESC NULLS LAST, duration DESC NULLS LAST"
+        in preflight
+    )
+    pull, _, _ = pull_sql(configured, "all", None)
+    assert "ORDER BY IF(t.`status` = 'completed', 0, 1), LENGTH(t.`text`) DESC NULLS LAST) = 1)" in pull
+    # Without a status column there is nothing to prefer, and both keep the longest.
+    assert (
+        "ORDER BY chars DESC NULLS LAST, duration DESC NULLS LAST"
+        in preflight_sql(recipe(), UsableRule(10, None, None, None), "all", None)[0]
+    )
+    assert "ORDER BY LENGTH(t.`text`) DESC NULLS LAST) = 1)" in pull_sql(recipe(), "all", None)[0]
+
+
+def test_a_no_transcript_status_is_not_a_failed_transcription() -> None:
+    configured = RecipeConfig(
+        "transcripts",
+        "calls",
+        "lead_id",
+        "call_id",
+        "text",
+        "started",
+        "duration",
+        "ms",
+        transcript_status_column="status",
+    )
+    sql, _, _ = preflight_sql(configured, UsableRule(10, None, None, None), "all", None)
+    assert "transcript_status NOT IN ('completed', 'no_transcript')) AS transcription_failed" in sql

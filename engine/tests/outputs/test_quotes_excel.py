@@ -101,3 +101,20 @@ def test_a_number_is_only_dropped_from_the_end_of_a_label() -> None:
     # A different label that merely ends in a number is still a different speaker.
     other = check_quote("hello there", "Customer Care 2: hello there", "learner", labels)
     assert other.reason == "wrong speaker"
+
+
+def test_long_runs_of_spaces_are_read_in_linear_time() -> None:
+    # A transcript line padded with tens of thousands of spaces or tabs (an export artefact) took
+    # tens of seconds per quote check before; each check now reads it in well under a second.
+    import time
+
+    labels = {"learner": ["Customer"], "advisor": ["Agent"]}
+    for padding in (
+        " " * 50_000 + "x",
+        "\t" * 50_000,
+        " " * 1_000 + "y" * 100_000,
+        "Customer" + " " * 50_000,
+    ):
+        started = time.perf_counter()
+        assert check_quote("hello there", padding + "\nCustomer: hello there", "learner", labels).ok
+        assert time.perf_counter() - started < 2, repr(padding[:12])

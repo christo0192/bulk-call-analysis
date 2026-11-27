@@ -30,8 +30,11 @@ def _normalise(value: str) -> str:
 
 _TIMESTAMP = r"\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\]"
 # A speaker line: "[0:01:02] Customer: text", or the timestamp after the label, as in
-# "Speaker Prospect - 1 [0:00:01.119]: text".
-_SPEAKER_LINE = re.compile(rf"\s*(?:{_TIMESTAMP}\s*)?([^:]+?)\s*(?:{_TIMESTAMP}\s*)?:\s*(.*)")
+# "Speaker Prospect - 1 [0:00:01.119]: text". Both patterns stay linear on long lines: the label
+# runs to the first colon (or bracket) and starts with a non-space, so no two parts can match the
+# same run of spaces (a pattern where they could took 24 s on a line of 50,000 spaces).
+_LABEL_THEN_TIMESTAMP = re.compile(rf"([^:\[]*){_TIMESTAMP}\s*:\s*(.*)")
+_SPEAKER_LINE = re.compile(rf"\s*(?:{_TIMESTAMP}\s*)?([^:\s][^:]*):\s*(.*)")
 # A numbered label ("Speaker Prospect - 1", "Agent 2") belongs to its configured label.
 _SPEAKER_NUMBER = re.compile(r"\s*-?\s*\d+$")
 
@@ -47,7 +50,7 @@ def check_quote(
     lines: list[tuple[str, str]] = []
     current: tuple[str, str] | None = None
     for raw in call_text.splitlines():
-        match = _SPEAKER_LINE.match(raw)
+        match = _LABEL_THEN_TIMESTAMP.match(raw) or _SPEAKER_LINE.match(raw)
         if match:
             current = (_normalise(match.group(1)), _normalise(match.group(2)))
             lines.append(current)
