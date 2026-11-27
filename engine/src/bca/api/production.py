@@ -27,7 +27,7 @@ from bca.bq.leads import parse_id_list
 from bca.claude import launch as claude_launch
 from bca.claude.auth import auth_status as claude_auth_status
 from bca.claude.auth import start_login as start_claude_login
-from bca.claude.binary import BinaryManager, BinaryVerificationError
+from bca.claude.binary import BinaryManager, BinaryVerificationError, NotEnoughSpaceError
 from bca.claude.profile import ClaudeProfile
 from bca.claude.sessions import SessionStore
 from bca.claude.version import PINNED_CLAUDE_VERSION
@@ -559,7 +559,7 @@ class ProductionBackend(ApiBackend):
         # The Claude program is resolved behind a lock (its first check takes seconds), and a
         # failed attempt is not repeated for a short while.
         self._claude_lock = threading.Lock()
-        self._claude_failure: tuple[float, str] | None = None
+        self._claude_failure: tuple[float, object, str] | None = None
         self._closed = False
         self._stopping = False
         self._resume_watcher_task: asyncio.Task[None] | None = None
@@ -812,33 +812,68 @@ class ProductionBackend(ApiBackend):
         manager = BinaryManager(self.app_data / "programs", PINNED_CLAUDE_VERSION)
         ready = f"Claude Code {PINNED_CLAUDE_VERSION} ready."
         with self._claude_lock:
+            # A failure is not retried for a short while unless something it depended on changed
+            # (the user installed the version, or the copy changed): a retry hashes 400 MB and can
+            # run the seconds-long signature check.
+            state = self._claude_files(manager)
+            failure = self._claude_failure
+            if (
+                failure is not None
+                and failure[1] == state
+                and time.monotonic() - failure[0] < self._CLAUDE_RETRY_S
+            ):
+                return _missing_program("claude"), False, failure[2]
             try:
                 return manager.path(), True, ready
             except BinaryVerificationError:
                 pass
-            failure = self._claude_failure
-            if failure is not None and time.monotonic() - failure[0] < self._CLAUDE_RETRY_S:
-                return _missing_program("claude"), False, failure[1]
             try:
                 program = manager.install_from_local()
             except (BinaryVerificationError, OSError) as exc:
                 logging.getLogger("bca.api").warning(
                     "Claude Code %s is not usable: %s", PINNED_CLAUDE_VERSION, exc
                 )
-                if manager.official_path().is_file():
-                    detail = (
-                        f"Claude Code {PINNED_CLAUDE_VERSION} on this PC did not pass the app's checks. "
-                        f"Reinstall it with: claude install {PINNED_CLAUDE_VERSION}. Then press Check again."
-                    )
-                else:
-                    detail = (
-                        f"The app runs Claude Code {PINNED_CLAUDE_VERSION}, which was not found on this PC. "
-                        f"Install it with: claude install {PINNED_CLAUDE_VERSION}. Then press Check again."
-                    )
-                self._claude_failure = (time.monotonic(), detail)
+                detail = self._claude_failure_detail(manager, exc)
+                self._claude_failure = (time.monotonic(), self._claude_files(manager), detail)
                 return _missing_program("claude"), False, detail
             self._claude_failure = None
             return program, True, ready
+
+    @staticmethod
+    def _claude_files(manager: BinaryManager) -> object:
+        """Size and mtime of the files a failed attempt depended on: the official install, the
+        app's copy and its digest."""
+
+        def stamp(path: Path) -> tuple[int, int] | None:
+            try:
+                stat = path.stat()
+            except OSError:
+                return None
+            return (stat.st_size, stat.st_mtime_ns)
+
+        copy = manager.destination / manager._filename()
+        return (stamp(manager.official_path()), stamp(copy), stamp(copy.with_suffix(copy.suffix + ".sha256")))
+
+    @staticmethod
+    def _claude_failure_detail(manager: BinaryManager, exc: BaseException) -> str:
+        version = PINNED_CLAUDE_VERSION
+        again = "Then press Check again."
+        if not manager.official_path().is_file():
+            return (
+                f"The app runs Claude Code {version}, which was not found on this PC. "
+                f"Install it with: claude install {version}. {again}"
+            )
+        if isinstance(exc, NotEnoughSpaceError):
+            return (
+                f"There is not enough free disk space to make the app's copy of Claude Code {version}. "
+                f"Free some space. {again}"
+            )
+        if isinstance(exc, BinaryVerificationError):
+            return (
+                f"Claude Code {version} on this PC did not pass the app's checks. "
+                f"Reinstall it with: claude install {version}. {again}"
+            )
+        return f"The app could not make its copy of Claude Code {version} ({exc}). {again}"
 
     def _codex_binary(self) -> Path:
         return _program(os.environ.get("BCA_CODEX_BIN", "codex"))
@@ -2370,17 +2405,24 @@ class ProductionBackend(ApiBackend):
                 return [item.__dict__ for item in items]
             if method == "setup/runChecks":
                 checklist = Checklist(self.app_data)
+                # The program is resolved once, off the event loop, for both Claude rows.
+                claude_program = await asyncio.to_thread(self._claude_program)
                 try:
-                    claude_probe = await asyncio.to_thread(
-                        lambda: claude_auth_status(self._claude_binary(), self._claude_profile())
+                    claude_probe = (
+                        await asyncio.to_thread(claude_auth_status, claude_program[0], self._claude_profile())
+                        if claude_program[1]
+                        else None
                     )
                 except OSError:
                     claude_probe = None
                 # Any failure of the Codex read is a failed sign-in row, not a failed checklist.
                 codex_probe = await self._codex_allowance_or_none()
                 # The plain-words probes, plus the two sign-in rows read above.
+                setup_probes = self._setup_probes()
+                if not self._test_fakes_allowed():
+                    setup_probes["claude_copy"] = lambda: (claude_program[1], claude_program[2])
                 probes = {
-                    **self._setup_probes(),
+                    **setup_probes,
                     "claude_login": lambda: (
                         bool(claude_probe and claude_probe.ok),
                         "Signed in" if claude_probe and claude_probe.ok else "Not signed in yet",

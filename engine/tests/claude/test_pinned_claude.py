@@ -316,3 +316,78 @@ def test_no_test_runs_the_installed_claude_by_default() -> None:
     # The autouse fixture in tests/conftest.py points every test at a program that does not exist.
     configured = Path(os.environ["BCA_CLAUDE_BIN"])
     assert configured.name == "claude.exe" and not configured.exists()
+
+
+def test_a_bad_copy_is_not_hashed_again_while_nothing_changed(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    official = _official(home)
+    backend = make_backend(tmp_path / "data")
+    program, usable, _detail = backend._claude_program()
+    assert usable
+    official.unlink()
+    stat = program.stat()
+    program.write_bytes(b"changed afterwards")
+    os.utime(program, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    assert not backend._claude_program()[1]
+    hashed: list[Path] = []
+    real = binary._sha256
+
+    def counting(path: Path) -> str:
+        hashed.append(path)
+        return real(path)
+
+    monkeypatch.setattr(binary, "_sha256", counting)
+    for _ in range(5):
+        assert not backend._claude_program()[1]
+    assert hashed == []
+
+
+def test_installing_the_version_is_picked_up_at_once(home: Path, tmp_path: Path) -> None:
+    backend = make_backend(tmp_path / "data")
+    assert not backend._claude_program()[1]
+    _official(home)  # the user runs `claude install`, well inside the pause
+    program, usable, detail = backend._claude_program()
+    assert usable and program.is_file()
+    assert detail == f"Claude Code {PINNED_CLAUDE_VERSION} ready."
+
+
+def test_each_kind_of_failure_says_what_to_do(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _official(home)
+
+    def no_link(source: object, target: object) -> None:
+        raise OSError("synthetic: links not supported here")
+
+    monkeypatch.setattr(os, "link", no_link)
+    real_usage = shutil.disk_usage
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: real_usage(path)._replace(free=1024))
+    _program, usable, detail = make_backend(tmp_path / "a")._claude_program()
+    assert not usable and "not enough free disk space" in detail and "Reinstall" not in detail
+
+    def refuse_copy(source: object, target: object) -> None:
+        raise PermissionError("synthetic: access denied")
+
+    monkeypatch.setattr(shutil, "disk_usage", real_usage)
+    monkeypatch.setattr(shutil, "copy2", refuse_copy)
+    _program, usable, detail = make_backend(tmp_path / "b")._claude_program()
+    assert not usable and "could not make its copy" in detail and "access denied" in detail
+
+
+def test_the_checklist_resolves_the_program_once_for_both_claude_rows(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _official(home)
+    backend = make_backend(tmp_path / "data")
+    calls: list[int] = []
+    real = backend._claude_program
+
+    def counting() -> tuple[Path, bool, str]:
+        calls.append(1)
+        return real()
+
+    monkeypatch.setattr(backend, "_claude_program", counting)
+    monkeypatch.setattr("bca.api.production.claude_auth_status", lambda program, profile: None)
+    row = _claude_row(backend)
+    assert row["status"] == "ok" and calls == [1]

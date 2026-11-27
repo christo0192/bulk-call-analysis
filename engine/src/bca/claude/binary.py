@@ -23,6 +23,10 @@ class BinaryVerificationError(RuntimeError):
     pass
 
 
+class NotEnoughSpaceError(BinaryVerificationError):
+    """The program could not be linked, and the disk has no room for a copy."""
+
+
 # Room left on the disk when the program has to be copied rather than linked.
 _COPY_MARGIN = 200 * 1024**2
 # Programs whose digest was checked in this process, by (path, size, mtime): the program is about
@@ -138,7 +142,7 @@ class BinaryManager:
             needed = source.stat().st_size + _COPY_MARGIN
             free = shutil.disk_usage(self.destination).free
             if free < needed:
-                raise BinaryVerificationError(
+                raise NotEnoughSpaceError(
                     f"not enough disk space to copy Claude Code {self.version}: "
                     f"{needed // 1024**2} MB needed, {free // 1024**2} MB free"
                 ) from None
