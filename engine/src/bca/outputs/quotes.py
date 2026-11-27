@@ -47,16 +47,16 @@ def check_quote(
     quote: str, call_text: str, speaker: Speaker, speaker_labels: Mapping[str, list[str] | tuple[str, ...]]
 ) -> QuoteCheck:
     expected = _normalise(quote)
-    lines: list[tuple[str, str]] = []
-    current: tuple[str, str] | None = None
+    # Each speaker turn is normalised once, when it is complete: normalising the text gathered so
+    # far on every continuation line made a long unlabelled call quadratic (minutes per quote).
+    turns: list[tuple[str, list[str]]] = []
     for raw in call_text.splitlines():
         match = _LABEL_THEN_TIMESTAMP.match(raw) or _SPEAKER_LINE.match(raw)
         if match:
-            current = (_normalise(match.group(1)), _normalise(match.group(2)))
-            lines.append(current)
-        elif current and raw.strip():
-            current = (current[0], _normalise(current[1] + " " + raw))
-            lines[-1] = current
+            turns.append((_normalise(match.group(1)), [match.group(2)]))
+        elif turns and raw.strip():
+            turns[-1][1].append(raw)
+    lines = [(label, _normalise(" ".join(parts))) for label, parts in turns]
     allowed = (
         {_normalise(label) for label in speaker_labels.get(speaker, ())}
         if speaker != "any"

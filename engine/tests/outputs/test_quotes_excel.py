@@ -118,3 +118,18 @@ def test_long_runs_of_spaces_are_read_in_linear_time() -> None:
         started = time.perf_counter()
         assert check_quote("hello there", padding + "\nCustomer: hello there", "learner", labels).ok
         assert time.perf_counter() - started < 2, repr(padding[:12])
+
+
+def test_a_long_call_without_speaker_lines_is_read_in_linear_time() -> None:
+    # 4,000 unlabelled lines after one speaker line (or a call header with colons) once took over
+    # 100 s per quote check, because each line re-normalised all the text gathered so far.
+    import time
+
+    labels = {"learner": ["Customer"], "advisor": ["Agent"]}
+    body = "\n".join(f"word {index} and some more words to fill the line" for index in range(4_000))
+    for opener in ("Customer: start", "=== CALL 1 of 1 | 2026-07-06T10:00:00 | 900 s ==="):
+        started = time.perf_counter()
+        check_quote("word 3999 and some", opener + "\n" + body, "learner", labels)
+        assert time.perf_counter() - started < 2, opener
+    text = "Customer: I lost\nmy job\n  last month\nAgent: sorry"
+    assert check_quote("I lost my job last month", text, "learner", labels).ok

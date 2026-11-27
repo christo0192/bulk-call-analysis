@@ -22,10 +22,10 @@ def _window(scope: str, window: tuple[str, str] | None, column: str) -> str:
 
 
 def _transcript_rank(status: str | None, length: str) -> str:
-    """The transcript row a call keeps, in the count and the pull alike: a completed one first,
-    then the longest."""
+    """The transcript row a call keeps, in the count and the pull alike: one with text first (the
+    pull only reads rows with text), then a completed one, then the longest."""
     completed_first = f"IF({status} = 'completed', 0, 1), " if status else ""
-    return f"{completed_first}{length} DESC NULLS LAST"
+    return f"IF({length} > 0, 0, 1), {completed_first}{length} DESC NULLS LAST"
 
 
 def lead_source_sql(user_sql: str) -> tuple[str, dict[str, object], QueryPlan]:

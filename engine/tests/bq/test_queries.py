@@ -89,7 +89,7 @@ def test_preflight_counts_each_call_once() -> None:
     calls_cte = sql.split("agg_base AS")[0]
     assert (
         "QUALIFY ROW_NUMBER() OVER (PARTITION BY CAST(c.`lead_id` AS STRING), c.`call_id`\n"
-        "ORDER BY chars DESC NULLS LAST, duration DESC NULLS LAST) = 1)"
+        "ORDER BY IF(chars > 0, 0, 1), chars DESC NULLS LAST, duration DESC NULLS LAST) = 1)"
     ) in calls_cte
     # The window filter still comes first, so a call outside the window is never kept.
     windowed, _, _ = preflight_sql(
@@ -139,17 +139,26 @@ def test_count_and_pull_keep_a_completed_transcript_before_a_longer_other_one() 
     )
     preflight, _, _ = preflight_sql(configured, UsableRule(10, ("completed",), None, None), "all", None)
     assert (
-        "ORDER BY IF(transcript_status = 'completed', 0, 1), chars DESC NULLS LAST, duration DESC NULLS LAST"
-        in preflight
+        "ORDER BY IF(chars > 0, 0, 1), IF(transcript_status = 'completed', 0, 1), chars DESC NULLS LAST, "
+        "duration DESC NULLS LAST" in preflight
     )
     pull, _, _ = pull_sql(configured, "all", None)
-    assert "ORDER BY IF(t.`status` = 'completed', 0, 1), LENGTH(t.`text`) DESC NULLS LAST) = 1)" in pull
+    assert (
+        "ORDER BY IF(LENGTH(t.`text`) > 0, 0, 1), IF(t.`status` = 'completed', 0, 1), "
+        "LENGTH(t.`text`) DESC NULLS LAST) = 1)" in pull
+    )
+    # A completed row with no text is never kept over a row with text: the pull only reads rows
+    # with text, and the count keeps the same row.
+    assert preflight.index("IF(chars > 0, 0, 1)") < preflight.index("IF(transcript_status = 'completed'")
     # Without a status column there is nothing to prefer, and both keep the longest.
     assert (
-        "ORDER BY chars DESC NULLS LAST, duration DESC NULLS LAST"
+        "ORDER BY IF(chars > 0, 0, 1), chars DESC NULLS LAST, duration DESC NULLS LAST"
         in preflight_sql(recipe(), UsableRule(10, None, None, None), "all", None)[0]
     )
-    assert "ORDER BY LENGTH(t.`text`) DESC NULLS LAST) = 1)" in pull_sql(recipe(), "all", None)[0]
+    assert (
+        "ORDER BY IF(LENGTH(t.`text`) > 0, 0, 1), LENGTH(t.`text`) DESC NULLS LAST) = 1)"
+        in pull_sql(recipe(), "all", None)[0]
+    )
 
 
 def test_a_no_transcript_status_is_not_a_failed_transcription() -> None:
