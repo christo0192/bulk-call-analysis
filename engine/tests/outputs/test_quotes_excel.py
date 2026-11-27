@@ -75,3 +75,29 @@ def test_excel_write_only_path_handles_many_rows(tmp_path: Path) -> None:
     rows = list(sheet.values)
     assert len(rows) == 10_001
     assert rows[-1] == ("lead-9999", 9999)
+
+
+def test_a_timestamp_after_the_speaker_label_is_read() -> None:
+    # Some call systems write "Speaker Prospect - 1 [0:00:01.119]: text": the timestamp follows
+    # the label, and the label carries a speaker number.
+    labels = {"learner": ["Speaker Prospect"], "advisor": ["Speaker Sales Rep"]}
+    text = (
+        "Speaker Prospect - 1 [0:00:01.119]: I lost my job last month\n"
+        "Speaker Sales Rep [0:00:06.702]: In 30,000 we have 2 mock interviews,\n"
+        "unlimited technical sessions\n"
+        "Speaker Prospect - 2 [0:01:10.5]: the fee is too high"
+    )
+    assert check_quote("I lost my job last month", text, "learner", labels).ok
+    assert check_quote("the fee is too high", text, "learner", labels).ok
+    assert check_quote("2 mock interviews, unlimited technical sessions", text, "advisor", labels).ok
+    assert check_quote("I lost my job last month", text, "advisor", labels).reason == "wrong speaker"
+    assert check_quote("mock interviews", text, "learner", labels).reason == "wrong speaker"
+
+
+def test_a_number_is_only_dropped_from_the_end_of_a_label() -> None:
+    labels = {"learner": ["Customer"], "advisor": ["Agent"]}
+    assert check_quote("hello there", "Customer 2: hello there", "learner", labels).ok
+    assert check_quote("hello there", "[0:01] Agent - 1: hello there", "advisor", labels).ok
+    # A different label that merely ends in a number is still a different speaker.
+    other = check_quote("hello there", "Customer Care 2: hello there", "learner", labels)
+    assert other.reason == "wrong speaker"

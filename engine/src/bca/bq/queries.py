@@ -62,10 +62,10 @@ def preflight_sql(
             "'" + status.replace("\\", "\\\\").replace("'", "\\'") + "'" for status in usable_rule.statuses
         )
         status_rule = f" AND transcript_status IN ({statuses})"
+    # agg_base reads the calls CTE, where the seconds are the `duration` column (the call log's
+    # alias `c` is out of scope there).
     duration_rule = (
-        f" AND {duration} >= {usable_rule.min_call_seconds}"
-        if usable_rule.min_call_seconds is not None
-        else ""
+        f" AND duration >= {usable_rule.min_call_seconds}" if usable_rule.min_call_seconds is not None else ""
     )
     over_rule = ", NULL AS over_calls"
     over_select = "usable_calls AS usable_calls"
@@ -77,20 +77,27 @@ def preflight_sql(
         f"COUNTIF(chars >= {usable_rule.min_chars}{status_rule}{duration_rule}) "
         f"AS usable_calls{status_count}{over_rule}"
     )
+    lead = f"CAST(c.`{recipe.calls_lead_id}` AS STRING)"
+    # One row per call, as the pull keeps it (the longest transcript, then the longest call log
+    # row): a call log that repeats a call, or a call with several transcript rows, must not
+    # count that call more than once.
     sql = f"""WITH selected AS (SELECT lead_id FROM UNNEST(@lead_ids) AS lead_id),
-calls AS (SELECT CAST(c.`{recipe.lead_id_column}` AS STRING) AS lead_id,
+calls AS (SELECT {lead} AS lead_id,
 LENGTH(t.`{recipe.transcript_text_column}`) AS chars{status}, {duration} AS duration,
 c.`{recipe.call_id_column}` AS call_id
 FROM `{recipe.calls_table}` c LEFT JOIN `{recipe.transcripts_table}` t
 ON c.`{recipe.call_id_column}` = t.`{recipe.call_id_column}`
-WHERE CAST(c.`{recipe.lead_id_column}` AS STRING) IN UNNEST(@lead_ids)
-{_window(scope, window, f"c.`{recipe.call_start_column}`")}),
+WHERE {lead} IN UNNEST(@lead_ids)
+{_window(scope, window, f"c.`{recipe.call_start_column}`")}
+QUALIFY ROW_NUMBER() OVER (PARTITION BY {lead}, c.`{recipe.call_id_column}`
+ORDER BY chars DESC NULLS LAST, duration DESC NULLS LAST) = 1),
 agg_base AS (SELECT lead_id, COUNT(DISTINCT call_id) AS calls,
 SUM(COALESCE(chars, 0)) AS transcript_chars,
 COUNTIF(chars IS NOT NULL AND chars > 0) AS transcript_calls,
 {usable_count}
 FROM calls GROUP BY lead_id),
-agg AS (SELECT lead_id, calls, transcript_calls, {over_select}, transcription_failed FROM agg_base)
+agg AS (SELECT lead_id, calls, transcript_chars, transcript_calls, {over_select}, transcription_failed
+FROM agg_base)
 SELECT selected.lead_id, COALESCE(agg.calls, 0) AS calls,
 COALESCE(agg.transcript_chars, 0) AS transcript_chars,
 COALESCE(agg.usable_calls, 0) AS usable_calls,
@@ -113,9 +120,12 @@ def pull_sql(
         if recipe.transcript_status_column
         else ""
     )
-    sql = f"""WITH transcripts AS (SELECT CAST(t.`{recipe.lead_id_column}` AS STRING) AS lead_id,
+    # Past the transcripts CTE, `t` is that CTE, where the status is already `transcript_status`.
+    picked_status = ", t.transcript_status" if recipe.transcript_status_column else ""
+    lead = f"CAST(t.`{recipe.transcripts_lead_id}` AS STRING)"
+    sql = f"""WITH transcripts AS (SELECT {lead} AS lead_id,
 t.`{recipe.call_id_column}` AS call_id, t.`{recipe.transcript_text_column}` AS transcript_text{status}
-FROM `{recipe.transcripts_table}` t WHERE CAST(t.`{recipe.lead_id_column}` AS STRING) IN UNNEST(@lead_ids)
+FROM `{recipe.transcripts_table}` t WHERE {lead} IN UNNEST(@lead_ids)
 AND LENGTH(t.`{recipe.transcript_text_column}`) > 0
 AND EXISTS (SELECT 1 FROM `{recipe.calls_table}` c0
 WHERE c0.`{recipe.call_id_column}` = t.`{recipe.call_id_column}`
@@ -123,7 +133,7 @@ WHERE c0.`{recipe.call_id_column}` = t.`{recipe.call_id_column}`
 QUALIFY ROW_NUMBER() OVER (PARTITION BY t.`{recipe.call_id_column}`
 ORDER BY LENGTH(t.`{recipe.transcript_text_column}`) DESC) = 1)
 SELECT t.lead_id, t.call_id, t.transcript_text, c.`{recipe.call_start_column}` AS call_start,
-c.`{recipe.call_duration_column}` AS duration{advisor}{status}
+c.`{recipe.call_duration_column}` AS duration{advisor}{picked_status}
 FROM transcripts t LEFT JOIN `{recipe.calls_table}` c ON c.`{recipe.call_id_column}` = t.call_id
 QUALIFY ROW_NUMBER() OVER (PARTITION BY t.call_id ORDER BY c.`{recipe.call_duration_column}` DESC) = 1
 ORDER BY t.lead_id, call_start ASC, t.call_id"""

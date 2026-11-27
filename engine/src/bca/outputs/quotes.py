@@ -28,6 +28,18 @@ def _normalise(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().casefold()
 
 
+_TIMESTAMP = r"\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\]"
+# A speaker line: "[0:01:02] Customer: text", or the timestamp after the label, as in
+# "Speaker Prospect - 1 [0:00:01.119]: text".
+_SPEAKER_LINE = re.compile(rf"\s*(?:{_TIMESTAMP}\s*)?([^:]+?)\s*(?:{_TIMESTAMP}\s*)?:\s*(.*)")
+# A numbered label ("Speaker Prospect - 1", "Agent 2") belongs to its configured label.
+_SPEAKER_NUMBER = re.compile(r"\s*-?\s*\d+$")
+
+
+def _speaker_in(label: str, allowed: set[str]) -> bool:
+    return label in allowed or _SPEAKER_NUMBER.sub("", label) in allowed
+
+
 def check_quote(
     quote: str, call_text: str, speaker: Speaker, speaker_labels: Mapping[str, list[str] | tuple[str, ...]]
 ) -> QuoteCheck:
@@ -35,7 +47,7 @@ def check_quote(
     lines: list[tuple[str, str]] = []
     current: tuple[str, str] | None = None
     for raw in call_text.splitlines():
-        match = re.match(r"\s*(?:\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\]\s*)?([^:]+):\s*(.*)", raw)
+        match = _SPEAKER_LINE.match(raw)
         if match:
             current = (_normalise(match.group(1)), _normalise(match.group(2)))
             lines.append(current)
@@ -51,7 +63,7 @@ def check_quote(
     def contains(text: str) -> bool:
         return bool(expected and re.search(rf"(?<!\w){re.escape(expected)}(?!\w)", text))
 
-    if any(label in allowed and contains(text) for label, text in lines):
+    if any(_speaker_in(label, allowed) and contains(text) for label, text in lines):
         return QuoteCheck(True, "exact match")
     all_text = " ".join(text for _, text in lines)
     if contains(all_text) and speaker != "any":
