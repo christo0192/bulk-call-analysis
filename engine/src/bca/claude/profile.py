@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .version import BUILTIN_PLUGINS
+
 # Confirmed in the official Claude Code settings reference (2026-11-18).
 SETTING_CONNECTORS = "disableClaudeAiConnectors"
 SETTING_SKILLS = "syncClaudeAiSkills"
@@ -15,6 +17,7 @@ SETTING_FAST = "fastMode"
 SETTING_CLEANUP = "cleanupPeriodDays"
 SETTING_ULTRACODE = "ultracode"
 SETTING_WORKFLOWS = "disableWorkflows"
+SETTING_ENABLED_PLUGINS = "enabledPlugins"
 
 # The setting names and value types below are from the Claude Code settings
 # reference. The stream shapes checked by stream.py come from the Agent SDK
@@ -57,6 +60,8 @@ class ClaudeProfile:
             SETTING_CLEANUP: self.cleanup_period_days,
             SETTING_ULTRACODE: False,
             SETTING_WORKFLOWS: True,
+            # Claude Code loads its built-in plugins unless each is switched off by name.
+            SETTING_ENABLED_PLUGINS: dict.fromkeys(BUILTIN_PLUGINS, False),
         }
         self.settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
         return self.settings_path

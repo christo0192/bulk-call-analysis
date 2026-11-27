@@ -10,6 +10,8 @@ import sys
 import time
 from pathlib import Path
 
+from bca.claude.version import PINNED_CLAUDE_VERSION
+
 
 def _config_marker() -> None:
     configured = os.environ.get("CLAUDE_CONFIG_DIR")
@@ -75,7 +77,7 @@ init: dict[str, object] = {
     "mcp_servers": [{"name": "bq", "status": "connected"}, {"name": "app", "status": "connected"}],
     "plugins": [],
     "fast_mode_state": "off",
-    "claude_code_version": "2.1.327",
+    "claude_code_version": PINNED_CLAUDE_VERSION,
 }
 init_patch = os.environ.get("FAKE_CLAUDE_INIT_PATCH")
 if init_patch:

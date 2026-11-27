@@ -51,6 +51,13 @@ its active file: `%LOCALAPPDATA%\BulkCallAnalysis` on Windows or
 it also accepts `config/site.toml` from the repository. The first-run screen
 shows where to put the file when it is missing.
 
+The app runs one Claude Code version, 2.1.332 (`engine/src/bca/claude/version.py`), because its
+safety checks were verified against that version. Install it with `claude install 2.1.332` if the
+checklist says it is missing. On first start the app makes its own copy of it in the application
+data folder and checks Anthropic's signature, so Claude's own updates do not change the version the
+app runs. The copy is a hard link: it takes no extra disk space while Claude keeps that version, and
+about 400 MB once Claude's updater has removed it. A copy that fails its checks is never started.
+
 Sign in through the official Claude Code and Codex programs when the checklist
 asks. The app does not store their sign-in tokens. Application data, logs,
 the local store, and generated projects are kept in that same application data

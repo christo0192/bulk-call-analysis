@@ -25,6 +25,7 @@ def test_profile_settings_and_empty_project(tmp_path: Path) -> None:
         "cleanupPeriodDays",
         "ultracode",
         "disableWorkflows",
+        "enabledPlugins",
     }
     assert settings["disableClaudeAiConnectors"] is True
     assert settings["syncClaudeAiSkills"] is False

@@ -13,13 +13,35 @@ from urllib.parse import urlparse
 
 from bca.signing import verify_authenticode
 
-EXPECTED_SIGNER = "Anthropic PBC"
+# The signer's name as Windows reports it (Get-AuthenticodeSignature, SimpleName), comma included.
+EXPECTED_SIGNER = "Anthropic, PBC"
 MAC_TEAM_ID = "Q6L2SF6YDW"
 OFFICIAL_HOST = "downloads.claude.ai"
 
 
 class BinaryVerificationError(RuntimeError):
     pass
+
+
+class NotEnoughSpaceError(BinaryVerificationError):
+    """The program could not be linked, and the disk has no room for a copy."""
+
+
+# Room left on the disk when the program has to be copied rather than linked.
+_COPY_MARGIN = 200 * 1024**2
+# Programs whose digest was checked in this process, by (path, size, mtime): the program is about
+# 400 MB, and hashing it before every Claude turn would add a second or more to each.
+_verified: dict[tuple[str, int, int], str] = {}
+
+
+def _sha256(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _stamp(path: Path) -> tuple[str, int, int]:
+    stat = path.stat()
+    return (str(path), stat.st_size, stat.st_mtime_ns)
 
 
 class BinaryManager:
@@ -40,11 +62,16 @@ class BinaryManager:
         if not path.is_file():
             raise BinaryVerificationError(f"verified Claude binary is missing: {path}")
         digest_path = path.with_suffix(path.suffix + ".sha256")
-        if (
-            not digest_path.is_file()
-            or hashlib.sha256(path.read_bytes()).hexdigest() != digest_path.read_text().strip()
-        ):
+        if not digest_path.is_file():
             raise BinaryVerificationError(f"Claude binary digest changed: {path}")
+        expected = digest_path.read_text().strip()
+        stamp = _stamp(path)
+        if _verified.get(stamp) != expected:
+            if _sha256(path) != expected:
+                raise BinaryVerificationError(f"Claude binary digest changed: {path}")
+            # Cached only if the file did not change while it was hashed.
+            if _stamp(path) == stamp:
+                _verified[stamp] = expected
         return path
 
     def _filename(self) -> str:
@@ -75,17 +102,18 @@ class BinaryManager:
 
     def _accept(self, path: Path, digest: str | None = None) -> Path:
         try:
-            if digest and hashlib.sha256(path.read_bytes()).hexdigest().lower() != digest.lower():
+            actual = _sha256(path)
+            if digest and actual != digest.lower():
                 raise BinaryVerificationError("Claude binary SHA-256 mismatch")
             self._verify_signature(path)
-            actual = hashlib.sha256(path.read_bytes()).hexdigest()
             path.with_suffix(path.suffix + ".sha256").write_text(actual + "\n", encoding="utf-8")
         except (OSError, BinaryVerificationError, subprocess.SubprocessError):
             path.unlink(missing_ok=True)
             raise
         return path
 
-    def install_from_local(self) -> Path:
+    def official_path(self) -> Path:
+        """Where the official installer keeps this version (~/.local/share/claude/versions)."""
         base = self.versions_dir or (
             Path(os.environ.get("USERPROFILE", str(Path.home())))
             if platform.system() == "Windows"
@@ -96,19 +124,50 @@ class BinaryManager:
             if self.versions_dir
             else base / ".local" / "share" / "claude" / "versions" / self.version
         )
-        source = source if source.is_file() else source / self._filename()
+        return source if source.is_file() else source / self._filename()
+
+    def install_from_local(self) -> Path:
+        source = self.official_path()
         if not source.is_file():
             raise BinaryVerificationError(f"official Claude version is missing: {source}")
         self.destination.mkdir(parents=True, exist_ok=True)
         target = self.destination / self._filename()
         temp = target.with_name(target.name + ".tmp")
-        shutil.copy2(source, temp)
-        if not (self._platform_name() or "").startswith("win32-"):
-            os.chmod(temp, 0o755)
+        temp.unlink(missing_ok=True)
+        try:
+            # A hard link: no second copy of the program on disk, and the app keeps its program
+            # after Claude's own updater removes this version from its folder.
+            os.link(source, temp)
+        except OSError:
+            needed = source.stat().st_size + _COPY_MARGIN
+            free = shutil.disk_usage(self.destination).free
+            if free < needed:
+                raise NotEnoughSpaceError(
+                    f"not enough disk space to copy Claude Code {self.version}: "
+                    f"{needed // 1024**2} MB needed, {free // 1024**2} MB free"
+                ) from None
+            shutil.copy2(source, temp)
+            if not (self._platform_name() or "").startswith("win32-"):
+                os.chmod(temp, 0o755)
+        # Taken before the file is hashed: the signature check takes seconds, and a file changed
+        # meanwhile must not be recorded as verified.
+        before = _stamp(temp)[1:]
         accepted = self._accept(temp)
+        digest = temp.with_suffix(temp.suffix + ".sha256")
         os.replace(accepted, target)
-        os.replace(temp.with_suffix(temp.suffix + ".sha256"), target.with_suffix(target.suffix + ".sha256"))
+        os.replace(digest, target.with_suffix(target.suffix + ".sha256"))
+        if _stamp(target)[1:] != before:
+            raise BinaryVerificationError("Claude Code changed while it was being checked")
+        _verified[_stamp(target)] = target.with_suffix(target.suffix + ".sha256").read_text().strip()
+        self._remove_other_versions()
         return target
+
+    def _remove_other_versions(self) -> None:
+        """Copies of earlier pinned versions are never run again; each is about 400 MB once the
+        official file is gone, so they are removed (one still in use is left for next time)."""
+        for folder in self.destination.parent.iterdir():
+            if folder.is_dir() and folder.name != self.version:
+                shutil.rmtree(folder, ignore_errors=True)
 
     def install_from_download(self, url_template: str, manifest_url: str) -> Path:
         self.destination.mkdir(parents=True, exist_ok=True)
