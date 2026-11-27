@@ -114,14 +114,14 @@ def test_a_copy_is_made_only_when_linking_fails_and_the_disk_has_room(
     def no_link(source: object, target: object) -> None:
         raise OSError("synthetic: links not supported here")
 
-    monkeypatch.setattr(binary.os, "link", no_link)
+    monkeypatch.setattr(os, "link", no_link)
     real_usage = shutil.disk_usage
-    monkeypatch.setattr(binary.shutil, "disk_usage", lambda path: real_usage(path)._replace(free=1024))
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: real_usage(path)._replace(free=1024))
     manager = BinaryManager(tmp_path / "app", PINNED_CLAUDE_VERSION)
     with pytest.raises(BinaryVerificationError, match="not enough disk space"):
         manager.install_from_local()
     assert not (manager.destination / manager._filename()).exists()
-    monkeypatch.setattr(binary.shutil, "disk_usage", real_usage)
+    monkeypatch.setattr(shutil, "disk_usage", real_usage)
     installed = manager.install_from_local()
     assert installed.read_bytes() == b"official program"
     assert not os.path.samefile(
